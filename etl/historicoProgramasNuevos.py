@@ -128,33 +128,11 @@ def actualizar_historico_programas_nuevos() -> None:
                 log_error(error_msg)
                 raise ValueError(error_msg)
             
-            # Filtrar filas con más de 3 meses de antigüedad
-            fecha_limite = datetime.datetime.now() - datetime.timedelta(days=90)
-            fecha_limite_str = fecha_limite.strftime("%Y-%m-%d")
-            
-            # Convertir la columna FECHA_EJECUCION a datetime para comparación
-            df_historico_existente[COLUMNA_FECHA] = pd.to_datetime(
-                df_historico_existente[COLUMNA_FECHA], errors='coerce'
-            )
-            
-            # Filtrar solo las filas con menos de 3 meses
-            df_historico_filtrado = df_historico_existente[
-                df_historico_existente[COLUMNA_FECHA] >= fecha_limite
-            ].copy()
-            
-            # Convertir de vuelta a string para mantener consistencia
-            df_historico_filtrado[COLUMNA_FECHA] = df_historico_filtrado[COLUMNA_FECHA].dt.strftime("%Y-%m-%d")
-            
-            filas_eliminadas = len(df_historico_existente) - len(df_historico_filtrado)
-            if filas_eliminadas > 0:
-                print(f"Filas eliminadas (más de 3 meses): {filas_eliminadas}")
-                log_info(f"Filas eliminadas por antigüedad (>3 meses): {filas_eliminadas}")
-            
-            # Concatenar los nuevos registros con los existentes filtrados
+            # Concatenar los nuevos registros con los existentes (sin eliminar ningún registro)
             df_historico_final = pd.concat(
-                [df_historico_filtrado, df_para_historico], ignore_index=True
+                [df_historico_existente, df_para_historico], ignore_index=True
             )
-            print(f"Total de registros en histórico (después de limpieza): {len(df_historico_final)}")
+            print(f"Total de registros en histórico: {len(df_historico_final)}")
         except Exception as e:
             error_msg = f"Error al leer el archivo histórico existente: {e}"
             log_error(error_msg)
