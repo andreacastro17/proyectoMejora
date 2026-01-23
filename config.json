@@ -1,0 +1,19 @@
+{
+  "outputs_dir": "",
+  "ref_dir": "",
+  "models_dir": "",
+  "docs_dir": "",
+  "logs_dir": "",
+  "headless": false,
+  "max_wait_download_sec": 180,
+  "_comentarios": {
+    "outputs_dir": "Ruta absoluta para outputs (ej: '\\\\servidor\\carpeta_compartida\\outputs'). Dejar vacío para usar ruta relativa al proyecto/ejecutable.",
+    "ref_dir": "Ruta absoluta para archivos de referencia. Dejar vacío para usar ruta relativa.",
+    "models_dir": "Ruta absoluta para modelos ML. Dejar vacío para usar ruta relativa.",
+    "docs_dir": "Ruta absoluta para documentación. Dejar vacío para usar ruta relativa.",
+    "logs_dir": "Ruta absoluta para logs. Dejar vacío para usar ruta relativa.",
+    "headless": "true para ejecutar Chrome sin interfaz gráfica, false para ver el navegador.",
+    "max_wait_download_sec": "Tiempo máximo de espera para descargas en segundos."
+  }
+}
+

@@ -1,0 +1,41 @@
+# Entornos virtuales
+.venv/
+venv/
+ENV/
+
+# Builds
+build/
+dist/
+*.exe
+*.pkg
+*.pyz
+*.spec
+
+# Modelos y datos grandes
+*.pkl
+*.pt
+*.bin
+
+# Cache
+__pycache__/
+*.pyc
+
+# IDEs
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+
+# Outputs y archivos generados
+outputs/
+*.xlsx
+*.xls
+*.docx
+*.pbix
+
+# Archivos temporales
+*.tmp
+*.temp
+Untitled
