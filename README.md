@@ -250,7 +250,5 @@ Ver `requirements.txt` para la lista completa.
 - El proceso de descarga puede tardar varios minutos dependiendo de la velocidad de conexión
 - El entrenamiento del modelo puede tardar varios minutos dependiendo del tamaño del dataset
 
-## Licencia
-
 
 
