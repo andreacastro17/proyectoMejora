@@ -17,6 +17,8 @@ import os
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 
 def _get_default_base_path() -> Path:
     """
@@ -43,28 +45,47 @@ def _get_config_file_path() -> Path:
     return default_base / "config.json"
 
 
+# Caché de configuración para evitar lecturas repetidas del disco
+_config_cache: dict | None = None
+_config_cache_mtime: float | None = None
+
+
 def _load_config() -> dict:
     """
     Carga la configuración desde config.json si existe.
+    Usa caché en memoria; se invalida al guardar o si cambia la fecha del archivo.
     
     Returns:
         Diccionario con la configuración, o diccionario vacío si no existe.
     """
+    global _config_cache, _config_cache_mtime
     config_file = _get_config_file_path()
-    
-    if config_file.exists():
-        try:
-            with open(config_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"[WARN] No se pudo cargar config.json: {e}. Usando valores por defecto.")
-            return {}
-    return {}
+    if not config_file.exists():
+        _config_cache = {}
+        _config_cache_mtime = None
+        return {}
+    try:
+        mtime = config_file.stat().st_mtime
+        if _config_cache is not None and _config_cache_mtime == mtime:
+            return _config_cache
+    except OSError:
+        pass
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            _config_cache = json.load(f)
+            _config_cache_mtime = config_file.stat().st_mtime if config_file.exists() else None
+            return _config_cache
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"[WARN] No se pudo cargar config.json: {e}. Usando valores por defecto.")
+        _config_cache = {}
+        _config_cache_mtime = None
+        return {}
 
 
 def _save_config(config: dict) -> bool:
     """
     Guarda la configuración en config.json.
+    Invalida la caché para que la próxima lectura use el archivo actualizado.
     
     Args:
         config: Diccionario con la configuración a guardar
@@ -72,11 +93,14 @@ def _save_config(config: dict) -> bool:
     Returns:
         True si se guardó correctamente, False en caso contrario
     """
+    global _config_cache, _config_cache_mtime
     config_file = _get_config_file_path()
     try:
         config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(config_file, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
+        _config_cache = None
+        _config_cache_mtime = None
         return True
     except Exception as e:
         print(f"[ERROR] No se pudo guardar config.json: {e}")
@@ -165,8 +189,19 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 # ========= RUTAS DE ARCHIVOS =========
 ARCHIVO_PROGRAMAS = OUTPUTS_DIR / "Programas.xlsx"
 ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos.xlsx"
-ARCHIVO_REFERENTES = REF_DIR / "referentesUnificados.xlsx"
-ARCHIVO_CATALOGO_EAFIT = REF_DIR / "catalogoOfertasEAFIT.xlsx"
+
+
+def _resolve_referencia_path(ref_dir: Path, nombre_base: str) -> Path:
+    """Resuelve ruta a referentesUnificados o catalogoOfertasEAFIT (.xlsx o .csv)."""
+    for ext in [".xlsx", ".csv"]:
+        p = ref_dir / f"{nombre_base}{ext}"
+        if p.exists():
+            return p
+    return ref_dir / f"{nombre_base}.xlsx"
+
+
+ARCHIVO_REFERENTES = _resolve_referencia_path(REF_DIR, "referentesUnificados")
+ARCHIVO_CATALOGO_EAFIT = _resolve_referencia_path(REF_DIR, "catalogoOfertasEAFIT")
 ARCHIVO_NORMALIZACION = DOCS_DIR / "normalizacionFinal.xlsx"
 
 # ========= CONFIGURACIÓN DE DESCARGA SNIES =========
@@ -175,7 +210,27 @@ DOWNLOAD_DIR = OUTPUTS_DIR  # Usar el mismo directorio de outputs
 RENAME_TO = "Programas"
 _CONFIG = _load_config()  # Cargar configuración
 HEADLESS = _CONFIG.get("headless", False)
-MAX_WAIT_DOWNLOAD_SEC = _CONFIG.get("max_wait_download_sec", 180)
+# Validación de config con valores por defecto y advertencias
+_raw_max_wait = _CONFIG.get("max_wait_download_sec", 180)
+MAX_WAIT_DOWNLOAD_SEC = max(60, int(_raw_max_wait)) if isinstance(_raw_max_wait, (int, float)) else 180
+if isinstance(_raw_max_wait, (int, float)) and int(_raw_max_wait) < 60:
+    print("[WARN] config: max_wait_download_sec debe ser >= 60. Usando 60.")
+_raw_log = str(_CONFIG.get("log_level", "INFO")).upper()
+LOG_LEVEL = _raw_log if _raw_log in ("DEBUG", "INFO", "WARNING", "ERROR") else "INFO"
+if _raw_log != LOG_LEVEL:
+    print("[WARN] config: log_level inválido. Usando INFO.")
+LOG_MAX_BYTES = max(1024 * 1024, int(_CONFIG.get("log_max_bytes", 2 * 1024 * 1024)))
+DOWNLOAD_RETRIES = max(1, int(_CONFIG.get("download_retries", 2)))
+_raw_timeout = _CONFIG.get("selenium_page_load_timeout_sec", 120)
+SELENIUM_PAGE_LOAD_TIMEOUT_SEC = max(30, int(_raw_timeout)) if isinstance(_raw_timeout, (int, float)) else 120
+try:
+    _raw_umbral = float(_CONFIG.get("umbral_referente", 0.70))
+    UMBRAL_REFERENTE = max(0.0, min(1.0, _raw_umbral))
+except (TypeError, ValueError):
+    UMBRAL_REFERENTE = 0.70
+
+# Limpieza de históricos: umbral configurable
+MAX_ARCHIVOS_HISTORICOS = max(5, int(_CONFIG.get("max_archivos_historicos", 20)))
 
 # ========= CONFIGURACIÓN DE HOJAS =========
 HOJA_PROGRAMAS = "Programas"
@@ -211,9 +266,70 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     # Recalcular rutas de archivos
     ARCHIVO_PROGRAMAS = OUTPUTS_DIR / "Programas.xlsx"
     ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos.xlsx"
-    ARCHIVO_REFERENTES = REF_DIR / "referentesUnificados.xlsx"
-    ARCHIVO_CATALOGO_EAFIT = REF_DIR / "catalogoOfertasEAFIT.xlsx"
     ARCHIVO_NORMALIZACION = DOCS_DIR / "normalizacionFinal.xlsx"
+    
+    # Funciones para detección automática de formato en archivos de referencia
+    def _cargar_archivo_referencia(base_path: Path, nombre_base: str) -> Path:
+        """
+        Busca .xlsx o .csv y devuelve la ruta encontrada.
+        Prioriza .xlsx sobre .csv si ambos existen.
+        """
+        # Priorizar .xlsx (más estructurado)
+        for ext in ['.xlsx', '.csv']:
+            archivo = base_path / f"{nombre_base}{ext}"
+            if archivo.exists():
+                return archivo
+        
+        # Si no encuentra ninguno, error específico
+        raise FileNotFoundError(
+            f"No se encontró {nombre_base}.xlsx ni {nombre_base}.csv en {base_path}"
+        )
+    
+    def _leer_datos_flexible(ruta: Path, **kwargs) -> pd.DataFrame:
+        """
+        Lee Excel o CSV automáticamente con manejo robusto.
+        """
+        if not ruta.exists():
+            raise FileNotFoundError(f"No existe el archivo: {ruta}")
+        
+        suffix = ruta.suffix.lower()
+        
+        if suffix == '.csv':
+            # Manejo robusto de CSV
+            encodings = kwargs.pop('encoding', ['utf-8', 'latin-1', 'cp1252'])
+            separators = kwargs.pop('sep', [',', ';'])
+            
+            if isinstance(encodings, str):
+                encodings = [encodings]
+            if isinstance(separators, str):
+                separators = [separators]
+            
+            # Intentar diferentes combinaciones
+            for encoding in encodings:
+                for sep in separators:
+                    try:
+                        return pd.read_csv(ruta, encoding=encoding, sep=sep, **kwargs)
+                    except Exception:
+                        continue
+            
+            # Último intento con defaults de pandas
+            return pd.read_csv(ruta, **kwargs)
+        
+        elif suffix in ['.xlsx', '.xls']:
+            return pd.read_excel(ruta, **kwargs)
+        
+        else:
+            raise ValueError(f"Formato no soportado: {suffix}")
+    
+    # Rutas dinámicas para archivos de referencia
+    try:
+        ARCHIVO_REFERENTES = _cargar_archivo_referencia(REF_DIR, "referentesUnificados")
+        ARCHIVO_CATALOGO_EAFIT = _cargar_archivo_referencia(REF_DIR, "catalogoOfertasEAFIT")
+    except FileNotFoundError as e:
+        print(f"[ERROR] {e}")
+        # Fallback a rutas por defecto (para compatibilidad)
+        ARCHIVO_REFERENTES = REF_DIR / "referentesUnificados.xlsx"
+        ARCHIVO_CATALOGO_EAFIT = REF_DIR / "catalogoOfertasEAFIT.xlsx"
     
     # Crear directorios si no existen
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -223,6 +339,91 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+
+# Exponer funciones de utilidad para uso en otros módulos
+def cargar_archivo_referencia(base_path: Path, nombre_base: str) -> Path:
+    """Busca .xlsx o .csv y devuelve la ruta encontrada."""
+    # Buscar .xlsx primero (prioridad)
+    for ext in ['.xlsx', '.csv']:
+        archivo = base_path / f"{nombre_base}{ext}"
+        if archivo.exists():
+            return archivo
+    
+    # Si no encuentra ninguno, error específico
+    raise FileNotFoundError(
+        f"No se encontró {nombre_base}.xlsx ni {nombre_base}.csv en {base_path}"
+    )
+
+def leer_datos_flexible(ruta: Path, **kwargs) -> pd.DataFrame:
+    """Lee Excel o CSV automáticamente con manejo robusto."""
+    if not ruta.exists():
+        raise FileNotFoundError(f"No existe el archivo: {ruta}")
+    
+    suffix = ruta.suffix.lower()
+    
+    if suffix == '.csv':
+        # Manejo robusto de CSV
+        encodings = kwargs.pop('encoding', ['utf-8', 'latin-1', 'cp1252'])
+        separators = kwargs.pop('sep', [',', ';'])
+        
+        if isinstance(encodings, str):
+            encodings = [encodings]
+        if isinstance(separators, str):
+            separators = [separators]
+        
+        # Intentar diferentes combinaciones
+        for encoding in encodings:
+            for sep in separators:
+                try:
+                    return pd.read_csv(ruta, encoding=encoding, sep=sep, **kwargs)
+                except Exception:
+                    continue
+        
+        # Último intento con defaults de pandas
+        return pd.read_csv(ruta, **kwargs)
+    
+    elif suffix in ['.xlsx', '.xls']:
+        return pd.read_excel(ruta, **kwargs)
+    
+    else:
+        raise ValueError(f"Formato no soportado: {suffix}")
+
+# Funciones actualizadas para obtener rutas dinámicas
+def get_archivo_referentes() -> Path:
+    """Obtiene la ruta al archivo de referentes (xlsx o csv)."""
+    return cargar_archivo_referencia(REF_DIR, "referentesUnificados")
+
+def get_archivo_catalogo_eafit() -> Path:
+    """Obtiene la ruta al archivo del catálogo EAFIT (xlsx o csv)."""
+    return cargar_archivo_referencia(REF_DIR, "catalogoOfertasEAFIT")
+
+
+# Exponer rutas de config para la GUI (evitar duplicar lógica exe/script)
+def get_config_file_path() -> Path:
+    """Ruta del archivo config.json (según se ejecute como script o .EXE)."""
+    return _get_config_file_path()
+
+def get_default_base_path() -> Path:
+    """Ruta base por defecto (carpeta del .exe o del proyecto)."""
+    return _get_default_base_path()
+
+
+# Última ejecución exitosa (guardada en config.json para la GUI)
+def get_last_success() -> tuple[str | None, float | None]:
+    """
+    Obtiene fecha y duración de la última ejecución exitosa del pipeline.
+    Returns:
+        (iso_timestamp o None, duracion_minutos o None)
+    """
+    c = _load_config()
+    return (c.get("last_success_iso"), c.get("last_success_duration_min"))
+
+def set_last_success(iso_timestamp: str, duration_minutes: float) -> bool:
+    """Guarda en config.json la última ejecución exitosa."""
+    c = _load_config()
+    c["last_success_iso"] = iso_timestamp
+    c["last_success_duration_min"] = round(duration_minutes, 2)
+    return _save_config(c)
 
 # ========= INFORMACIÓN DE DEBUG =========
 def print_config_info() -> None:

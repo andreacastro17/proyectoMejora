@@ -39,3 +39,15 @@ outputs/
 *.tmp
 *.temp
 Untitled
+
+# Backups automáticos del sistema
+*__backup_*.xlsx
+*__backup_*.csv
+*.bak
+
+# Archivos temporales de staging
+_staging/
+*__previous.xlsx
+
+# Lock files (se crean/eliminan automáticamente)
+.pipeline.lock

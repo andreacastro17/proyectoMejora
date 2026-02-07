@@ -11,8 +11,14 @@ from pathlib import Path
 import pandas as pd
 from unidecode import unidecode
 
-from etl.pipeline_logger import log_error, log_info
+from etl.pipeline_logger import log_error, log_info, log_warning
 from etl.config import ARCHIVO_PROGRAMAS, HOJA_PROGRAMAS
+from etl.exceptions_helpers import (
+    leer_excel_con_reintentos,
+    escribir_excel_con_reintentos,
+    validar_excel_basico,
+    explicar_error_archivo_abierto,
+)
 COLUMNAS_A_NORMALIZAR = [
     "NOMBRE_DEL_PROGRAMA",
     "NOMBRE_INSTITUCIÓN",
@@ -43,15 +49,46 @@ def limpiar_texto(valor: object) -> object:
     return texto
 
 
-def normalizar_programas() -> None:
-    """Normaliza las columnas configuradas en la hoja Programas."""
-    if not ARCHIVO_PROGRAMAS.exists():
-        error_msg = f"No se encontró el archivo: {ARCHIVO_PROGRAMAS}"
-        log_error(error_msg)
-        raise FileNotFoundError(error_msg)
+def normalizar_programas(df: pd.DataFrame | None = None, archivo: Path | None = None) -> pd.DataFrame:
+    """
+    Normaliza las columnas configuradas en la hoja Programas.
+    
+    Args:
+        df: DataFrame opcional. Si se proporciona, se normaliza en memoria sin leer/escribir archivo.
+        archivo: Archivo opcional. Si df es None, se lee desde este archivo (o ARCHIVO_PROGRAMAS por defecto).
+        
+    Returns:
+        DataFrame normalizado
+        
+    Si df es None, lee desde archivo y escribe de vuelta.
+    Si df se proporciona, solo normaliza y retorna (sin I/O).
+    """
+    # Si se proporciona DataFrame, trabajar en memoria
+    if df is not None:
+        df = df.copy()
+        log_info(f"Normalizando DataFrame en memoria ({len(df)} filas)")
+    else:
+        # Modo tradicional: leer desde archivo
+        archivo = archivo or ARCHIVO_PROGRAMAS
+        if not archivo.exists():
+            error_msg = f"No se encontró el archivo: {archivo}"
+            log_error(error_msg)
+            raise FileNotFoundError(error_msg)
 
-    df = pd.read_excel(ARCHIVO_PROGRAMAS, sheet_name=HOJA_PROGRAMAS)
-    log_info(f"Archivo cargado: {ARCHIVO_PROGRAMAS.name} ({len(df)} filas)")
+        # Validar que el archivo sea un Excel válido
+        es_valido, msg_error = validar_excel_basico(archivo)
+        if not es_valido:
+            log_error(f"Validación fallida: {msg_error}")
+            raise ValueError(msg_error)
+
+        # Leer con manejo robusto de errores
+        try:
+            df = leer_excel_con_reintentos(archivo, sheet_name=HOJA_PROGRAMAS)
+            log_info(f"Archivo cargado: {archivo.name} ({len(df)} filas)")
+        except PermissionError as e:
+            error_msg = explicar_error_archivo_abierto(archivo, "leer")
+            log_error(error_msg)
+            raise PermissionError(error_msg) from e
 
     columnas_faltantes = [col for col in COLUMNAS_A_NORMALIZAR if col not in df.columns]
     if columnas_faltantes:
@@ -63,22 +100,51 @@ def normalizar_programas() -> None:
         log_info(f"Advertencia: {warning_msg}")
 
     columnas_normalizadas = 0
+    # OPTIMIZACIÓN: Usar operaciones vectorizadas en lugar de .apply() donde sea posible
     for columna in COLUMNAS_A_NORMALIZAR:
         if columna in df.columns:
-            df[columna] = df[columna].apply(limpiar_texto)
-            columnas_normalizadas += 1
+            try:
+                # Optimización: operaciones vectorizadas directas
+                s = df[columna].fillna("").astype(str)
+                # Aplicar unidecode de forma más eficiente (batch processing)
+                # Para datasets grandes, procesar en chunks es más eficiente que .apply()
+                if len(s) > 100:  # Solo para datasets grandes
+                    # Procesar en chunks para mejor rendimiento
+                    chunks = [s.iloc[i:i+100] for i in range(0, len(s), 100)]
+                    s_normalized = pd.concat([
+                        pd.Series([unidecode(str(x)) if x else "" for x in chunk], index=chunk.index)
+                        for chunk in chunks
+                    ])
+                    s = s_normalized
+                else:
+                    # Para datasets pequeños, usar map es aceptable
+                    s = s.map(lambda x: unidecode(x) if x else "")
+                # Aplicar normalizaciones vectorizadas después de unidecode
+                s = s.str.lower().str.replace(r"[^a-z0-9\s]", " ", regex=True)
+                s = s.str.replace(r"\s+", " ", regex=True).str.strip()
+                df[columna] = s
+                columnas_normalizadas += 1
+            except Exception as e:
+                log_warning(f"Error al normalizar columna '{columna}': {e}. Continuando con las demás.")
+                continue
 
     log_info(f"Columnas normalizadas: {columnas_normalizadas}")
 
-    with pd.ExcelWriter(
-        ARCHIVO_PROGRAMAS,
-        mode="a",
-        if_sheet_exists="replace",
-        engine="openpyxl",
-    ) as writer:
-        df.to_excel(writer, sheet_name=HOJA_PROGRAMAS, index=False)
+    # Si se proporcionó df, solo retornar (sin escribir)
+    if df is not None and archivo is None:
+        return df
+
+    # Modo tradicional: escribir de vuelta al archivo
+    archivo = archivo or ARCHIVO_PROGRAMAS
+    try:
+        escribir_excel_con_reintentos(archivo, df, sheet_name=HOJA_PROGRAMAS)
+        log_info(f"Archivo normalizado guardado: {archivo.name}")
+    except PermissionError as e:
+        error_msg = explicar_error_archivo_abierto(archivo, "escribir")
+        log_error(error_msg)
+        raise PermissionError(error_msg) from e
     
-    log_info(f"Archivo normalizado guardado: {ARCHIVO_PROGRAMAS.name}")
+    return df
 
 
 if __name__ == "__main__":

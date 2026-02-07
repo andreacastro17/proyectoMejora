@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pickle
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
@@ -59,6 +59,10 @@ from etl.config import (
     ARCHIVO_CATALOGO_EAFIT,
     ARCHIVO_PROGRAMAS,
     HOJA_PROGRAMAS,
+    UMBRAL_REFERENTE,
+    leer_datos_flexible,
+    get_archivo_referentes,
+    get_archivo_catalogo_eafit,
 )
 
 # ========= CONFIG =========
@@ -150,18 +154,21 @@ def niveles_coinciden(nivel1: str, nivel2: str) -> bool:
     return nivel1_norm == nivel2_norm
 
 
-def cargar_referentes(archivo: Path = ARCHIVO_REFERENTES) -> pd.DataFrame:
+def cargar_referentes(archivo: Path = None) -> pd.DataFrame:
     """
     Carga el archivo de referentes unificados y prepara los datos de entrenamiento.
     
     Args:
-        archivo: Ruta al archivo Excel de referentes
+        archivo: Ruta al archivo de referentes (Excel o CSV). Si es None, usa detección automática.
         
     Returns:
         DataFrame con los referentes preparados
     """
+    if archivo is None:
+        archivo = get_archivo_referentes()
+    
     print(f"Cargando referentes desde: {archivo}")
-    df = pd.read_excel(archivo, engine='openpyxl')
+    df = leer_datos_flexible(archivo)
     
     # Filtrar solo los que tienen label=1 (son referentes confirmados)
     df = df[df['label'] == 1].copy()
@@ -207,18 +214,47 @@ def cargar_referentes(archivo: Path = ARCHIVO_REFERENTES) -> pd.DataFrame:
     return df
 
 
-def cargar_catalogo_eafit(archivo: Path = ARCHIVO_CATALOGO_EAFIT) -> pd.DataFrame:
+def cargar_catalogo_eafit(archivo: Path = None) -> pd.DataFrame:
     """
     Carga el catálogo de programas EAFIT.
     
     Args:
-        archivo: Ruta al archivo Excel del catálogo
+        archivo: Ruta al archivo del catálogo (Excel o CSV). Si es None, usa detección automática.
         
     Returns:
         DataFrame con programas EAFIT
+        
+    Raises:
+        FileNotFoundError: Si el archivo no existe
+        ValueError: Si el archivo no tiene las columnas requeridas
     """
+    if archivo is None:
+        archivo = get_archivo_catalogo_eafit()
+    
+    if not archivo.exists():
+        raise FileNotFoundError(
+            f"No se encontró el archivo del catálogo EAFIT: {archivo}\n\n"
+            "Verifica que el archivo exista en la carpeta ref/ o configura la ruta en config.json"
+        )
+    
     print(f"Cargando catálogo EAFIT desde: {archivo}")
-    df = pd.read_excel(archivo, engine='openpyxl')
+    try:
+        df = leer_datos_flexible(archivo)
+    except Exception as e:
+        raise RuntimeError(
+            f"Error al leer el catálogo EAFIT desde {archivo.name}: {e}\n\n"
+            "Verifica que el archivo sea un Excel o CSV válido y que no esté corrupto."
+        ) from e
+    
+    # Validar columnas requeridas
+    columnas_requeridas = ['Nombre Programa EAFIT', 'CAMPO_AMPLIO']
+    columnas_faltantes = [col for col in columnas_requeridas if col not in df.columns]
+    if columnas_faltantes:
+        raise ValueError(
+            f"El catálogo EAFIT no tiene las columnas requeridas: {', '.join(columnas_faltantes)}\n\n"
+            f"Columnas encontradas: {', '.join(df.columns[:10])}...\n\n"
+            "Verifica que el archivo del catálogo tenga el formato correcto."
+        )
     
     # Normalizar nombres
     df['Nombre Programa EAFIT_norm'] = df['Nombre Programa EAFIT'].apply(normalizar_texto)
@@ -348,17 +384,16 @@ def preparar_features_entrenamiento(
         for emb_ext, emb_eaf in zip(embeddings_externos, embeddings_eafit)
     ])
     
-    # Calcular similitud de campo amplio
-    similitudes_campo = np.array([
-        calcular_similitud_campo_amplio(row['CAMPO_AMPLIO_norm'], row['CAMPO_AMPLIO_EAFIT_norm'])
-        for _, row in df_referentes.iterrows()
-    ])
+    # OPTIMIZACIÓN: Calcular similitudes usando operaciones vectorizadas en lugar de iterrows()
+    # Calcular similitud de campo amplio (vectorizado)
+    campo_amplio_norm = df_referentes['CAMPO_AMPLIO_norm'].fillna('').astype(str)
+    campo_amplio_eafit_norm = df_referentes['CAMPO_AMPLIO_EAFIT_norm'].fillna('').astype(str)
+    similitudes_campo = (campo_amplio_norm == campo_amplio_eafit_norm).astype(float).values
     
-    # Calcular similitud de nivel de formación
-    similitudes_nivel = np.array([
-        calcular_similitud_nivel(row['NIVEL_DE_FORMACIÓN_norm'], row['NIVEL_DE_FORMACIÓN_EAFIT_norm'])
-        for _, row in df_referentes.iterrows()
-    ])
+    # Calcular similitud de nivel de formación (vectorizado)
+    nivel_norm = df_referentes['NIVEL_DE_FORMACIÓN_norm'].fillna('').astype(str)
+    nivel_eafit_norm = df_referentes['NIVEL_DE_FORMACIÓN_EAFIT_norm'].fillna('').astype(str)
+    similitudes_nivel = (nivel_norm == nivel_eafit_norm).astype(float).values
     
     # Combinar features: embeddings externos + similitud coseno + similitud campo + similitud nivel
     # Usamos solo los embeddings del programa externo y las similitudes como features adicionales
@@ -461,56 +496,222 @@ def entrenar_modelo(
     return modelo, metricas
 
 
+def obtener_siguiente_version_modelo() -> int:
+    """
+    Obtiene el siguiente número de versión disponible para los modelos.
+    
+    Returns:
+        Número de versión siguiente (ej: si existe v1 y v2, retorna 3)
+    """
+    versiones_existentes = []
+    
+    # Buscar todas las versiones existentes
+    for archivo in MODELS_DIR.glob("clasificador_referentes_v*.pkl"):
+        try:
+            # Extraer número de versión del nombre: clasificador_referentes_v2.pkl -> 2
+            nombre = archivo.stem  # Sin extensión
+            if "_v" in nombre:
+                num_str = nombre.split("_v")[-1]
+                versiones_existentes.append(int(num_str))
+        except (ValueError, IndexError):
+            continue
+    
+    # Si no hay versiones, empezar en v1
+    if not versiones_existentes:
+        return 1
+    
+    return max(versiones_existentes) + 1
+
+
+def listar_versiones_modelos() -> list[int]:
+    """
+    Lista todas las versiones de modelos disponibles.
+    
+    Returns:
+        Lista de números de versión ordenados (ej: [1, 2, 3])
+    """
+    versiones = []
+    
+    for archivo in MODELS_DIR.glob("clasificador_referentes_v*.pkl"):
+        try:
+            nombre = archivo.stem
+            if "_v" in nombre:
+                num_str = nombre.split("_v")[-1]
+                versiones.append(int(num_str))
+        except (ValueError, IndexError):
+            continue
+    
+    return sorted(versiones)
+
+
+def obtener_rutas_modelo_version(version: int | None = None) -> tuple[Path, Path, Path]:
+    """
+    Obtiene las rutas de los archivos de modelo para una versión específica.
+    
+    Args:
+        version: Número de versión (None = versión actual sin sufijo)
+        
+    Returns:
+        Tupla (ruta_clasificador, ruta_embeddings, ruta_encoder)
+    """
+    if version is None:
+        # Versión actual (sin sufijo)
+        return MODELO_CLASIFICADOR, MODELO_EMBEDDINGS_OBJ, ENCODER_PROGRAMAS_EAFIT
+    else:
+        # Versión numerada
+        return (
+            MODELS_DIR / f"clasificador_referentes_v{version}.pkl",
+            MODELS_DIR / f"modelo_embeddings_v{version}.pkl",
+            MODELS_DIR / f"encoder_programas_eafit_v{version}.pkl"
+        )
+
+
 def guardar_modelos(
     modelo_clasificador: RandomForestClassifier,
     modelo_embeddings: SentenceTransformer,
-    encoder: LabelEncoder
-) -> None:
+    encoder: LabelEncoder,
+    crear_version: bool = True
+) -> int:
     """
-    Guarda los modelos entrenados en disco.
+    Guarda los modelos entrenados en disco con versionado.
     
     Args:
         modelo_clasificador: Modelo RandomForest entrenado
         modelo_embeddings: Modelo de embeddings
         encoder: Encoder de labels
+        crear_version: Si True, guarda como nueva versión (vN). Si False, sobrescribe versión actual.
+        
+    Returns:
+        Número de versión guardada
     """
-    print(f"Guardando modelos en {MODELS_DIR}...")
+    if crear_version:
+        # Guardar como nueva versión
+        version = obtener_siguiente_version_modelo()
+        ruta_clasificador, ruta_embeddings, ruta_encoder = obtener_rutas_modelo_version(version)
+        print(f"Guardando modelos versión {version} en {MODELS_DIR}...")
+    else:
+        # Guardar como versión actual (sin sufijo)
+        version = None
+        ruta_clasificador, ruta_embeddings, ruta_encoder = obtener_rutas_modelo_version(None)
+        print(f"Guardando modelos (versión actual) en {MODELS_DIR}...")
     
-    with open(MODELO_CLASIFICADOR, 'wb') as f:
+    # Backup de versión anterior si existe y estamos guardando como versión actual
+    if not crear_version and MODELO_CLASIFICADOR.exists():
+        try:
+            backup_version = obtener_siguiente_version_modelo() - 1
+            if backup_version > 0:
+                ruta_backup_clasificador, ruta_backup_embeddings, ruta_backup_encoder = obtener_rutas_modelo_version(backup_version)
+                import shutil
+                shutil.copy2(MODELO_CLASIFICADOR, ruta_backup_clasificador)
+                shutil.copy2(MODELO_EMBEDDINGS_OBJ, ruta_backup_embeddings)
+                shutil.copy2(ENCODER_PROGRAMAS_EAFIT, ruta_backup_encoder)
+                print(f"Backup de versión anterior guardado como v{backup_version}")
+        except Exception as e:
+            print(f"Advertencia: No se pudo crear backup: {e}")
+    
+    with open(ruta_clasificador, 'wb') as f:
         pickle.dump(modelo_clasificador, f)
     
-    with open(MODELO_EMBEDDINGS_OBJ, 'wb') as f:
+    with open(ruta_embeddings, 'wb') as f:
         pickle.dump(modelo_embeddings, f)
     
-    with open(ENCODER_PROGRAMAS_EAFIT, 'wb') as f:
+    with open(ruta_encoder, 'wb') as f:
         pickle.dump(encoder, f)
     
+    # Si es nueva versión, también crear enlaces simbólicos a versión "actual"
+    if crear_version:
+        try:
+            import shutil
+            shutil.copy2(ruta_clasificador, MODELO_CLASIFICADOR)
+            shutil.copy2(ruta_embeddings, MODELO_EMBEDDINGS_OBJ)
+            shutil.copy2(ruta_encoder, ENCODER_PROGRAMAS_EAFIT)
+            print(f"Versión {version} también establecida como versión actual")
+        except Exception as e:
+            print(f"Advertencia: No se pudo crear enlace a versión actual: {e}")
+    
     print("Modelos guardados exitosamente.")
+    return version if crear_version else 0
 
 
-def cargar_modelos() -> tuple[RandomForestClassifier, Any, LabelEncoder]:
+def cargar_modelos(version: int | None = None) -> tuple[RandomForestClassifier, Any, LabelEncoder]:
     """
     Carga los modelos entrenados desde disco.
     
+    Args:
+        version: Número de versión a cargar (None = versión actual)
+    
     Returns:
         Tupla con (modelo_clasificador, modelo_embeddings, encoder)
+        
+    Raises:
+        FileNotFoundError: Si faltan archivos de modelos
+        pickle.UnpicklingError: Si los archivos están corruptos
+        MemoryError: Si no hay suficiente memoria para cargar los modelos
     """
-    print("Cargando modelos desde disco...")
+    ruta_clasificador, ruta_embeddings, ruta_encoder = obtener_rutas_modelo_version(version)
     
-    if not MODELO_CLASIFICADOR.exists():
+    if version:
+        print(f"Cargando modelos versión {version} desde disco...")
+    else:
+        print("Cargando modelos (versión actual) desde disco...")
+    
+    if not ruta_clasificador.exists():
         raise FileNotFoundError(
-            f"No se encontró el modelo. Ejecute primero el entrenamiento. "
-            f"Ruta esperada: {MODELO_CLASIFICADOR}"
+            f"No se encontró el modelo clasificador{' versión ' + str(version) if version else ''}. Ejecute primero el entrenamiento.\n"
+            f"Ruta esperada: {ruta_clasificador}"
+        )
+    if not ruta_embeddings.exists():
+        raise FileNotFoundError(
+            f"No se encontró el modelo de embeddings{' versión ' + str(version) if version else ''}. Ejecute primero el entrenamiento.\n"
+            f"Ruta esperada: {ruta_embeddings}"
+        )
+    if not ruta_encoder.exists():
+        raise FileNotFoundError(
+            f"No se encontró el encoder{' versión ' + str(version) if version else ''}. Ejecute primero el entrenamiento.\n"
+            f"Ruta esperada: {ruta_encoder}"
         )
     
-    with open(MODELO_CLASIFICADOR, 'rb') as f:
-        modelo_clasificador = pickle.load(f)
+    try:
+        with open(ruta_clasificador, 'rb') as f:
+            modelo_clasificador = pickle.load(f)
+    except pickle.UnpicklingError as e:
+        raise ValueError(
+            f"El archivo {ruta_clasificador.name} está corrupto o no es un modelo válido.\n\n"
+            "Solución: Reentrena el modelo ejecutando el entrenamiento nuevamente."
+        ) from e
+    except MemoryError as e:
+        raise MemoryError(
+            f"No hay suficiente memoria para cargar el modelo {ruta_clasificador.name}.\n\n"
+            "Solución: Cierra otras aplicaciones y vuelve a intentar."
+        ) from e
     
-    with open(MODELO_EMBEDDINGS_OBJ, 'rb') as f:
-        modelo_embeddings = pickle.load(f)
+    try:
+        with open(ruta_embeddings, 'rb') as f:
+            modelo_embeddings = pickle.load(f)
+    except pickle.UnpicklingError as e:
+        raise ValueError(
+            f"El archivo {ruta_embeddings.name} está corrupto o no es un modelo válido.\n\n"
+            "Solución: Reentrena el modelo ejecutando el entrenamiento nuevamente."
+        ) from e
+    except MemoryError as e:
+        raise MemoryError(
+            f"No hay suficiente memoria para cargar el modelo {ruta_embeddings.name}.\n\n"
+            "Solución: Cierra otras aplicaciones y vuelve a intentar."
+        ) from e
     
-    with open(ENCODER_PROGRAMAS_EAFIT, 'rb') as f:
-        encoder = pickle.load(f)
+    try:
+        with open(ruta_encoder, 'rb') as f:
+            encoder = pickle.load(f)
+    except pickle.UnpicklingError as e:
+        raise ValueError(
+            f"El archivo {ruta_encoder.name} está corrupto o no es un encoder válido.\n\n"
+            "Solución: Reentrena el modelo ejecutando el entrenamiento nuevamente."
+        ) from e
+    except MemoryError as e:
+        raise MemoryError(
+            f"No hay suficiente memoria para cargar el encoder {ruta_encoder.name}.\n\n"
+            "Solución: Cierra otras aplicaciones y vuelve a intentar."
+        ) from e
     
     print("Modelos cargados exitosamente.")
     return modelo_clasificador, modelo_embeddings, encoder
@@ -524,7 +725,8 @@ def clasificar_programa_nuevo(
     modelo_embeddings: Any,  # SentenceTransformer
     encoder: LabelEncoder,
     df_catalogo_eafit: pd.DataFrame,
-    top_k_candidatos: int = 20
+    top_k_candidatos: int = 20,
+    embeddings_catalogo: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """
     Clasifica un programa nuevo y determina si es referente y a qué programa EAFIT pertenece.
@@ -558,43 +760,44 @@ def clasificar_programa_nuevo(
     nivel_norm = normalizar_nivel_formacion(nivel_formacion) if nivel_formacion else ""
     
     # CRÍTICO: Filtrar catálogo EAFIT por nivel de formación
-    # Si los niveles no coinciden, NO pueden ser referentes
-    if nivel_norm:
-        df_candidatos = df_catalogo_eafit[
-            df_catalogo_eafit['NIVEL_DE_FORMACIÓN_norm'] == nivel_norm
-        ].copy()
-        
-        if len(df_candidatos) == 0:
-            # No hay ningún programa EAFIT con el mismo nivel
-            return {
-                'es_referente': False,
-                'probabilidad': 0.0,
-                'programa_eafit_codigo': None,
-                'programa_eafit_nombre': None,
-                'similitud_embedding': 0.0,
-                'similitud_campo': 0.0,
-                'similitud_nivel': 0.0,
-                'razon_no_referente': f'Nivel de formación "{nivel_norm}" no coincide con ningún programa EAFIT',
-                'top_5_matches': []
-            }
-    else:
-        # Si no se proporciona nivel, usar todos (pero esto no debería pasar)
+    mask_nivel = (
+        df_catalogo_eafit['NIVEL_DE_FORMACIÓN_norm'] == nivel_norm
+        if nivel_norm
+        else np.ones(len(df_catalogo_eafit), dtype=bool)
+    )
+    if nivel_norm and not mask_nivel.any():
+        return {
+            'es_referente': False,
+            'probabilidad': 0.0,
+            'programa_eafit_codigo': None,
+            'programa_eafit_nombre': None,
+            'similitud_embedding': 0.0,
+            'similitud_campo': 0.0,
+            'similitud_nivel': 0.0,
+            'razon_no_referente': f'Nivel de formación "{nivel_norm}" no coincide con ningún programa EAFIT',
+            'top_5_matches': []
+        }
+    df_candidatos = df_catalogo_eafit.loc[mask_nivel].copy()
+    candidato_iloc = np.where(mask_nivel)[0]
+    if not nivel_norm:
         print("ADVERTENCIA: No se proporcionó nivel de formación. Evaluando todos los candidatos.")
-        df_candidatos = df_catalogo_eafit.copy()
-    
+
     # Generar embedding del programa nuevo
     embedding_programa = modelo_embeddings.encode(
         [nombre_norm],
         convert_to_numpy=True
     )
-    
-    # Pre-calcular embeddings de programas EAFIT candidatos (solo los del mismo nivel)
-    nombres_eafit = df_candidatos['Nombre Programa EAFIT_norm'].tolist()
-    embeddings_eafit = modelo_embeddings.encode(
-        nombres_eafit,
-        convert_to_numpy=True,
-        show_progress_bar=False
-    )
+
+    # Usar embeddings precalculados del catálogo si están disponibles; si no, calcular
+    if embeddings_catalogo is not None and len(embeddings_catalogo) == len(df_catalogo_eafit):
+        embeddings_eafit = embeddings_catalogo[candidato_iloc]
+    else:
+        nombres_eafit = df_candidatos['Nombre Programa EAFIT_norm'].tolist()
+        embeddings_eafit = modelo_embeddings.encode(
+            nombres_eafit,
+            convert_to_numpy=True,
+            show_progress_bar=False
+        )
     
     # Calcular similitudes coseno con candidatos EAFIT
     similitudes = cosine_similarity(embedding_programa, embeddings_eafit)[0]
@@ -664,7 +867,7 @@ def clasificar_programa_nuevo(
     # Determinar si es referente (umbral ajustable)
     # VALIDACIÓN CRÍTICA: El nivel DEBE coincidir obligatoriamente
     # Si el nivel no coincide, automáticamente NO es referente, sin importar la probabilidad
-    umbral_referente = 0.70  # Ajustable según calibración
+    umbral_referente = UMBRAL_REFERENTE  # Ajustable desde config.json ("umbral_referente")
     
     if mejor_match:
         nivel_coincide = mejor_match.get('similitud_nivel', 0.0) == 1.0
@@ -692,22 +895,33 @@ def clasificar_programa_nuevo(
 
 
 def clasificar_programas_nuevos(
-    archivo_programas: Path = ARCHIVO_PROGRAMAS,
-    hoja: str = HOJA_PROGRAMAS
+    archivo_programas: Path | None = None,
+    hoja: str = HOJA_PROGRAMAS,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    df_programas: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Clasifica todos los programas nuevos del archivo Programas.xlsx.
-    
+
     Args:
-        archivo_programas: Ruta al archivo Excel con programas
+        archivo_programas: Ruta al archivo Excel con programas (si df_programas es None)
         hoja: Nombre de la hoja
-        
+        progress_callback: Opcional. Se llama con (actual, total, nombre_programa) cada 10 programas.
+        df_programas: DataFrame opcional. Si se proporciona, se clasifica en memoria sin leer archivo.
+
     Returns:
         DataFrame con resultados de clasificación
     """
-    print(f"Cargando programas desde: {archivo_programas}")
-    df_programas = pd.read_excel(archivo_programas, sheet_name=hoja)
-    log_info(f"Archivo de programas cargado: {archivo_programas.name}")
+    # Si se proporciona DataFrame, trabajar en memoria
+    if df_programas is not None:
+        df_programas = df_programas.copy()
+        log_info(f"Clasificando DataFrame en memoria ({len(df_programas)} filas)")
+    else:
+        # Modo tradicional: leer desde archivo
+        archivo_programas = archivo_programas or ARCHIVO_PROGRAMAS
+        print(f"Cargando programas desde: {archivo_programas}")
+        df_programas = pd.read_excel(archivo_programas, sheet_name=hoja)
+        log_info(f"Archivo de programas cargado: {archivo_programas.name}")
     
     # Filtrar solo programas nuevos
     if 'PROGRAMA_NUEVO' not in df_programas.columns:
@@ -734,26 +948,56 @@ def clasificar_programas_nuevos(
     
     # Cargar catálogo EAFIT
     df_catalogo_eafit = cargar_catalogo_eafit()
-    
+    # Precalcular embeddings del catálogo una sola vez (evita recalcular por cada programa nuevo)
+    print("Precalculando embeddings del catálogo EAFIT...")
+    textos_catalogo = df_catalogo_eafit['Nombre Programa EAFIT_norm'].astype(str).tolist()
+    try:
+        embeddings_catalogo = modelo_embeddings.encode(
+            textos_catalogo,
+            show_progress_bar=True,
+            batch_size=32,
+            convert_to_numpy=True,
+        )
+        log_info("Embeddings del catálogo EAFIT precalculados.")
+    except MemoryError as e:
+        error_msg = (
+            f"No hay suficiente memoria para precalcular embeddings del catálogo ({len(textos_catalogo)} programas).\n\n"
+            "Solución:\n"
+            "1. Cierra otras aplicaciones que consuman memoria\n"
+            "2. Reduce el tamaño del catálogo si es posible\n"
+            "3. Procesa en lotes más pequeños (requiere modificar el código)"
+        )
+        log_error(error_msg)
+        raise MemoryError(error_msg) from e
+
+    # OPTIMIZACIÓN: Usar itertuples() en lugar de iterrows() para mejor rendimiento
     # Clasificar cada programa nuevo
     resultados = []
+    total_nuevos = len(df_nuevos)
     
-    for idx, row in df_nuevos.iterrows():
-        nombre_programa = row.get('NOMBRE_DEL_PROGRAMA', '')
-        campo_amplio = row.get('CINE_F_2013_AC_CAMPO_AMPLIO', None)
-        nivel_formacion = row.get('NIVEL_DE_FORMACIÓN', None)
-        
-        if pd.isna(nombre_programa) or not nombre_programa:
-            continue
+    # Filtrar filas con nombre válido antes del loop (optimización)
+    mask_nombres_validos = (
+        df_nuevos['NOMBRE_DEL_PROGRAMA'].notna() & 
+        (df_nuevos['NOMBRE_DEL_PROGRAMA'].astype(str).str.strip() != '')
+    )
+    df_nuevos_validos = df_nuevos[mask_nombres_validos].copy()
+    
+    # Usar itertuples() que es más rápido que iterrows()
+    for num, row_tuple in enumerate(df_nuevos_validos.itertuples(), start=1):
+        idx = row_tuple.Index
+        nombre_programa = getattr(row_tuple, 'NOMBRE_DEL_PROGRAMA', '')
+        campo_amplio = getattr(row_tuple, 'CINE_F_2013_AC_CAMPO_AMPLIO', None)
+        nivel_formacion = getattr(row_tuple, 'NIVEL_DE_FORMACIÓN', None)
         
         resultado = clasificar_programa_nuevo(
-            nombre_programa,
-            campo_amplio,
-            nivel_formacion,
+            str(nombre_programa),
+            str(campo_amplio) if campo_amplio else None,
+            str(nivel_formacion) if nivel_formacion else None,
             modelo_clasificador,
             modelo_embeddings,
             encoder,
-            df_catalogo_eafit
+            df_catalogo_eafit,
+            embeddings_catalogo=embeddings_catalogo,
         )
         
         # VALIDACIÓN CRÍTICA: Comparar directamente los campos NIVEL_DE_FORMACIÓN
@@ -820,8 +1064,13 @@ def clasificar_programas_nuevos(
                     f"no tiene NIVEL_DE_FORMACIÓN"
                 )
         
+        if progress_callback and (num % 10 == 0 or num == total_nuevos):
+            try:
+                progress_callback(num, total_nuevos, str(nombre_programa)[:80])
+            except Exception:
+                pass
         resultados.append({
-            'CÓDIGO_SNIES_DEL_PROGRAMA': row.get('CÓDIGO_SNIES_DEL_PROGRAMA'),
+            'CÓDIGO_SNIES_DEL_PROGRAMA': getattr(row_tuple, 'CÓDIGO_SNIES_DEL_PROGRAMA', None),
             'NOMBRE_DEL_PROGRAMA': nombre_programa,
             'NIVEL_FORMACION': nivel_formacion,
             'ES_REFERENTE': 'Sí' if es_referente_final else 'No',
@@ -834,7 +1083,7 @@ def clasificar_programas_nuevos(
         })
         
         if (len(resultados) % 10) == 0:
-            print(f"Procesados {len(resultados)}/{len(df_nuevos)} programas...")
+            print(f"Procesados {len(resultados)}/{total_nuevos} programas...")
     
     df_resultados = pd.DataFrame(resultados)
     
@@ -858,7 +1107,25 @@ def clasificar_programas_nuevos(
             df_programas.loc[mask, 'SIMILITUD_CAMPO'] = resultado['SIMILITUD_CAMPO']
             df_programas.loc[mask, 'SIMILITUD_NIVEL'] = resultado.get('SIMILITUD_NIVEL', 0.0)
     
-    # Guardar archivo actualizado
+    # Si se proporcionó df_programas, solo retornar (sin escribir)
+    if df_programas is not None and archivo_programas is None:
+        total_nuevos = len(df_nuevos)
+        referentes = df_resultados['ES_REFERENTE'].value_counts().get('Sí', 0)
+        no_referentes = df_resultados['ES_REFERENTE'].value_counts().get('No', 0)
+        
+        print(f"\nClasificación completada:")
+        print(f"Total de programas nuevos: {total_nuevos}")
+        print(f"Programas clasificados como referentes: {referentes}")
+        print(f"Programas no referentes: {no_referentes}")
+        
+        log_resultado(f"Total de programas nuevos clasificados: {total_nuevos}")
+        log_resultado(f"Programas clasificados como referentes: {referentes}")
+        log_resultado(f"Programas no referentes: {no_referentes}")
+        
+        return df_programas
+    
+    # Modo tradicional: escribir de vuelta al archivo
+    archivo_programas = archivo_programas or ARCHIVO_PROGRAMAS
     print(f"Guardando resultados en {archivo_programas}...")
     with pd.ExcelWriter(
         archivo_programas,
@@ -881,7 +1148,7 @@ def clasificar_programas_nuevos(
     log_resultado(f"Programas clasificados como referentes: {referentes}")
     log_resultado(f"Programas no referentes: {no_referentes}")
     
-    return df_resultados
+    return df_programas
 
 
 def entrenar_y_guardar_modelo() -> None:
@@ -907,12 +1174,12 @@ def entrenar_y_guardar_modelo() -> None:
     # Entrenar modelo
     modelo_clasificador, metricas = entrenar_modelo(features, labels)
     
-    # Guardar modelos
-    guardar_modelos(modelo_clasificador, modelo_embeddings, encoder)
+    # Guardar modelos (crear nueva versión)
+    version = guardar_modelos(modelo_clasificador, modelo_embeddings, encoder, crear_version=True)
     
     print("\n=== ENTRENAMIENTO COMPLETADO ===")
     print(f"Accuracy: {metricas['accuracy']:.4f}")
-    print(f"Modelos guardados en: {MODELS_DIR}")
+    print(f"Modelos guardados en: {MODELS_DIR} (versión {version})")
 
 
 if __name__ == "__main__":

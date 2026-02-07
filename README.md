@@ -92,19 +92,63 @@ Los scripts utilizan rutas absolutas configuradas internamente. Si necesitas cam
 
 ### Ejecución Completa del Pipeline
 
-Para ejecutar todo el proceso de extremo a extremo:
+Para ejecutar el sistema (abre el **Menú Principal**):
 
-```bash
+cls```bash
 python app/main.py
 ```
 
-Este comando ejecuta los siguientes pasos en orden:
+Desde el menú puedes:
 
-1. **Resguardo de históricos**: Mueve archivos existentes a la carpeta `outputs/historico/`
-2. **Descarga de Programas SNIES**: Descarga el archivo más reciente desde el portal SNIES
+- Ejecutar el **análisis SNIES** (pipeline)
+- Hacer **ajustes manuales** (gestión de falsos positivos) sobre `outputs/Programas.xlsx`
+- Editar el dataset de entrenamiento y **reentrenar el modelo**
+- Hacer **consolidación (merge)** entre el archivo actual y un histórico
+
+### Flujo de uso recomendado
+
+1. **Entrar a la app** y abrir el menú principal (una sola ventana).
+2. **Ejecutar el análisis SNIES (Pipeline)**: descarga datos del SNIES, normaliza, detecta programas nuevos y, con la oferta de programas EAFIT (`ref/catalogoOfertasEAFIT`), la IA clasifica cada programa nuevo: si es **referente** o no, qué **programa EAFIT** le corresponde y la **probabilidad**.
+3. **Revisar el resultado** en **“Gestión de falsos positivos / ajuste manual”**: se muestra la combinación programa SNIES + es referente (sí/no) + nombre/código programa EAFIT + probabilidad. El usuario puede **confirmar o corregir** cuando la clasificación se equivoca y guardar los cambios.
+4. **Reentrenar el modelo** (opcional): a partir de las correcciones o del archivo de referentes (`ref/referentesUnificados`), se puede reentrenar el modelo para mejorar futuras clasificaciones.
+5. **Consolidación (Merge)** (cuando se necesite): unir `Programas.xlsx` con un histórico para generar el Excel final.
+
+Cuando ejecutas el análisis SNIES, se ejecutan los siguientes pasos en orden:
+
+1. **Resguardo de históricos (condicional)**: Solo si se logra obtener una versión nueva de `Programas.xlsx`, el archivo anterior se mueve a `outputs/historico/`
+2. **Descarga de Programas SNIES**: Descarga el archivo más reciente desde el portal SNIES (Selenium). Si falla, el pipeline aborta **sin modificar archivos** para evitar usar información potencialmente desactualizada.
 3. **Normalización de columnas**: Normaliza y limpia los textos de las columnas principales
-4. **Procesamiento de programas nuevos**: Identifica programas nuevos comparando con archivos históricos
-5. **Clasificación de programas nuevos**: Clasifica los programas nuevos usando el modelo ML
+4. **Procesamiento de programas nuevos**: Identifica programas nuevos comparando con archivos históricos (columna `PROGRAMA_NUEVO`)
+5. **Clasificación de programas nuevos**: Compara cada programa nuevo con la oferta EAFIT (catálogo) y asigna, mediante el modelo ML, si es referente, el programa EAFIT correspondiente y la probabilidad (`ES_REFERENTE`, `PROGRAMA_EAFIT_CODIGO`, `PROGRAMA_EAFIT_NOMBRE`, `PROBABILIDAD`)
+6. **Normalización final**: Aplica normalización de ortografía y formato
+7. **Actualización de histórico de programas nuevos**: Agrega los programas nuevos detectados a `outputs/HistoricoProgramasNuevos.xlsx`
+8. **Limpieza automática de archivos históricos**: Si hay más de 20 archivos en `outputs/historico/`, los consolida en `HistoricoProgramasNuevos.xlsx` y elimina los archivos individuales para evitar que la carpeta se llene
+
+### Comportamiento cuando falla la descarga
+
+La etapa de descarga (`etl/descargaSNIES.py`) está diseñada para **no modificar archivos existentes si no se puede obtener una versión nueva**:
+
+- **SNIES OK (WEB_SNIES)**:
+  - Se genera una nueva versión de `outputs/Programas.xlsx`
+  - El archivo anterior (si existía) se mueve a `outputs/historico/`
+  - Se registra `FUENTE_DATOS = WEB_SNIES`
+
+- **SNIES falla**:
+  - **No se realizan cambios** sobre `outputs/Programas.xlsx` ni se mueven archivos a histórico
+  - El pipeline se detiene y deja el error registrado en `logs/pipeline.log`
+
+### Limpieza automática de archivos históricos
+
+Para evitar que la carpeta `outputs/historico/` se llene de muchos archivos `.xlsx`, el sistema incluye una **limpieza automática**:
+
+- **Automática**: Al finalizar cada ejecución del pipeline, si hay más de **20 archivos** en `outputs/historico/`, se consolidan automáticamente en `outputs/HistoricoProgramasNuevos.xlsx` y se eliminan los archivos individuales.
+- **Manual**: Desde el menú principal, botón **"Limpiar archivos históricos"** en la sección de utilidades. Esto consolida todos los archivos históricos (sin umbral mínimo) y los elimina después de consolidarlos.
+
+La consolidación:
+- Lee todos los archivos `.xlsx` de `outputs/historico/`
+- Extrae todos los programas de cada archivo
+- Los agrega a `HistoricoProgramasNuevos.xlsx` (eliminando duplicados)
+- Elimina los archivos históricos individuales consolidados
 
 ### Ejecución de Componentes Individuales
 
@@ -180,7 +224,7 @@ Para clasificar un programa nuevo:
 2. Se filtra el catálogo EAFIT solo a programas con el mismo nivel
 3. Se generan embeddings y se calculan similitudes
 4. Se evalúan los top K candidatos con el modelo completo
-5. Se determina si es referente basado en un umbral de probabilidad (por defecto: 0.4)
+5. Se determina si es referente basado en un umbral de probabilidad (por defecto: 0.70; configurable en `config.json` con `umbral_referente`)
 
 ## Archivos de Salida
 

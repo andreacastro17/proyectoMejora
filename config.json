@@ -14,6 +14,8 @@
     "logs_dir": "Ruta absoluta para logs. Dejar vacío para usar ruta relativa.",
     "headless": "true para ejecutar Chrome sin interfaz gráfica, false para ver el navegador.",
     "max_wait_download_sec": "Tiempo máximo de espera para descargas en segundos."
-  }
+  },
+  "base_dir": "C:\\Users\\Usuario\\Desktop\\Universidad\\Semestre 1-2026\\Practicas EAFIT\\proyectoMejora",
+  "last_success_iso": "2026-02-06T08:36:22.741352",
+  "last_success_duration_min": 4.53
 }
-

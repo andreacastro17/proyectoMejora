@@ -9,13 +9,18 @@ import os
 from pathlib import Path
 
 import pandas as pd
+from rapidfuzz import fuzz
+from rapidfuzz import process as rf_process
 
-from etl.pipeline_logger import log_error, log_info, log_resultado
+from etl.pipeline_logger import log_error, log_info, log_resultado, log_warning
 from etl.config import ARCHIVO_PROGRAMAS, HISTORIC_DIR, HOJA_PROGRAMAS
+from etl.exceptions_helpers import (
+    leer_excel_con_reintentos,
+    escribir_excel_con_reintentos,
+    validar_excel_basico,
+    explicar_error_archivo_abierto,
+)
 
-# Rutas de configuración (usando alias para compatibilidad con código existente)
-ARCHIVO_PROGRAMAS_ACTUAL = ARCHIVO_PROGRAMAS
-DIRECTORIO_HISTORICO = HISTORIC_DIR
 COLUMNA_ID = "CÓDIGO_SNIES_DEL_PROGRAMA"
 COLUMNA_NUEVO = "PROGRAMA_NUEVO"
 
@@ -42,21 +47,47 @@ def obtener_ultimo_archivo_historico(directorio: Path) -> Path | None:
     return archivos_xlsx[0]
 
 
-def procesar_programas_nuevos() -> None:
+def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | None = None) -> pd.DataFrame:
     """
     Compara el archivo actual de Programas.xlsx con el último archivo histórico
     y agrega una columna indicando si el programa es nuevo o no.
-    """
-    # Verificar que existe el archivo actual
-    if not ARCHIVO_PROGRAMAS_ACTUAL.exists():
-        error_msg = f"No se encontró el archivo: {ARCHIVO_PROGRAMAS_ACTUAL}"
-        log_error(error_msg)
-        raise FileNotFoundError(error_msg)
     
-    # Leer el archivo actual
-    print(f"Leyendo archivo actual: {ARCHIVO_PROGRAMAS_ACTUAL}")
-    df_actual = pd.read_excel(ARCHIVO_PROGRAMAS_ACTUAL, sheet_name=HOJA_PROGRAMAS)
-    log_info(f"Archivo actual cargado: {ARCHIVO_PROGRAMAS_ACTUAL.name}")
+    Args:
+        df: DataFrame opcional. Si se proporciona, se procesa en memoria sin leer/escribir archivo.
+        archivo: Archivo opcional. Si df es None, se lee desde este archivo (o ARCHIVO_PROGRAMAS por defecto).
+        
+    Returns:
+        DataFrame procesado
+        
+    Si df es None, lee desde archivo y escribe de vuelta.
+    Si df se proporciona, solo procesa y retorna (sin I/O).
+    """
+    # Si se proporciona DataFrame, trabajar en memoria
+    if df is not None:
+        df_actual = df.copy()
+        log_info(f"Procesando DataFrame en memoria ({len(df_actual)} filas)")
+    else:
+        # Modo tradicional: leer desde archivo
+        archivo = archivo or ARCHIVO_PROGRAMAS
+        if not archivo.exists():
+            error_msg = f"No se encontró el archivo: {archivo}"
+            log_error(error_msg)
+            raise FileNotFoundError(error_msg)
+        
+        # Validar y leer el archivo actual con manejo robusto
+        print(f"Leyendo archivo actual: {archivo}")
+        es_valido, msg_error = validar_excel_basico(archivo)
+        if not es_valido:
+            log_error(f"Validación fallida del archivo actual: {msg_error}")
+            raise ValueError(msg_error)
+        
+        try:
+            df_actual = leer_excel_con_reintentos(archivo, sheet_name=HOJA_PROGRAMAS)
+            log_info(f"Archivo actual cargado: {archivo.name}")
+        except PermissionError as e:
+            error_msg = explicar_error_archivo_abierto(archivo, "leer")
+            log_error(error_msg)
+            raise PermissionError(error_msg) from e
     
     # Eliminar filas vacías (donde todas las columnas son nulas)
     filas_antes = len(df_actual)
@@ -81,20 +112,92 @@ def procesar_programas_nuevos() -> None:
             "(incluyendo notas y filas vacías en la columna de identificación)."
         )
     
-    # Obtener el último archivo histórico
-    archivo_historico = obtener_ultimo_archivo_historico(DIRECTORIO_HISTORICO)
+    fuente = "WEB_SNIES"
+    if len(df_actual) > 0 and "FUENTE_DATOS" in df_actual.columns:
+        try:
+            fuente = str(df_actual["FUENTE_DATOS"].iloc[0])
+        except Exception:
+            fuente = "WEB_SNIES"
+    if "FUENTE_DATOS" not in df_actual.columns:
+        df_actual["FUENTE_DATOS"] = fuente
     
+    if "MATCH_SCORE" not in df_actual.columns:
+        df_actual["MATCH_SCORE"] = 0.0
+    if "COINCIDE_HISTORICO" not in df_actual.columns:
+        df_actual["COINCIDE_HISTORICO"] = ""
+    if "REQUIERE_VALIDACION" not in df_actual.columns:
+        df_actual["REQUIERE_VALIDACION"] = False
+ 
+    # OPTIMIZACIÓN: Normalizar código usando operaciones vectorizadas en lugar de .apply()
+    # Normalizar: convertir a string, eliminar espacios, mayúsculas, y quitar .0 de números
+    codigos_str = df_actual[COLUMNA_ID].fillna("").astype(str)
+    codigos_normalizados = codigos_str.str.strip().str.upper()
+    # Remover .0 al final usando operación vectorizada
+    codigos_normalizados = codigos_normalizados.str.replace(r'\.0$', '', regex=True)
+    df_actual['_codigo_normalizado'] = codigos_normalizados
+ 
+    # Obtener el último archivo histórico
+    archivo_historico = obtener_ultimo_archivo_historico(HISTORIC_DIR)
+
     if archivo_historico is None:
-        warning_msg = "No se encontró ningún archivo histórico. No se realizará ningún procesamiento."
-        print(warning_msg)
-        log_info(warning_msg)
+        df_actual[COLUMNA_NUEVO] = "Sí"
+        df_actual["COINCIDE_HISTORICO"] = "SIN_HISTORICO"
+        df_actual["MATCH_SCORE"] = 0.0
+        df_actual["REQUIERE_VALIDACION"] = False
+        df_actual = df_actual.drop(columns=['_codigo_normalizado'])
+ 
+        total = len(df_actual)
+        log_resultado(f"Filas procesadas: {total}. Fuente: {fuente}. Requieren Validación: 0")
+        print(f"Guardando archivo actualizado: {ARCHIVO_PROGRAMAS}")
+        try:
+            escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
+            log_info(f"Archivo actualizado guardado: {ARCHIVO_PROGRAMAS.name}")
+            print("Procesamiento completado exitosamente.")
+        except PermissionError as e:
+            error_msg = explicar_error_archivo_abierto(ARCHIVO_PROGRAMAS, "escribir")
+            log_error(error_msg)
+            raise PermissionError(error_msg) from e
         return
     
     print(f"Leyendo archivo histórico: {archivo_historico.name}")
     print(f"Ruta completa: {archivo_historico}")
     log_info(f"Archivo histórico cargado: {archivo_historico.name}")
-    # Leer el archivo histórico
-    df_historico = pd.read_excel(archivo_historico, sheet_name=HOJA_PROGRAMAS)
+    # Validar y leer el archivo histórico con manejo robusto
+    es_valido_hist, msg_error_hist = validar_excel_basico(archivo_historico)
+    if not es_valido_hist:
+        log_warning(f"El archivo histórico {archivo_historico.name} no es válido: {msg_error_hist}")
+        log_warning("Marcando todos los programas como nuevos (sin histórico válido).")
+        df_actual[COLUMNA_NUEVO] = "Sí"
+        df_actual["COINCIDE_HISTORICO"] = "HISTORICO_INVALIDO"
+        df_actual["MATCH_SCORE"] = 0.0
+        df_actual["REQUIERE_VALIDACION"] = False
+        df_actual = df_actual.drop(columns=['_codigo_normalizado'])
+        try:
+            escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
+            log_info(f"Archivo actualizado guardado: {ARCHIVO_PROGRAMAS.name}")
+        except PermissionError as e:
+            error_msg = explicar_error_archivo_abierto(ARCHIVO_PROGRAMAS, "escribir")
+            log_error(error_msg)
+            raise PermissionError(error_msg) from e
+        return
+    
+    try:
+        df_historico = leer_excel_con_reintentos(archivo_historico, sheet_name=HOJA_PROGRAMAS)
+    except PermissionError:
+        log_warning(f"El archivo histórico {archivo_historico.name} está abierto. Marcando todos como nuevos.")
+        df_actual[COLUMNA_NUEVO] = "Sí"
+        df_actual["COINCIDE_HISTORICO"] = "HISTORICO_BLOQUEADO"
+        df_actual["MATCH_SCORE"] = 0.0
+        df_actual["REQUIERE_VALIDACION"] = False
+        df_actual = df_actual.drop(columns=['_codigo_normalizado'])
+        try:
+            escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
+            log_info(f"Archivo actualizado guardado: {ARCHIVO_PROGRAMAS.name}")
+        except PermissionError as e:
+            error_msg = explicar_error_archivo_abierto(ARCHIVO_PROGRAMAS, "escribir")
+            log_error(error_msg)
+            raise PermissionError(error_msg) from e
+        return
     
     # Eliminar filas vacías (donde todas las columnas son nulas)
     filas_antes_hist = len(df_historico)
@@ -105,29 +208,39 @@ def procesar_programas_nuevos() -> None:
     
     # Verificar que existe la columna de ID en el histórico
     if COLUMNA_ID not in df_historico.columns:
-        print(
-            f"Advertencia: No se encontró la columna '{COLUMNA_ID}' en el archivo histórico. "
-            "No se realizará ningún procesamiento."
-        )
-        return
+        df_actual[COLUMNA_NUEVO] = "Sí"
+        df_actual["COINCIDE_HISTORICO"] = "ERROR_HISTORICO"
+        df_actual["MATCH_SCORE"] = 0.0
+        df_actual["REQUIERE_VALIDACION"] = True
+        df_actual = df_actual.drop(columns=['_codigo_normalizado'])
+
+        total = len(df_actual)
+        requiere_validacion = int(df_actual["REQUIERE_VALIDACION"].fillna(False).astype(bool).sum())
+        log_resultado(f"Filas procesadas: {total}. Fuente: {fuente}. Requieren Validación: {requiere_validacion}")
+        
+        # Si se está trabajando en memoria (df proporcionado), retornar el DataFrame
+        if df is not None:
+            return df_actual
+        
+        # Si se está trabajando con archivo, escribir y retornar None (no se usa)
+        print(f"Guardando archivo actualizado: {ARCHIVO_PROGRAMAS}")
+        try:
+            escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
+            log_info(f"Archivo actualizado guardado: {ARCHIVO_PROGRAMAS.name}")
+            print("Procesamiento completado exitosamente.")
+        except PermissionError as e:
+            error_msg = explicar_error_archivo_abierto(ARCHIVO_PROGRAMAS, "escribir")
+            log_error(error_msg)
+            raise PermissionError(error_msg) from e
+        return None
     
     # Eliminar filas donde CÓDIGO_SNIES_DEL_PROGRAMA está vacío en el histórico
     df_historico = df_historico.dropna(subset=[COLUMNA_ID])
     
+    # OPTIMIZACIÓN: Normalizar códigos históricos usando operaciones vectorizadas
     # Obtener el conjunto de IDs del archivo histórico
-    # Normalizar: convertir a string, eliminar espacios, mayúsculas, y quitar .0 de números
-    def normalizar_codigo(valor) -> str:
-        """Normaliza un código SNIES para comparación."""
-        if pd.isna(valor):
-            return ""
-        # Convertir a string y limpiar
-        codigo = str(valor).strip().upper()
-        # Si termina en .0 (de conversión float), quitarlo
-        if codigo.endswith('.0'):
-            codigo = codigo[:-2]
-        return codigo
-    
-    ids_historicos_raw = df_historico[COLUMNA_ID].dropna().apply(normalizar_codigo)
+    codigos_hist_str = df_historico[COLUMNA_ID].dropna().astype(str)
+    ids_historicos_raw = codigos_hist_str.str.strip().str.upper().str.replace(r'\.0$', '', regex=True)
     # Filtrar strings "nan", "none", etc. que pueden aparecer de conversiones
     ids_historicos = {
         codigo for codigo in ids_historicos_raw 
@@ -138,18 +251,84 @@ def procesar_programas_nuevos() -> None:
     if len(ids_historicos) > 0:
         print(f"Ejemplo de códigos históricos (primeros 5): {list(ids_historicos)[:5]}")
     
-    # Normalizar los códigos del archivo actual de la misma manera para comparar
-    df_actual['_codigo_normalizado'] = df_actual[COLUMNA_ID].apply(normalizar_codigo)
-    
-    # Crear la columna de programas nuevos
-    # Si el ID normalizado no está en el histórico, es nuevo (Sí), si está, no es nuevo (No)
-    # Filtrar también valores inválidos como "nan", "none", etc.
-    def es_valido_y_nuevo(codigo: str) -> str:
-        if not codigo or codigo in ('NAN', 'NONE', 'NULL', '') or codigo.isspace():
-            return "No"  # Códigos inválidos no se consideran nuevos
-        return "Sí" if codigo not in ids_historicos else "No"
-    
-    df_actual[COLUMNA_NUEVO] = df_actual['_codigo_normalizado'].apply(es_valido_y_nuevo)
+    fuente_es_api = str(fuente).strip().upper().startswith("API_DATOS_GOV")
+ 
+    # OPTIMIZACIÓN: Usar operación vectorizada en lugar de .apply()
+    # Crear máscara vectorizada para programas nuevos
+    codigos_norm = df_actual['_codigo_normalizado']
+    mask_valido = (
+        codigos_norm.notna() & 
+        (codigos_norm != '') & 
+        ~codigos_norm.isin(['NAN', 'NONE', 'NULL']) &
+        ~codigos_norm.str.isspace()
+    )
+    mask_nuevo = ~codigos_norm.isin(ids_historicos)
+    df_actual[COLUMNA_NUEVO] = (mask_valido & mask_nuevo).map({True: "Sí", False: "No"})
+ 
+    if not fuente_es_api:
+        df_actual["COINCIDE_HISTORICO"] = "ORIGEN_OFICIAL"
+        df_actual["MATCH_SCORE"] = 1.0
+        df_actual["REQUIERE_VALIDACION"] = False
+    else:
+        tiene_cols = (
+            ("NOMBRE_DEL_PROGRAMA" in df_actual.columns)
+            and ("NOMBRE_INSTITUCIÓN" in df_actual.columns)
+            and ("NOMBRE_DEL_PROGRAMA" in df_historico.columns)
+            and ("NOMBRE_INSTITUCIÓN" in df_historico.columns)
+        )
+ 
+        if not tiene_cols:
+            df_actual["COINCIDE_HISTORICO"] = "ERROR_COLUMNAS"
+            df_actual["MATCH_SCORE"] = 0.0
+            df_actual["REQUIERE_VALIDACION"] = True
+        else:
+            df_historico["_codigo_normalizado"] = df_historico[COLUMNA_ID].apply(normalizar_codigo)
+            hist_por_id = (
+                df_historico
+                .dropna(subset=["_codigo_normalizado"])
+                .drop_duplicates(subset=["_codigo_normalizado"])
+                .set_index("_codigo_normalizado")
+            )
+ 
+            hist_textos = (
+                df_historico[["NOMBRE_DEL_PROGRAMA", "NOMBRE_INSTITUCIÓN"]]
+                .fillna("")
+                .astype(str)
+            )
+            hist_corpus = (hist_textos["NOMBRE_DEL_PROGRAMA"] + " | " + hist_textos["NOMBRE_INSTITUCIÓN"]).tolist()
+ 
+            def auditar_fila(row) -> tuple[float, str, bool]:
+                codigo = row.get("_codigo_normalizado", "")
+                nombre = str(row.get("NOMBRE_DEL_PROGRAMA", "") or "")
+                inst = str(row.get("NOMBRE_INSTITUCIÓN", "") or "")
+                texto = f"{nombre} | {inst}".strip()
+ 
+                if codigo and codigo in hist_por_id.index:
+                    requiere = False
+                    coincide = "EXACTO_ID"
+                    score = 1.0
+                    ref_nombre = str(hist_por_id.at[codigo, "NOMBRE_DEL_PROGRAMA"] or "")
+                    ref_inst = str(hist_por_id.at[codigo, "NOMBRE_INSTITUCIÓN"] or "")
+                    sim_nombre = fuzz.token_set_ratio(nombre, ref_nombre)
+                    sim_inst = fuzz.token_set_ratio(inst, ref_inst)
+                    if sim_nombre <= 50 and sim_inst <= 50:
+                        requiere = True
+                    return score, coincide, requiere
+ 
+                if not hist_corpus:
+                    return 0.0, "NUEVO_SIN_DUDA", False
+ 
+                match = rf_process.extractOne(texto, hist_corpus, scorer=fuzz.token_set_ratio)
+                if match is None:
+                    return 0.0, "NUEVO_SIN_DUDA", False
+                _, ratio, _ = match
+                if ratio >= 90:
+                    return float(ratio) / 100.0, "POSIBLE_DUPLICADO_NOMBRE", False
+                return 0.0, "NUEVO_SIN_DUDA", False
+ 
+            audit = df_actual.apply(auditar_fila, axis=1, result_type="expand")
+            audit.columns = ["MATCH_SCORE", "COINCIDE_HISTORICO", "REQUIERE_VALIDACION"]
+            df_actual[["MATCH_SCORE", "COINCIDE_HISTORICO", "REQUIERE_VALIDACION"]] = audit
     
     # Eliminar la columna temporal de normalización
     df_actual = df_actual.drop(columns=['_codigo_normalizado'])
@@ -162,27 +341,31 @@ def procesar_programas_nuevos() -> None:
     print(f"Programas nuevos: {nuevos}")
     print(f"Programas existentes: {existentes}")
     
+    requieren_validacion = int(df_actual["REQUIERE_VALIDACION"].fillna(False).astype(bool).sum())
     log_resultado(f"Total de programas procesados: {total}")
     log_resultado(f"Nuevos programas detectados: {nuevos}")
     log_resultado(f"Programas existentes: {existentes}")
+    log_resultado(f"Filas procesadas: {total}. Fuente: {fuente}. Requieren Validación: {requieren_validacion}")
     
     # Debug: mostrar algunos ejemplos de códigos nuevos si hay
     if nuevos > 0:
         nuevos_codigos = df_actual[df_actual[COLUMNA_NUEVO] == "Sí"][COLUMNA_ID].head(5).tolist()
         print(f"Ejemplos de códigos marcados como nuevos (primeros 5): {nuevos_codigos}")
     
-    # Guardar el archivo actualizado
-    print(f"Guardando archivo actualizado: {ARCHIVO_PROGRAMAS_ACTUAL}")
-    with pd.ExcelWriter(
-        ARCHIVO_PROGRAMAS_ACTUAL,
-        mode="a",
-        if_sheet_exists="replace",
-        engine="openpyxl",
-    ) as writer:
-        df_actual.to_excel(writer, sheet_name=HOJA_PROGRAMAS, index=False)
+    # Si se está trabajando en memoria (df proporcionado), retornar el DataFrame sin escribir
+    if df is not None:
+        return df_actual
     
-    log_info(f"Archivo actualizado guardado: {ARCHIVO_PROGRAMAS_ACTUAL.name}")
-    print("Procesamiento completado exitosamente.")
+    # Si se está trabajando con archivo, escribir y no retornar nada (comportamiento legacy)
+    print(f"Guardando archivo actualizado: {ARCHIVO_PROGRAMAS}")
+    try:
+        escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
+        log_info(f"Archivo actualizado guardado: {ARCHIVO_PROGRAMAS.name}")
+        print("Procesamiento completado exitosamente.")
+    except PermissionError as e:
+        error_msg = explicar_error_archivo_abierto(ARCHIVO_PROGRAMAS, "escribir")
+        log_error(error_msg)
+        raise PermissionError(error_msg) from e
 
 
 if __name__ == "__main__":

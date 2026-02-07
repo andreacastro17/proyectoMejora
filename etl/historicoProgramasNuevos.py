@@ -54,10 +54,11 @@ def actualizar_historico_programas_nuevos() -> None:
         log_error(error_msg)
         raise FileNotFoundError(error_msg)
     
-    # Leer el archivo de programas
+    # Leer el archivo de programas usando función con reintentos
     print(f"Leyendo programas desde: {ARCHIVO_PROGRAMAS}")
     try:
-        df_programas = pd.read_excel(ARCHIVO_PROGRAMAS, sheet_name=HOJA_PROGRAMAS)
+        from etl.exceptions_helpers import leer_excel_con_reintentos
+        df_programas = leer_excel_con_reintentos(ARCHIVO_PROGRAMAS, sheet_name=HOJA_PROGRAMAS)
         log_info(f"Archivo de programas cargado: {ARCHIVO_PROGRAMAS.name}")
     except PermissionError as e:
         error_msg = (
@@ -112,7 +113,8 @@ def actualizar_historico_programas_nuevos() -> None:
     if ARCHIVO_HISTORICO.exists():
         print(f"Leyendo archivo histórico existente: {ARCHIVO_HISTORICO}")
         try:
-            df_historico_existente = pd.read_excel(
+            from etl.exceptions_helpers import leer_excel_con_reintentos
+            df_historico_existente = leer_excel_con_reintentos(
                 ARCHIVO_HISTORICO, sheet_name=HOJA_HISTORICO
             )
             log_info(f"Archivo histórico existente cargado: {len(df_historico_existente)} registros")

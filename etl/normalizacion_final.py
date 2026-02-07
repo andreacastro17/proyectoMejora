@@ -25,6 +25,7 @@ from etl.config import (
     ARCHIVO_PROGRAMAS,
     HOJA_PROGRAMAS,
 )
+from etl.normalizacion import COLUMNAS_A_NORMALIZAR
 HOJA_ESPECIAL_INSTITUCION = "NOMBRE_INSTITUCIÓN"
 COLUMNA_ID_INSTITUCION = "CÓDIGO_INSTITUCIÓN_PADRE"
 
@@ -93,18 +94,35 @@ def cargar_mapeos_normalizacion() -> dict[str, dict[str, str]]:
     return mapeos
 
 
-def aplicar_normalizacion_final() -> None:
+def aplicar_normalizacion_final(df: pd.DataFrame | None = None, archivo: Path | None = None) -> pd.DataFrame:
     """
     Aplica la normalización final de ortografía y formato al archivo Programas.xlsx.
-    """
-    if not ARCHIVO_PROGRAMAS.exists():
-        error_msg = f"No se encontró el archivo: {ARCHIVO_PROGRAMAS}"
-        log_error(error_msg)
-        raise FileNotFoundError(error_msg)
     
-    log_info(f"Cargando archivo: {ARCHIVO_PROGRAMAS.name}")
-    df = pd.read_excel(ARCHIVO_PROGRAMAS, sheet_name=HOJA_PROGRAMAS)
-    log_info(f"Archivo cargado: {len(df)} filas, {len(df.columns)} columnas")
+    Args:
+        df: DataFrame opcional. Si se proporciona, se normaliza en memoria sin leer/escribir archivo.
+        archivo: Archivo opcional. Si df es None, se lee desde este archivo (o ARCHIVO_PROGRAMAS por defecto).
+        
+    Returns:
+        DataFrame normalizado
+        
+    Si df es None, lee desde archivo y escribe de vuelta.
+    Si df se proporciona, solo normaliza y retorna (sin I/O).
+    """
+    # Si se proporciona DataFrame, trabajar en memoria
+    if df is not None:
+        df = df.copy()
+        log_info(f"Aplicando normalización final en memoria ({len(df)} filas)")
+    else:
+        # Modo tradicional: leer desde archivo
+        archivo = archivo or ARCHIVO_PROGRAMAS
+        if not archivo.exists():
+            error_msg = f"No se encontró el archivo: {archivo}"
+            log_error(error_msg)
+            raise FileNotFoundError(error_msg)
+        
+        log_info(f"Cargando archivo: {archivo.name}")
+        df = pd.read_excel(archivo, sheet_name=HOJA_PROGRAMAS)
+        log_info(f"Archivo cargado: {len(df)} filas, {len(df.columns)} columnas")
     
     # Cargar mapeos
     mapeos = cargar_mapeos_normalizacion()
@@ -181,17 +199,67 @@ def aplicar_normalizacion_final() -> None:
     log_info(f"Total de columnas procesadas: {columnas_procesadas}")
     log_info(f"Total de valores reemplazados: {total_reemplazos}")
     
-    # Guardar archivo actualizado
-    log_info(f"Guardando archivo actualizado: {ARCHIVO_PROGRAMAS.name}")
-    with pd.ExcelWriter(
-        ARCHIVO_PROGRAMAS,
-        mode="a",
-        if_sheet_exists="replace",
-        engine="openpyxl",
-    ) as writer:
-        df.to_excel(writer, sheet_name=HOJA_PROGRAMAS, index=False)
+    # IMPORTANTE: Después de aplicar mapeos, normalizar a minúsculas las columnas
+    # que están en COLUMNAS_A_NORMALIZAR para mantener consistencia
+    # (los mapeos pueden venir en mayúsculas desde el archivo Excel)
+    log_info("Aplicando normalización de mayúsculas/minúsculas a columnas normalizadas...")
+    from unidecode import unidecode
+    import re
     
-    log_info(f"Normalización final completada: {ARCHIVO_PROGRAMAS.name}")
+    columnas_normalizadas_caso = 0
+    for columna in COLUMNAS_A_NORMALIZAR:
+        if columna in df.columns:
+            try:
+                # Normalizar a minúsculas: unidecode + lower + limpiar caracteres especiales
+                s = df[columna].fillna("").astype(str)
+                # Aplicar unidecode y convertir a minúsculas
+                if len(s) > 100:
+                    # Procesar en chunks para mejor rendimiento
+                    chunks = [s.iloc[i:i+100] for i in range(0, len(s), 100)]
+                    s_normalized = pd.concat([
+                        pd.Series([unidecode(str(x)).lower() if x else "" for x in chunk], index=chunk.index)
+                        for chunk in chunks
+                    ])
+                    s = s_normalized
+                else:
+                    s = s.map(lambda x: unidecode(x).lower() if x else "")
+                # Limpiar caracteres especiales y espacios múltiples
+                s = s.str.replace(r"[^a-z0-9\s]", " ", regex=True)
+                s = s.str.replace(r"\s+", " ", regex=True).str.strip()
+                df[columna] = s
+                columnas_normalizadas_caso += 1
+            except Exception as e:
+                log_info(f"Advertencia: Error al normalizar caso de '{columna}': {e}. Continuando...")
+                continue
+    
+    if columnas_normalizadas_caso > 0:
+        log_info(f"✓ Normalización de caso aplicada a {columnas_normalizadas_caso} columnas")
+    
+    # Si se proporcionó df pero no archivo, solo retornar (sin escribir)
+    # Esto permite que el pipeline escriba el archivo una sola vez al final
+    if df is not None and archivo is None:
+        return df
+    
+    # Modo tradicional: escribir de vuelta al archivo
+    archivo = archivo or ARCHIVO_PROGRAMAS
+    log_info(f"Guardando archivo actualizado: {archivo.name}")
+    try:
+        with pd.ExcelWriter(
+            archivo,
+            mode="a",
+            if_sheet_exists="replace",
+            engine="openpyxl",
+        ) as writer:
+            df.to_excel(writer, sheet_name=HOJA_PROGRAMAS, index=False)
+        log_info(f"Normalización final completada: {archivo.name}")
+    except PermissionError as e:
+        from etl.exceptions_helpers import explicar_error_archivo_abierto
+        error_msg = explicar_error_archivo_abierto(archivo, "escribir")
+        log_error(error_msg)
+        raise PermissionError(error_msg) from e
+    
+    # Retornar el DataFrame también en modo archivo para consistencia
+    return df
 
 
 if __name__ == "__main__":

@@ -1,0 +1,27 @@
+# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(2,0,0, 0),
+    prodvers=(2,0,0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('040904E4', [
+        StringStruct('CompanyName', 'EAFIT'),
+        StringStruct('FileDescription', 'SniesManager es una aplicación de la Universidad EAFIT que automatiza la descarga y análisis semanal de programas académicos del SNIES, identifica programas nuevos y permite revisar/ajustar manualmente emparejamientos y resultados, además de reentrenar el modelo de clasificación y consolidar la información en archivos Excel para seguimiento y toma de decisiones.'),
+        StringStruct('FileVersion', '2.0.0'),
+        StringStruct('InternalName', 'SniesManager'),
+        StringStruct('OriginalFilename', 'SniesManager.exe'),
+        StringStruct('ProductName', 'Snies Manager'),
+        StringStruct('ProductVersion', '2.0.0')
+      ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1252])])
+  ]
+)
