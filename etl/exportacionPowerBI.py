@@ -168,83 +168,13 @@ def exportar_a_powerbi(
     log_callback=None
 ) -> Path:
     """
-    Exporta los datos preparados a un archivo Excel para Power BI.
-    
-    Crea un archivo Excel con dos hojas:
-    1. "Datos": Tabla detallada de programas nuevos
-    2. "Métricas": Métricas calculadas en formato tabla
-    
-    Args:
-        archivo_programas: Ruta al archivo Programas.xlsx (opcional si se pasa df_programas)
-        df_programas: DataFrame con los datos (opcional si se pasa archivo_programas)
-        archivo_salida: Ruta del archivo de salida (por defecto: outputs/Programas_PowerBI.xlsx)
-        log_callback: Función para logging (opcional)
-        
-    Returns:
-        Path del archivo generado
-        
-    Raises:
-        FileNotFoundError: Si no se puede leer el archivo fuente
-        ValueError: Si faltan columnas requeridas
-        Exception: Si falla la escritura del archivo
+    Deprecado: La integración con Power BI se realiza ahora vía Dataflows,
+    que se conectan directamente al archivo maestro Programas.xlsx.
+    Esta función se mantiene por compatibilidad de imports; no genera archivos Excel.
     """
-    def log(msg: str):
-        if log_callback:
-            log_callback(msg)
-        else:
-            log_info(msg)
-    
-    log("=== Exportación a Power BI ===")
-    
-    # Preparar datos
-    df_powerbi, metricas = preparar_datos_powerbi(
-        archivo_programas=archivo_programas,
-        df_programas=df_programas,
-        log_callback=log
-    )
-    
-    # Archivo de salida
-    archivo_salida = archivo_salida or ARCHIVO_POWER_BI
-    archivo_salida.parent.mkdir(parents=True, exist_ok=True)
-    
-    log(f"Exportando a {archivo_salida.name}...")
-    
-    try:
-        import pandas as pd
-        
-        # Crear DataFrame de métricas para la hoja "Métricas"
-        df_metricas = pd.DataFrame([
-            {"Métrica": "Programas Nuevos Detectados", "Valor": metricas["Programas Nuevos Detectados"]},
-            {"Métrica": "Referentes Nuevos Detectados", "Valor": metricas["Referentes Nuevos Detectados"]},
-            {"Métrica": "Porcentaje Referentes", "Valor": f"{metricas['Porcentaje Referentes']:.2f}%"},
-            {"Métrica": "Fecha Exportación", "Valor": metricas["Fecha Exportación"]}
-        ])
-        
-        # Escribir archivo Excel con dos hojas
-        with pd.ExcelWriter(
-            archivo_salida,
-            engine="openpyxl",
-            mode="w"
-        ) as writer:
-            # Hoja 1: Datos detallados
-            df_powerbi.to_excel(writer, sheet_name="Datos", index=False)
-            
-            # Hoja 2: Métricas
-            df_metricas.to_excel(writer, sheet_name="Métricas", index=False)
-        
-        log(f"✓ Exportación completada: {archivo_salida.name}")
-        log(f"  - Hoja 'Datos': {len(df_powerbi)} filas")
-        log(f"  - Hoja 'Métricas': {len(df_metricas)} métricas")
-        
-        log_resultado(f"Exportación Power BI completada: {archivo_salida.name}")
-        
-        return archivo_salida
-        
-    except Exception as e:
-        error_msg = f"Error al exportar a Power BI: {e}"
-        log(f"[ERROR] {error_msg}")
-        log_error(error_msg)
-        raise
+    # Integración ahora vía Power BI Dataflows leyendo Programas.xlsx directamente.
+    pass
+    return ARCHIVO_PROGRAMAS
 
 
 def conectar_powerbi_directo(

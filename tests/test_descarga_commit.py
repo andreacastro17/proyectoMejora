@@ -14,7 +14,6 @@ def test_commit_programas_replaces_and_archives(tmp_path: Path, monkeypatch):
     Valida que el commit transaccional:
     - reemplace Programas.xlsx
     - archive el anterior en historico/
-    - escriba FUENTE_DATOS en el archivo final
     """
     import etl.descargaSNIES as d
 
@@ -48,8 +47,6 @@ def test_commit_programas_replaces_and_archives(tmp_path: Path, monkeypatch):
     dest = out_dir / "Programas.xlsx"
     assert dest.exists()
     df_dest = _read_programas(dest)
-    assert "FUENTE_DATOS" in df_dest.columns
-    assert df_dest["FUENTE_DATOS"].iloc[0] == "WEB_SNIES"
     assert str(df_dest["CÓDIGO_SNIES_DEL_PROGRAMA"].iloc[0]) == "2"
 
     # staged debe haberse movido

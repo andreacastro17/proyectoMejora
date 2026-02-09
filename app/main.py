@@ -1080,9 +1080,22 @@ class ManualReviewPage(ttk.Frame):
                 threading.Thread(target=ejecutar_clasificacion, daemon=True).start()
                 return  # Salir aquí, se recargará cuando termine la clasificación
             
-            # Ya tenemos datos SNIES + clasificación; mostrar la combinación
+            # Usar todas las columnas del archivo para la vista
+            self.display_columns = list(df_full.columns)
+            # Recrear la tabla con todas las columnas (el Treeview se creó con un subconjunto en __init__)
+            self.table.destroy()
+            self.table = EditableTable(
+                self,
+                columns=self.display_columns,
+                height=18,
+                editable_columns=self.editable_columns,
+                on_change=self._on_cell_change,
+            )
+            self.table.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+            self.table.tree.bind("<<TreeviewSelect>>", self._on_select)
+
             self.df_view = df_full[self.display_columns].copy()
-            self._log(f"Cargado: {self.file_path.name} ({len(self.df_view)} filas). Muestra programa SNIES + clasificación referente EAFIT.")
+            self._log(f"Cargado: {self.file_path.name} ({len(self.df_view)} filas, {len(self.display_columns)} columnas).")
             self._apply_filter()
         except Exception as exc:
             messagebox.showerror("Error", f"No se pudo leer el Excel: {exc}", parent=self)
@@ -1315,20 +1328,6 @@ class ManualReviewPage(ttk.Frame):
             return
         self._log("Guardando cambios (todas las páginas) por CÓDIGO_SNIES_DEL_PROGRAMA...")
 
-        # Backup oculto antes de guardar (para restaurar si es necesario)
-        backup_path = None
-        try:
-            # Crear backup oculto (con punto al inicio para que sea oculto en Windows)
-            backup_path = self.file_path.parent / f".temp_backup_pre_edit_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
-            shutil.copy2(self.file_path, backup_path)
-            self.last_backup_path = backup_path
-            self.btn_restore.config(state=tk.NORMAL)
-            self._log(f"Backup oculto creado: {backup_path.name}")
-        except Exception as e:
-            self._log(f"Advertencia: No se pudo crear backup: {e}")
-            if not _ask_yes_no("Confirmar", "No se pudo crear backup. ¿Deseas continuar guardando de todas formas?"):
-                return
-
         # MITIGACIÓN P0 (CRÍTICA): NO perder columnas SNIES al guardar.
         # Leemos el Excel COMPLETO y aplicamos SOLO los cambios en columnas editables.
         try:
@@ -1365,12 +1364,9 @@ class ManualReviewPage(ttk.Frame):
             self._touch_pending()
             self._load()
             self._log("✓ Cambios guardados en Programas.xlsx")
-            if backup_path:
-                self._log(f"Backup disponible para restaurar: {backup_path.name}")
             messagebox.showinfo(
                 "Guardado",
-                "Los cambios se guardaron correctamente en Programas.xlsx.\n\n"
-                "Si necesitas restaurar el estado anterior, usa el botón 'Restaurar estado anterior'.",
+                "Los cambios se guardaron correctamente en Programas.xlsx.",
                 parent=self
             )
         except PermissionError:
@@ -3717,7 +3713,6 @@ def run_pipeline(
         log_warning(f"No se pudo crear lock file: {e}")
 
     pipeline_failed = [False]
-    backup_path = None
 
     try:
         # Pre-checks centralizados (fallar temprano con mensajes claros)
@@ -3753,8 +3748,7 @@ def run_pipeline(
             f"el archivo anterior se trasladará a: {HISTORIC_DIR}"
         )
         log(
-            "Si falla SNIES, no se usará fallback a API/histórico para evitar información desactualizada. "
-            "No se realizará ninguna modificación sobre archivos existentes."
+            "Si falla la descarga SNIES, no se realizará ninguna modificación sobre archivos existentes."
         )
         progress(0, "Inicializando", "done")
     
@@ -3816,14 +3810,6 @@ def run_pipeline(
             log_error(msg)
             pipeline_failed[0] = True
             return 1
-        # Respaldo para restaurar si falla alguna etapa posterior
-        backup_path = ARCHIVO_PROGRAMAS.parent / "Programas__backup_pre_etapas.xlsx"
-        try:
-            shutil.copy2(ARCHIVO_PROGRAMAS, backup_path)
-            log("Respaldo de Programas.xlsx creado (se restaurará si falla una etapa posterior).")
-        except Exception as e:
-            log(f"[WARN] No se pudo crear respaldo: {e}")
-            backup_path = None
 
         if ruta_descargada != ARCHIVO_PROGRAMAS:
             warning_msg = (
@@ -4081,25 +4067,6 @@ def run_pipeline(
             log_error(error_msg)
             progress(7, "Histórico programas nuevos", "done")
             # No retornamos error aquí porque el histórico es complementario
-        
-        # Exportación a Power BI (opcional, no bloquea el pipeline si falla)
-        progress(8, "Exportación Power BI", "start")
-        t_etapa = time.time()
-        log("=== Paso 9: Exportación a Power BI ===")
-        log_etapa_iniciada("Exportación a Power BI")
-        try:
-            from etl.exportacionPowerBI import exportar_a_powerbi
-            log("Preparando datos para Power BI...")
-            archivo_powerbi = exportar_a_powerbi(df_programas=df_programas, log_callback=log)
-            log(f"✓ Exportación Power BI completada: {archivo_powerbi.name}")
-            log_etapa_completada("Exportación a Power BI", f"duración: {time.time() - t_etapa:.1f}s")
-            progress(8, "Exportación Power BI", "done")
-        except Exception as exc:
-            error_msg = f"Falló la exportación a Power BI: {exc}"
-            log(f"[WARN] {error_msg}")
-            log_warning(error_msg)
-            progress(8, "Exportación Power BI", "done")
-            # No retornamos error aquí porque la exportación Power BI es opcional
 
         # Limpieza automática de archivos históricos (si hay muchos)
         try:
@@ -4126,24 +4093,6 @@ def run_pipeline(
 
         return 0
     finally:
-        # Verificar cancelación al final (por si se canceló durante ejecución)
-        was_cancelled = cancel_event and cancel_event.is_set()
-        
-        # Restaurar Programas.xlsx desde respaldo si el pipeline falló después de la descarga
-        # O si fue cancelado después de crear el backup
-        if (pipeline_failed[0] or was_cancelled) and backup_path is not None and backup_path.exists():
-            try:
-                shutil.copy2(backup_path, ARCHIVO_PROGRAMAS)
-                if was_cancelled:
-                    log("[CANCELADO] Programas.xlsx restaurado desde el respaldo (cancelación).")
-                    log_info("Programas.xlsx restaurado tras cancelación del pipeline.")
-                else:
-                    log("Programas.xlsx restaurado desde el respaldo previo al pipeline.")
-                    log_info("Programas.xlsx restaurado tras fallo del pipeline.")
-            except Exception as e:
-                log(f"[ERROR] No se pudo restaurar desde respaldo: {e}")
-                log_error(f"Error crítico al restaurar backup: {e}")
-        
         # Remover lock siempre (incluso si hubo KeyboardInterrupt o SystemExit)
         try:
             if lock_file.exists():

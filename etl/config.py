@@ -192,11 +192,16 @@ ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos.xlsx"
 
 
 def _resolve_referencia_path(ref_dir: Path, nombre_base: str) -> Path:
-    """Resuelve ruta a referentesUnificados o catalogoOfertasEAFIT (.xlsx o .csv)."""
-    for ext in [".xlsx", ".csv"]:
-        p = ref_dir / f"{nombre_base}{ext}"
-        if p.exists():
-            return p
+    """Resuelve ruta a referentesUnificados o catalogoOfertasEAFIT (.xlsx o .csv).
+    Busca en ref_dir y, si no existe, en ref_dir/backup (común cuando los archivos están en ref/backup/).
+    """
+    for carpeta in (ref_dir, ref_dir / "backup"):
+        if not carpeta.exists():
+            continue
+        for ext in [".xlsx", ".csv"]:
+            p = carpeta / f"{nombre_base}{ext}"
+            if p.exists():
+                return p
     return ref_dir / f"{nombre_base}.xlsx"
 
 
@@ -270,19 +275,16 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     
     # Funciones para detección automática de formato en archivos de referencia
     def _cargar_archivo_referencia(base_path: Path, nombre_base: str) -> Path:
-        """
-        Busca .xlsx o .csv y devuelve la ruta encontrada.
-        Prioriza .xlsx sobre .csv si ambos existen.
-        """
-        # Priorizar .xlsx (más estructurado)
-        for ext in ['.xlsx', '.csv']:
-            archivo = base_path / f"{nombre_base}{ext}"
-            if archivo.exists():
-                return archivo
-        
-        # Si no encuentra ninguno, error específico
+        """Busca .xlsx o .csv en base_path y, si no existe, en base_path/backup."""
+        for carpeta in (base_path, base_path / "backup"):
+            if not carpeta.exists():
+                continue
+            for ext in ['.xlsx', '.csv']:
+                archivo = carpeta / f"{nombre_base}{ext}"
+                if archivo.exists():
+                    return archivo
         raise FileNotFoundError(
-            f"No se encontró {nombre_base}.xlsx ni {nombre_base}.csv en {base_path}"
+            f"No se encontró {nombre_base}.xlsx ni {nombre_base}.csv en {base_path} ni en {base_path / 'backup'}"
         )
     
     def _leer_datos_flexible(ruta: Path, **kwargs) -> pd.DataFrame:
@@ -342,16 +344,16 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
 
 # Exponer funciones de utilidad para uso en otros módulos
 def cargar_archivo_referencia(base_path: Path, nombre_base: str) -> Path:
-    """Busca .xlsx o .csv y devuelve la ruta encontrada."""
-    # Buscar .xlsx primero (prioridad)
-    for ext in ['.xlsx', '.csv']:
-        archivo = base_path / f"{nombre_base}{ext}"
-        if archivo.exists():
-            return archivo
-    
-    # Si no encuentra ninguno, error específico
+    """Busca .xlsx o .csv en base_path y, si no existe, en base_path/backup."""
+    for carpeta in (base_path, base_path / "backup"):
+        if not carpeta.exists():
+            continue
+        for ext in ['.xlsx', '.csv']:
+            archivo = carpeta / f"{nombre_base}{ext}"
+            if archivo.exists():
+                return archivo
     raise FileNotFoundError(
-        f"No se encontró {nombre_base}.xlsx ni {nombre_base}.csv en {base_path}"
+        f"No se encontró {nombre_base}.xlsx ni {nombre_base}.csv en {base_path} ni en {base_path / 'backup'}"
     )
 
 def leer_datos_flexible(ruta: Path, **kwargs) -> pd.DataFrame:

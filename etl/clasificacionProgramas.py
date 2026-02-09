@@ -607,20 +607,6 @@ def guardar_modelos(
         ruta_clasificador, ruta_embeddings, ruta_encoder = obtener_rutas_modelo_version(None)
         print(f"Guardando modelos (versión actual) en {MODELS_DIR}...")
     
-    # Backup de versión anterior si existe y estamos guardando como versión actual
-    if not crear_version and MODELO_CLASIFICADOR.exists():
-        try:
-            backup_version = obtener_siguiente_version_modelo() - 1
-            if backup_version > 0:
-                ruta_backup_clasificador, ruta_backup_embeddings, ruta_backup_encoder = obtener_rutas_modelo_version(backup_version)
-                import shutil
-                shutil.copy2(MODELO_CLASIFICADOR, ruta_backup_clasificador)
-                shutil.copy2(MODELO_EMBEDDINGS_OBJ, ruta_backup_embeddings)
-                shutil.copy2(ENCODER_PROGRAMAS_EAFIT, ruta_backup_encoder)
-                print(f"Backup de versión anterior guardado como v{backup_version}")
-        except Exception as e:
-            print(f"Advertencia: No se pudo crear backup: {e}")
-    
     with open(ruta_clasificador, 'wb') as f:
         pickle.dump(modelo_clasificador, f)
     
