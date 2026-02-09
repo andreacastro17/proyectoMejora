@@ -9,8 +9,6 @@ import os
 from pathlib import Path
 
 import pandas as pd
-from rapidfuzz import fuzz
-from rapidfuzz import process as rf_process
 
 from etl.pipeline_logger import log_error, log_info, log_resultado, log_warning
 from etl.config import ARCHIVO_PROGRAMAS, HISTORIC_DIR, HOJA_PROGRAMAS
@@ -111,23 +109,13 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
             f"Se eliminaron {filas_antes_codigo - filas_despues_codigo} filas sin código SNIES "
             "(incluyendo notas y filas vacías en la columna de identificación)."
         )
-    
-    fuente = "WEB_SNIES"
-    if len(df_actual) > 0 and "FUENTE_DATOS" in df_actual.columns:
-        try:
-            fuente = str(df_actual["FUENTE_DATOS"].iloc[0])
-        except Exception:
-            fuente = "WEB_SNIES"
-    if "FUENTE_DATOS" not in df_actual.columns:
-        df_actual["FUENTE_DATOS"] = fuente
-    
-    if "MATCH_SCORE" not in df_actual.columns:
-        df_actual["MATCH_SCORE"] = 0.0
-    if "COINCIDE_HISTORICO" not in df_actual.columns:
-        df_actual["COINCIDE_HISTORICO"] = ""
-    if "REQUIERE_VALIDACION" not in df_actual.columns:
-        df_actual["REQUIERE_VALIDACION"] = False
- 
+
+    # No crear ni mantener columnas deprecadas (FUENTE_DATOS, MATCH_SCORE, COINCIDE_HISTORICO, REQUIERE_VALIDACION)
+    columnas_deprecadas = ["FUENTE_DATOS", "MATCH_SCORE", "COINCIDE_HISTORICO", "REQUIERE_VALIDACION"]
+    presentes = [c for c in columnas_deprecadas if c in df_actual.columns]
+    if presentes:
+        df_actual = df_actual.drop(columns=presentes)
+
     # OPTIMIZACIÓN: Normalizar código usando operaciones vectorizadas en lugar de .apply()
     # Normalizar: convertir a string, eliminar espacios, mayúsculas, y quitar .0 de números
     codigos_str = df_actual[COLUMNA_ID].fillna("").astype(str)
@@ -141,13 +129,10 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
 
     if archivo_historico is None:
         df_actual[COLUMNA_NUEVO] = "Sí"
-        df_actual["COINCIDE_HISTORICO"] = "SIN_HISTORICO"
-        df_actual["MATCH_SCORE"] = 0.0
-        df_actual["REQUIERE_VALIDACION"] = False
         df_actual = df_actual.drop(columns=['_codigo_normalizado'])
- 
+
         total = len(df_actual)
-        log_resultado(f"Filas procesadas: {total}. Fuente: {fuente}. Requieren Validación: 0")
+        log_resultado(f"Filas procesadas: {total} (sin histórico)")
         print(f"Guardando archivo actualizado: {ARCHIVO_PROGRAMAS}")
         try:
             escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
@@ -168,9 +153,6 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
         log_warning(f"El archivo histórico {archivo_historico.name} no es válido: {msg_error_hist}")
         log_warning("Marcando todos los programas como nuevos (sin histórico válido).")
         df_actual[COLUMNA_NUEVO] = "Sí"
-        df_actual["COINCIDE_HISTORICO"] = "HISTORICO_INVALIDO"
-        df_actual["MATCH_SCORE"] = 0.0
-        df_actual["REQUIERE_VALIDACION"] = False
         df_actual = df_actual.drop(columns=['_codigo_normalizado'])
         try:
             escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
@@ -186,9 +168,6 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
     except PermissionError:
         log_warning(f"El archivo histórico {archivo_historico.name} está abierto. Marcando todos como nuevos.")
         df_actual[COLUMNA_NUEVO] = "Sí"
-        df_actual["COINCIDE_HISTORICO"] = "HISTORICO_BLOQUEADO"
-        df_actual["MATCH_SCORE"] = 0.0
-        df_actual["REQUIERE_VALIDACION"] = False
         df_actual = df_actual.drop(columns=['_codigo_normalizado'])
         try:
             escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
@@ -209,14 +188,10 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
     # Verificar que existe la columna de ID en el histórico
     if COLUMNA_ID not in df_historico.columns:
         df_actual[COLUMNA_NUEVO] = "Sí"
-        df_actual["COINCIDE_HISTORICO"] = "ERROR_HISTORICO"
-        df_actual["MATCH_SCORE"] = 0.0
-        df_actual["REQUIERE_VALIDACION"] = True
         df_actual = df_actual.drop(columns=['_codigo_normalizado'])
 
         total = len(df_actual)
-        requiere_validacion = int(df_actual["REQUIERE_VALIDACION"].fillna(False).astype(bool).sum())
-        log_resultado(f"Filas procesadas: {total}. Fuente: {fuente}. Requieren Validación: {requiere_validacion}")
+        log_resultado(f"Filas procesadas: {total} (histórico sin columna de ID)")
         
         # Si se está trabajando en memoria (df proporcionado), retornar el DataFrame
         if df is not None:
@@ -250,8 +225,6 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
     print(f"Total de códigos SNIES en el archivo histórico: {len(ids_historicos)}")
     if len(ids_historicos) > 0:
         print(f"Ejemplo de códigos históricos (primeros 5): {list(ids_historicos)[:5]}")
-    
-    fuente_es_api = str(fuente).strip().upper().startswith("API_DATOS_GOV")
  
     # OPTIMIZACIÓN: Usar operación vectorizada en lugar de .apply()
     # Crear máscara vectorizada para programas nuevos
@@ -264,72 +237,7 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
     )
     mask_nuevo = ~codigos_norm.isin(ids_historicos)
     df_actual[COLUMNA_NUEVO] = (mask_valido & mask_nuevo).map({True: "Sí", False: "No"})
- 
-    if not fuente_es_api:
-        df_actual["COINCIDE_HISTORICO"] = "ORIGEN_OFICIAL"
-        df_actual["MATCH_SCORE"] = 1.0
-        df_actual["REQUIERE_VALIDACION"] = False
-    else:
-        tiene_cols = (
-            ("NOMBRE_DEL_PROGRAMA" in df_actual.columns)
-            and ("NOMBRE_INSTITUCIÓN" in df_actual.columns)
-            and ("NOMBRE_DEL_PROGRAMA" in df_historico.columns)
-            and ("NOMBRE_INSTITUCIÓN" in df_historico.columns)
-        )
- 
-        if not tiene_cols:
-            df_actual["COINCIDE_HISTORICO"] = "ERROR_COLUMNAS"
-            df_actual["MATCH_SCORE"] = 0.0
-            df_actual["REQUIERE_VALIDACION"] = True
-        else:
-            df_historico["_codigo_normalizado"] = df_historico[COLUMNA_ID].apply(normalizar_codigo)
-            hist_por_id = (
-                df_historico
-                .dropna(subset=["_codigo_normalizado"])
-                .drop_duplicates(subset=["_codigo_normalizado"])
-                .set_index("_codigo_normalizado")
-            )
- 
-            hist_textos = (
-                df_historico[["NOMBRE_DEL_PROGRAMA", "NOMBRE_INSTITUCIÓN"]]
-                .fillna("")
-                .astype(str)
-            )
-            hist_corpus = (hist_textos["NOMBRE_DEL_PROGRAMA"] + " | " + hist_textos["NOMBRE_INSTITUCIÓN"]).tolist()
- 
-            def auditar_fila(row) -> tuple[float, str, bool]:
-                codigo = row.get("_codigo_normalizado", "")
-                nombre = str(row.get("NOMBRE_DEL_PROGRAMA", "") or "")
-                inst = str(row.get("NOMBRE_INSTITUCIÓN", "") or "")
-                texto = f"{nombre} | {inst}".strip()
- 
-                if codigo and codigo in hist_por_id.index:
-                    requiere = False
-                    coincide = "EXACTO_ID"
-                    score = 1.0
-                    ref_nombre = str(hist_por_id.at[codigo, "NOMBRE_DEL_PROGRAMA"] or "")
-                    ref_inst = str(hist_por_id.at[codigo, "NOMBRE_INSTITUCIÓN"] or "")
-                    sim_nombre = fuzz.token_set_ratio(nombre, ref_nombre)
-                    sim_inst = fuzz.token_set_ratio(inst, ref_inst)
-                    if sim_nombre <= 50 and sim_inst <= 50:
-                        requiere = True
-                    return score, coincide, requiere
- 
-                if not hist_corpus:
-                    return 0.0, "NUEVO_SIN_DUDA", False
- 
-                match = rf_process.extractOne(texto, hist_corpus, scorer=fuzz.token_set_ratio)
-                if match is None:
-                    return 0.0, "NUEVO_SIN_DUDA", False
-                _, ratio, _ = match
-                if ratio >= 90:
-                    return float(ratio) / 100.0, "POSIBLE_DUPLICADO_NOMBRE", False
-                return 0.0, "NUEVO_SIN_DUDA", False
- 
-            audit = df_actual.apply(auditar_fila, axis=1, result_type="expand")
-            audit.columns = ["MATCH_SCORE", "COINCIDE_HISTORICO", "REQUIERE_VALIDACION"]
-            df_actual[["MATCH_SCORE", "COINCIDE_HISTORICO", "REQUIERE_VALIDACION"]] = audit
-    
+
     # Eliminar la columna temporal de normalización
     df_actual = df_actual.drop(columns=['_codigo_normalizado'])
     
@@ -340,13 +248,11 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
     print(f"Total de programas procesados: {total}")
     print(f"Programas nuevos: {nuevos}")
     print(f"Programas existentes: {existentes}")
-    
-    requieren_validacion = int(df_actual["REQUIERE_VALIDACION"].fillna(False).astype(bool).sum())
+
     log_resultado(f"Total de programas procesados: {total}")
     log_resultado(f"Nuevos programas detectados: {nuevos}")
     log_resultado(f"Programas existentes: {existentes}")
-    log_resultado(f"Filas procesadas: {total}. Fuente: {fuente}. Requieren Validación: {requieren_validacion}")
-    
+
     # Debug: mostrar algunos ejemplos de códigos nuevos si hay
     if nuevos > 0:
         nuevos_codigos = df_actual[df_actual[COLUMNA_NUEVO] == "Sí"][COLUMNA_ID].head(5).tolist()
