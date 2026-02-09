@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import pandas as pd
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 

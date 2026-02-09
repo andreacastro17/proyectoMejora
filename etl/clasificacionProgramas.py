@@ -216,13 +216,13 @@ def cargar_referentes(archivo: Path = None) -> pd.DataFrame:
 
 def cargar_catalogo_eafit(archivo: Path = None) -> pd.DataFrame:
     """
-    Carga el catálogo de programas EAFIT.
+    Carga el catálogo de programas EAFIT y filtra solo los programas con estado "activo".
     
     Args:
         archivo: Ruta al archivo del catálogo (Excel o CSV). Si es None, usa detección automática.
         
     Returns:
-        DataFrame con programas EAFIT
+        DataFrame con programas EAFIT activos (filtrados por ESTADO_PROGRAMA = "activo")
         
     Raises:
         FileNotFoundError: Si el archivo no existe
@@ -247,13 +247,13 @@ def cargar_catalogo_eafit(archivo: Path = None) -> pd.DataFrame:
         ) from e
     
     # Validar columnas requeridas
-    columnas_requeridas = ['Nombre Programa EAFIT', 'CAMPO_AMPLIO']
+    columnas_requeridas = ['Nombre Programa EAFIT', 'CAMPO_AMPLIO', 'ESTADO_PROGRAMA']
     columnas_faltantes = [col for col in columnas_requeridas if col not in df.columns]
     if columnas_faltantes:
         raise ValueError(
             f"El catálogo EAFIT no tiene las columnas requeridas: {', '.join(columnas_faltantes)}\n\n"
             f"Columnas encontradas: {', '.join(df.columns[:10])}...\n\n"
-            "Verifica que el archivo del catálogo tenga el formato correcto."
+            "Verifica que el archivo del catálogo tenga el formato correcto. La columna ESTADO_PROGRAMA es obligatoria."
         )
     
     # Normalizar nombres
@@ -270,6 +270,18 @@ def cargar_catalogo_eafit(archivo: Path = None) -> pd.DataFrame:
     else:
         print("ADVERTENCIA: No se encontró columna de nivel en catálogo EAFIT")
         df['NIVEL_DE_FORMACIÓN_norm'] = ''
+    
+    # CRÍTICO: Filtrar solo programas con estado "activo"
+    # Solo se pueden asignar como referentes programas EAFIT que estén activos
+    # Esta es una condición obligatoria: los programas inactivos NO pueden ser referentes
+    antes_filtro_estado = len(df)
+    # Normalizar estado para comparación (case-insensitive)
+    df['ESTADO_PROGRAMA_norm'] = df['ESTADO_PROGRAMA'].fillna('').astype(str).str.lower().str.strip()
+    df = df[df['ESTADO_PROGRAMA_norm'] == 'activo'].copy()
+    despues_filtro_estado = len(df)
+    if antes_filtro_estado != despues_filtro_estado:
+        print(f"Filtrados {antes_filtro_estado - despues_filtro_estado} programas EAFIT inactivos (solo se consideran programas activos como referentes)")
+    print(f"Total de programas EAFIT activos: {len(df)}")
     
     return df
 
@@ -733,11 +745,12 @@ def clasificar_programa_nuevo(
     
     Estrategia:
     1. Normaliza el nivel de formación del programa nuevo
-    2. FILTRA el catálogo EAFIT solo a programas con el mismo nivel (CRÍTICO)
+    2. FILTRA el catálogo EAFIT solo a programas con el mismo nivel Y estado "activo" (CRÍTICO)
     3. Genera embedding del programa nuevo
-    4. Encuentra los top K candidatos por similitud de embedding (solo entre los del mismo nivel)
+    4. Encuentra los top K candidatos por similitud de embedding (solo entre los del mismo nivel y activos)
     5. Para cada candidato, calcula features completas y usa el modelo para predecir
     6. Selecciona el mejor match
+    7. Valida que el programa EAFIT asignado esté activo
     
     Args:
         nombre_programa: Nombre del programa nuevo
@@ -759,13 +772,37 @@ def clasificar_programa_nuevo(
     campo_norm = normalizar_texto(campo_amplio) if campo_amplio else ""
     nivel_norm = normalizar_nivel_formacion(nivel_formacion) if nivel_formacion else ""
     
-    # CRÍTICO: Filtrar catálogo EAFIT por nivel de formación
+    # CRÍTICO: Filtrar catálogo EAFIT por nivel de formación Y estado activo
+    # Solo se pueden asignar programas EAFIT que estén activos
     mask_nivel = (
         df_catalogo_eafit['NIVEL_DE_FORMACIÓN_norm'] == nivel_norm
         if nivel_norm
         else np.ones(len(df_catalogo_eafit), dtype=bool)
     )
-    if nivel_norm and not mask_nivel.any():
+    
+    # CRÍTICO: Filtrar por estado activo (condición obligatoria)
+    # Solo se pueden asignar programas EAFIT que estén activos
+    # El catálogo ya debería estar filtrado por estado activo, pero validamos nuevamente por seguridad
+    if 'ESTADO_PROGRAMA_norm' in df_catalogo_eafit.columns:
+        mask_activo = df_catalogo_eafit['ESTADO_PROGRAMA_norm'] == 'activo'
+        mask_filtro = mask_nivel & mask_activo
+    else:
+        # Si no hay columna de estado normalizada, intentar con la original
+        if 'ESTADO_PROGRAMA' in df_catalogo_eafit.columns:
+            mask_activo = df_catalogo_eafit['ESTADO_PROGRAMA'].fillna('').astype(str).str.lower().str.strip() == 'activo'
+            mask_filtro = mask_nivel & mask_activo
+        else:
+            # Si no hay columna de estado, solo filtrar por nivel (no debería pasar si el catálogo está bien)
+            print("ADVERTENCIA: No se encontró columna ESTADO_PROGRAMA en catálogo. Filtrando solo por nivel.")
+            mask_filtro = mask_nivel
+    
+    if nivel_norm and not mask_filtro.any():
+        razon = f'Nivel de formación "{nivel_norm}" no coincide con ningún programa EAFIT activo'
+        if 'ESTADO_PROGRAMA_norm' in df_catalogo_eafit.columns:
+            # Verificar si hay programas con el nivel pero inactivos
+            programas_nivel = df_catalogo_eafit.loc[mask_nivel]
+            if len(programas_nivel) > 0:
+                razon = f'Nivel de formación "{nivel_norm}" coincide pero no hay programas EAFIT activos con ese nivel'
         return {
             'es_referente': False,
             'probabilidad': 0.0,
@@ -774,13 +811,13 @@ def clasificar_programa_nuevo(
             'similitud_embedding': 0.0,
             'similitud_campo': 0.0,
             'similitud_nivel': 0.0,
-            'razon_no_referente': f'Nivel de formación "{nivel_norm}" no coincide con ningún programa EAFIT',
+            'razon_no_referente': razon,
             'top_5_matches': []
         }
-    df_candidatos = df_catalogo_eafit.loc[mask_nivel].copy()
-    candidato_iloc = np.where(mask_nivel)[0]
+    df_candidatos = df_catalogo_eafit.loc[mask_filtro].copy()
+    candidato_iloc = np.where(mask_filtro)[0]
     if not nivel_norm:
-        print("ADVERTENCIA: No se proporcionó nivel de formación. Evaluando todos los candidatos.")
+        print("ADVERTENCIA: No se proporcionó nivel de formación. Evaluando todos los candidatos activos.")
 
     # Generar embedding del programa nuevo
     embedding_programa = modelo_embeddings.encode(
@@ -848,10 +885,18 @@ def clasificar_programa_nuevo(
         # Peso: 60% modelo, 40% similitud directa
         score_final = 0.6 * probabilidad_modelo + 0.4 * similitud_emb
         
+        # Obtener estado del programa EAFIT
+        estado_programa_eafit = ''
+        if 'ESTADO_PROGRAMA_norm' in row_eafit.index:
+            estado_programa_eafit = row_eafit['ESTADO_PROGRAMA_norm']
+        elif 'ESTADO_PROGRAMA' in row_eafit.index:
+            estado_programa_eafit = str(row_eafit['ESTADO_PROGRAMA']).lower().strip()
+        
         mejores_matches.append({
             'Codigo EAFIT': row_eafit['Codigo EAFIT'],
             'NombrePrograma EAFIT': row_eafit['Nombre Programa EAFIT'],
             'Nivel EAFIT': nivel_eafit_norm,
+            'Estado EAFIT': estado_programa_eafit,
             'probabilidad': score_final,
             'probabilidad_modelo': probabilidad_modelo,
             'similitud_embedding': similitud_emb,
@@ -865,19 +910,39 @@ def clasificar_programa_nuevo(
     mejor_match = mejores_matches[0] if mejores_matches else None
     
     # Determinar si es referente (umbral ajustable)
-    # VALIDACIÓN CRÍTICA: El nivel DEBE coincidir obligatoriamente
-    # Si el nivel no coincide, automáticamente NO es referente, sin importar la probabilidad
+    # VALIDACIÓN CRÍTICA: El nivel DEBE coincidir obligatoriamente Y el programa EAFIT DEBE estar activo
+    # Si el nivel no coincide o el programa no está activo, automáticamente NO es referente, sin importar la probabilidad
     umbral_referente = UMBRAL_REFERENTE  # Ajustable desde config.json ("umbral_referente")
     
     if mejor_match:
         nivel_coincide = mejor_match.get('similitud_nivel', 0.0) == 1.0
         probabilidad_suficiente = mejor_match['probabilidad'] >= umbral_referente
         
-        # VALIDACIÓN ESTRICTA: Si el nivel NO coincide, automáticamente NO es referente
-        if not nivel_coincide:
+        # CRÍTICO: Validar que el programa EAFIT esté activo (condición obligatoria)
+        # Primero intentar usar el estado del match (más eficiente)
+        estado_programa_eafit = mejor_match.get('Estado EAFIT', '')
+        if estado_programa_eafit:
+            programa_activo = estado_programa_eafit == 'activo'
+        else:
+            # Fallback: consultar el DataFrame si no está en el match
+            programa_activo = False  # Por defecto, asumir inactivo si no se puede verificar
+            if mejor_match.get('Codigo EAFIT'):
+                programa_eafit_info = df_catalogo_eafit[
+                    df_catalogo_eafit['Codigo EAFIT'] == mejor_match['Codigo EAFIT']
+                ]
+                if not programa_eafit_info.empty:
+                    if 'ESTADO_PROGRAMA_norm' in programa_eafit_info.columns:
+                        estado_programa = programa_eafit_info.iloc[0].get('ESTADO_PROGRAMA_norm', '')
+                        programa_activo = estado_programa == 'activo'
+                    elif 'ESTADO_PROGRAMA' in programa_eafit_info.columns:
+                        estado_programa = str(programa_eafit_info.iloc[0].get('ESTADO_PROGRAMA', '')).lower().strip()
+                        programa_activo = estado_programa == 'activo'
+        
+        # VALIDACIÓN ESTRICTA: Si el nivel NO coincide o el programa NO está activo, automáticamente NO es referente
+        if not nivel_coincide or not programa_activo:
             es_referente = False
         else:
-            # Solo si el nivel coincide, verificar la probabilidad
+            # Solo si el nivel coincide Y el programa está activo, verificar la probabilidad
             es_referente = probabilidad_suficiente
     else:
         es_referente = False
@@ -1000,10 +1065,13 @@ def clasificar_programas_nuevos(
             embeddings_catalogo=embeddings_catalogo,
         )
         
-        # VALIDACIÓN CRÍTICA: Comparar directamente los campos NIVEL_DE_FORMACIÓN
-        # Regla de negocio: Si el NIVEL_DE_FORMACIÓN del programa nuevo (Programas.xlsx) 
-        # NO coincide exactamente con el NIVEL_DE_FORMACIÓN del programa EAFIT (catalogoOfertasEAFIT.xlsx),
-        # automáticamente NO son referentes (ES_REFERENTE = "No")
+        # VALIDACIÓN CRÍTICA: Comparar directamente los campos NIVEL_DE_FORMACIÓN Y ESTADO_PROGRAMA
+        # Regla de negocio (TODAS las condiciones son obligatorias):
+        # 1. Si el NIVEL_DE_FORMACIÓN del programa nuevo (Programas.xlsx) 
+        #    NO coincide exactamente con el NIVEL_DE_FORMACIÓN del programa EAFIT (catalogoOfertasEAFIT.xlsx),
+        #    automáticamente NO son referentes (ES_REFERENTE = "No")
+        # 2. Si el programa EAFIT NO está en estado "activo", automáticamente NO es referente
+        # 3. El score final debe ser >= umbral_referente (configurable en config.json)
         
         # Normalizar el nivel del programa nuevo desde Programas.xlsx
         nivel_programa_nuevo_norm = normalizar_nivel_formacion(nivel_formacion) if nivel_formacion else ""
@@ -1011,13 +1079,15 @@ def clasificar_programas_nuevos(
         # Inicializar como NO referente si no hay nivel válido
         es_referente_final = False
         
-        # Solo puede ser referente si:
+        # Solo puede ser referente si se cumplen TODAS estas condiciones:
         # 1. Hay un programa EAFIT asignado
         # 2. El nivel del programa nuevo es válido
         # 3. El nivel del programa EAFIT es válido
         # 4. Ambos niveles coinciden exactamente
+        # 5. El programa EAFIT está en estado "activo" (OBLIGATORIO)
+        # 6. El score final >= umbral_referente
         if resultado['programa_eafit_codigo'] is not None and nivel_programa_nuevo_norm:
-            # Obtener el nivel del programa EAFIT desde catalogoOfertasEAFIT.xlsx
+            # Obtener el nivel y estado del programa EAFIT desde catalogoOfertasEAFIT.xlsx
             programa_eafit_codigo = resultado['programa_eafit_codigo']
             programa_eafit_info = df_catalogo_eafit[
                 df_catalogo_eafit['Codigo EAFIT'] == programa_eafit_codigo
@@ -1025,12 +1095,34 @@ def clasificar_programas_nuevos(
             
             if not programa_eafit_info.empty:
                 nivel_eafit_norm = programa_eafit_info.iloc[0].get('NIVEL_DE_FORMACIÓN_norm', '')
+                estado_programa_eafit = programa_eafit_info.iloc[0].get('ESTADO_PROGRAMA_norm', '')
+                if 'ESTADO_PROGRAMA' in programa_eafit_info.columns:
+                    # Si no hay columna normalizada, usar la original
+                    if not estado_programa_eafit:
+                        estado_programa_eafit = programa_eafit_info.iloc[0].get('ESTADO_PROGRAMA', '').lower().strip()
+                else:
+                    # Si no hay columna ESTADO_PROGRAMA, no se puede validar → NO es referente
+                    estado_programa_eafit = 'inactivo'  # Por seguridad, asumir inactivo si no se puede verificar
                 
-                # VALIDACIÓN DIRECTA: Comparar los niveles normalizados
+                # VALIDACIÓN DIRECTA: Comparar los niveles normalizados Y verificar estado activo
+                # Ambas condiciones son OBLIGATORIAS: nivel debe coincidir Y programa debe estar activo
                 if nivel_eafit_norm:
                     if nivel_programa_nuevo_norm == nivel_eafit_norm:
-                        # Los niveles coinciden → puede ser referente (depende de probabilidad)
-                        es_referente_final = resultado['es_referente']
+                        # Los niveles coinciden → verificar estado activo (condición obligatoria)
+                        if estado_programa_eafit == 'activo':
+                            # Los niveles coinciden Y el programa está activo → puede ser referente (depende de probabilidad)
+                            es_referente_final = resultado['es_referente']
+                        else:
+                            # Los niveles coinciden PERO el programa NO está activo → NO es referente
+                            # Esta es una condición obligatoria: solo programas activos pueden ser referentes
+                            es_referente_final = False
+                            estado_original = programa_eafit_info.iloc[0].get('ESTADO_PROGRAMA', estado_programa_eafit) if not programa_eafit_info.empty else estado_programa_eafit
+                            print(
+                                f"VALIDACIÓN ESTADO: Programa '{nombre_programa}' "
+                                f"NO es referente de '{resultado['programa_eafit_nombre']}' "
+                                f"(ESTADO_PROGRAMA: '{estado_original}') - "
+                                f"Programa EAFIT no está activo (solo programas activos pueden ser referentes)"
+                            )
                     else:
                         # Los niveles NO coinciden → NO es referente
                         es_referente_final = False
