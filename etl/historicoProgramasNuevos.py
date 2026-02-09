@@ -28,8 +28,10 @@ from etl.config import (
 
 # Columnas a extraer del archivo Programas.xlsx
 COLUMNAS_REQUERIDAS = [
-    "CÓDIGO_SNIES_DEL_PROGRAMA",
+    "CÓDIGO_INSTITUCIÓN_PADRE",
+    "CÓDIGO_INSTITUCIÓN",
     "NOMBRE_INSTITUCIÓN",
+    "CÓDIGO_SNIES_DEL_PROGRAMA",
     "NOMBRE_DEL_PROGRAMA",
     "PROGRAMA_NUEVO",
     "ES_REFERENTE",
@@ -39,6 +41,27 @@ COLUMNAS_REQUERIDAS = [
 
 # Nombre de la columna de fecha (primera columna)
 COLUMNA_FECHA = "FECHA"
+
+# Orden completo de columnas en el archivo histórico (incluyendo las que no se extraen)
+# Las columnas que no se extraen se llenarán con None/NaN
+COLUMNAS_ORDEN_HISTORICO = [
+    COLUMNA_FECHA,
+    "CÓDIGO_INSTITUCIÓN_PADRE",
+    "CÓDIGO_INSTITUCIÓN",
+    "NOMBRE_INSTITUCIÓN",
+    "CÓDIGO_SNIES_DEL_PROGRAMA",
+    "NOMBRE_DEL_PROGRAMA",
+    "Cod PROGRAMA + Nombre PROGRAMA+ IES",  # No se extrae de Programas.xlsx
+    "Cod PROGRAMA + Nombre PROGRAMA",  # No se extrae de Programas.xlsx
+    "Cod PROGRAMA + Nombre PROGRAMA EAFIT",  # No se extrae de Programas.xlsx
+    "PROGRAMA_NUEVO",
+    "ES_REFERENTE",
+    "PROGRAMA_EAFIT_CODIGO",
+    "PROGRAMA_EAFIT_NOMBRE",
+    "Afinidad",  # No se extrae de Programas.xlsx
+    "Nivel",  # No se extrae de Programas.xlsx
+    "ESTADO_PROGRAMA",  # No se extrae de Programas.xlsx
+]
 
 
 def actualizar_historico_programas_nuevos() -> None:
@@ -102,14 +125,17 @@ def actualizar_historico_programas_nuevos() -> None:
         log_error(error_msg)
         raise ValueError(error_msg)
     
-    # Seleccionar solo las columnas requeridas
-    df_para_historico = df_nuevos[COLUMNAS_REQUERIDAS].copy()
+    # Seleccionar solo las columnas requeridas que se extraen de Programas.xlsx
+    df_extraido = df_nuevos[COLUMNAS_REQUERIDAS].copy()
     
-    # Agregar la fecha de ejecución como primera columna
+    # Agregar la fecha de ejecución
     fecha_ejecucion = datetime.datetime.now().strftime("%Y-%m-%d")
-    df_para_historico.insert(0, COLUMNA_FECHA, fecha_ejecucion)
+    df_extraido.insert(0, COLUMNA_FECHA, fecha_ejecucion)
     
-    # Leer el archivo histórico existente (si existe)
+    # Inicializar variable para el orden de columnas
+    columnas_orden_historico = None
+    
+    # Leer el archivo histórico existente (si existe) para obtener el orden de columnas
     if ARCHIVO_HISTORICO.exists():
         print(f"Leyendo archivo histórico existente: {ARCHIVO_HISTORICO}")
         try:
@@ -119,13 +145,30 @@ def actualizar_historico_programas_nuevos() -> None:
             )
             log_info(f"Archivo histórico existente cargado: {len(df_historico_existente)} registros")
             
-            # Verificar que las columnas coinciden
-            columnas_esperadas = [COLUMNA_FECHA] + COLUMNAS_REQUERIDAS
-            if list(df_historico_existente.columns) != columnas_esperadas:
+            # Obtener el orden de columnas del archivo histórico existente
+            columnas_orden_historico = list(df_historico_existente.columns)
+            
+            # Construir DataFrame con todas las columnas en el orden correcto
+            df_para_historico = pd.DataFrame(index=df_extraido.index)
+            
+            # Agregar cada columna en el orden del histórico
+            for col in columnas_orden_historico:
+                if col in df_extraido.columns:
+                    # Si la columna se extrae de Programas.xlsx, usar su valor
+                    df_para_historico[col] = df_extraido[col]
+                else:
+                    # Si la columna no se extrae, rellenar con None/NaN
+                    df_para_historico[col] = None
+            
+            # Verificar que todas las columnas requeridas están presentes
+            columnas_faltantes_en_historico = [
+                col for col in [COLUMNA_FECHA] + COLUMNAS_REQUERIDAS 
+                if col not in columnas_orden_historico
+            ]
+            if columnas_faltantes_en_historico:
                 error_msg = (
-                    f"Las columnas del archivo histórico no coinciden. "
-                    f"Esperadas: {columnas_esperadas}, "
-                    f"Encontradas: {list(df_historico_existente.columns)}"
+                    f"Faltan columnas requeridas en el archivo histórico: "
+                    f"{', '.join(columnas_faltantes_en_historico)}"
                 )
                 log_error(error_msg)
                 raise ValueError(error_msg)
@@ -139,10 +182,36 @@ def actualizar_historico_programas_nuevos() -> None:
             error_msg = f"Error al leer el archivo histórico existente: {e}"
             log_error(error_msg)
             print(f"[WARN] {error_msg}. Creando nuevo archivo histórico.")
+            # Si hay error, crear DataFrame con el orden completo definido
+            df_para_historico = pd.DataFrame(index=df_extraido.index)
+            for col in COLUMNAS_ORDEN_HISTORICO:
+                if col in df_extraido.columns:
+                    df_para_historico[col] = df_extraido[col]
+                else:
+                    df_para_historico[col] = None
             df_historico_final = df_para_historico
     else:
         print("No existe archivo histórico. Creando nuevo archivo.")
+        # Crear DataFrame con todas las columnas en el orden definido
+        df_para_historico = pd.DataFrame(index=df_extraido.index)
+        for col in COLUMNAS_ORDEN_HISTORICO:
+            if col in df_extraido.columns:
+                df_para_historico[col] = df_extraido[col]
+            else:
+                df_para_historico[col] = None
         df_historico_final = df_para_historico
+    
+    # Asegurar que las columnas estén en el orden correcto
+    # Si existe histórico, usar su orden; si no, usar el orden definido
+    if columnas_orden_historico is not None:
+        orden_columnas = columnas_orden_historico
+    else:
+        orden_columnas = COLUMNAS_ORDEN_HISTORICO
+    
+    # Reordenar columnas según el orden esperado (solo las que existen)
+    columnas_existentes = [col for col in orden_columnas if col in df_historico_final.columns]
+    columnas_adicionales = [col for col in df_historico_final.columns if col not in orden_columnas]
+    df_historico_final = df_historico_final[columnas_existentes + columnas_adicionales]
     
     # Guardar el archivo histórico
     print(f"Guardando archivo histórico: {ARCHIVO_HISTORICO}")

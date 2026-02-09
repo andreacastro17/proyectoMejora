@@ -1182,7 +1182,7 @@ def clasificar_programas_nuevos(
     # Agregar columnas al archivo original
     print("Agregando resultados al archivo original...")
     for col in ['ES_REFERENTE', 'PROBABILIDAD', 'PROGRAMA_EAFIT_CODIGO', 
-                'PROGRAMA_EAFIT_NOMBRE', 'SIMILITUD_EMBEDDING', 'SIMILITUD_CAMPO', 'SIMILITUD_NIVEL']:
+                'PROGRAMA_EAFIT_NOMBRE']:
         df_programas[col] = None
     
     # Mapear resultados al DataFrame original
@@ -1195,9 +1195,7 @@ def clasificar_programas_nuevos(
             df_programas.loc[mask, 'PROBABILIDAD'] = resultado['PROBABILIDAD']
             df_programas.loc[mask, 'PROGRAMA_EAFIT_CODIGO'] = resultado['PROGRAMA_EAFIT_CODIGO']
             df_programas.loc[mask, 'PROGRAMA_EAFIT_NOMBRE'] = resultado['PROGRAMA_EAFIT_NOMBRE']
-            df_programas.loc[mask, 'SIMILITUD_EMBEDDING'] = resultado['SIMILITUD_EMBEDDING']
-            df_programas.loc[mask, 'SIMILITUD_CAMPO'] = resultado['SIMILITUD_CAMPO']
-            df_programas.loc[mask, 'SIMILITUD_NIVEL'] = resultado.get('SIMILITUD_NIVEL', 0.0)
+    
     
     # Si se proporcionó df_programas, solo retornar (sin escribir)
     if df_programas is not None and archivo_programas is None:
