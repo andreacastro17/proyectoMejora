@@ -188,7 +188,7 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ========= RUTAS DE ARCHIVOS =========
 ARCHIVO_PROGRAMAS = OUTPUTS_DIR / "Programas.xlsx"
-ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos.xlsx"
+ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos .xlsx"  # Con espacio al final (archivo principal con todos los históricos)
 
 
 def _resolve_referencia_path(ref_dir: Path, nombre_base: str) -> Path:
@@ -270,7 +270,7 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     
     # Recalcular rutas de archivos
     ARCHIVO_PROGRAMAS = OUTPUTS_DIR / "Programas.xlsx"
-    ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos.xlsx"
+    ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos .xlsx"  # Con espacio al final (archivo principal con todos los históricos)
     ARCHIVO_NORMALIZACION = DOCS_DIR / "normalizacionFinal.xlsx"
     
     # Funciones para detección automática de formato en archivos de referencia

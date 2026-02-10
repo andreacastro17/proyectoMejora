@@ -2,7 +2,7 @@
 Módulo para actualizar el archivo histórico de programas nuevos.
 
 Cada vez que se ejecuta el pipeline, se agregan los programas nuevos detectados
-al archivo HistoricoProgramasNuevos.xlsx con la fecha de ejecución.
+al archivo HistoricoProgramasNuevos .xlsx (con espacio) con la fecha de ejecución.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from etl.pipeline_logger import log_error, log_info, log_resultado
+from etl.pipeline_logger import log_error, log_info, log_resultado, log_warning
 from etl.config import (
     ARCHIVO_PROGRAMAS,
     ARCHIVO_HISTORICO,
@@ -64,12 +64,121 @@ COLUMNAS_ORDEN_HISTORICO = [
 ]
 
 
+def _consolidar_archivos_historicos_duplicados() -> pd.DataFrame | None:
+    """
+    Consolida archivos históricos duplicados si existen múltiples variaciones del nombre.
+    
+    Busca variaciones del nombre (con/sin espacio) y consolida todos los registros.
+    Mantiene el archivo con más registros (ARCHIVO_HISTORICO) y elimina los que tienen menos.
+    
+    Returns:
+        DataFrame consolidado con todos los registros, o None si no hay archivos históricos.
+    """
+    from etl.exceptions_helpers import leer_excel_con_reintentos
+    
+    archivos_encontrados = []
+    # Buscar variaciones: el archivo principal ahora es el que tiene espacio
+    variaciones = [
+        ARCHIVO_HISTORICO,  # HistoricoProgramasNuevos .xlsx (con espacio - archivo principal)
+        ARCHIVO_HISTORICO.parent / "HistoricoProgramasNuevos.xlsx",  # Sin espacio (variación antigua)
+        ARCHIVO_HISTORICO.parent / "HistoricoProgramasNuevos  .xlsx",  # Con dos espacios (variación)
+    ]
+    
+    # Buscar todos los archivos históricos posibles
+    for archivo in variaciones:
+        if archivo.exists():
+            try:
+                df = leer_excel_con_reintentos(archivo, sheet_name=HOJA_HISTORICO)
+                archivos_encontrados.append((archivo, df, len(df)))
+                print(f"Encontrado archivo histórico: {archivo.name} ({len(df)} registros)")
+                log_info(f"Archivo histórico encontrado: {archivo.name} ({len(df)} registros)")
+            except Exception as e:
+                print(f"[WARN] No se pudo leer {archivo.name}: {e}")
+                log_error(f"Error al leer {archivo.name}: {e}")
+    
+    if not archivos_encontrados:
+        return None
+    
+    # Si solo hay un archivo, retornarlo directamente
+    if len(archivos_encontrados) == 1:
+        archivo, df, _ = archivos_encontrados[0]
+        # Si no es el archivo principal, renombrarlo al nombre correcto
+        if archivo != ARCHIVO_HISTORICO:
+            try:
+                archivo.rename(ARCHIVO_HISTORICO)
+                print(f"✓ Archivo renombrado: {archivo.name} → {ARCHIVO_HISTORICO.name}")
+                log_info(f"Archivo histórico renombrado: {archivo.name} → {ARCHIVO_HISTORICO.name}")
+            except Exception as e:
+                print(f"[WARN] No se pudo renombrar {archivo.name}: {e}")
+                log_error(f"Error al renombrar archivo histórico {archivo.name}: {e}")
+        return df
+    
+    # Hay múltiples archivos, consolidarlos
+    print(f"⚠️ Se encontraron {len(archivos_encontrados)} archivos históricos duplicados. Consolidando...")
+    log_warning(f"Se encontraron {len(archivos_encontrados)} archivos históricos duplicados. Consolidando.")
+    
+    # Ordenar por número de registros (descendente) para identificar el archivo con más datos
+    archivos_encontrados.sort(key=lambda x: x[2], reverse=True)
+    archivo_principal, df_principal, registros_principal = archivos_encontrados[0]
+    print(f"Archivo con más registros: {archivo_principal.name} ({registros_principal} registros)")
+    
+    # Consolidar todos los DataFrames
+    dfs_consolidar = [df for _, df, _ in archivos_encontrados]
+    df_consolidado = pd.concat(dfs_consolidar, ignore_index=True)
+    
+    # Eliminar duplicados basados en código SNIES y fecha (mantener el más reciente)
+    if "CÓDIGO_SNIES_DEL_PROGRAMA" in df_consolidado.columns:
+        # Ordenar por fecha descendente si existe (mantener el más reciente)
+        if COLUMNA_FECHA in df_consolidado.columns:
+            df_consolidado = df_consolidado.sort_values(
+                by=COLUMNA_FECHA, ascending=False, na_position="last"
+            )
+        
+        antes = len(df_consolidado)
+        # Eliminar duplicados: mismo código SNIES y misma fecha (o solo código si no hay fecha)
+        subset_dup = ["CÓDIGO_SNIES_DEL_PROGRAMA"]
+        if COLUMNA_FECHA in df_consolidado.columns:
+            subset_dup.append(COLUMNA_FECHA)
+        
+        df_consolidado = df_consolidado.drop_duplicates(
+            subset=subset_dup,
+            keep="first"  # Mantener el primero (más reciente después del sort)
+        )
+        despues = len(df_consolidado)
+        duplicados_eliminados = antes - despues
+        if duplicados_eliminados > 0:
+            print(f"Eliminados {duplicados_eliminados} registros duplicados en la consolidación.")
+            log_info(f"Eliminados {duplicados_eliminados} registros duplicados durante consolidación.")
+    
+    print(f"✓ Consolidación completada: {len(df_consolidado)} registros únicos")
+    log_info(f"Consolidación completada: {len(df_consolidado)} registros únicos de {len(archivos_encontrados)} archivos")
+    
+    # Eliminar los archivos con menos registros (mantener solo el principal)
+    # El archivo principal se escribirá después con todos los datos consolidados
+    for archivo, _, registros in archivos_encontrados:
+        # Eliminar todos los archivos duplicados (el principal se reescribirá después)
+        try:
+            archivo.unlink()
+            print(f"  → Eliminado archivo duplicado: {archivo.name} ({registros} registros)")
+            log_info(f"Archivo duplicado eliminado: {archivo.name} ({registros} registros)")
+        except Exception as e:
+            print(f"[WARN] No se pudo eliminar {archivo.name}: {e}")
+            log_error(f"Error al eliminar archivo duplicado {archivo.name}: {e}")
+    
+    return df_consolidado
+
+
 def actualizar_historico_programas_nuevos() -> None:
     """
     Actualiza el archivo histórico de programas nuevos.
     
     Lee los programas nuevos de Programas.xlsx y los agrega al archivo
-    HistoricoProgramasNuevos.xlsx con la fecha de ejecución.
+    HistoricoProgramasNuevos .xlsx (con espacio) con la fecha de ejecución.
+    
+    Maneja automáticamente archivos históricos duplicados:
+    - Consolida todos los archivos encontrados
+    - Mantiene el archivo con más registros (ARCHIVO_HISTORICO)
+    - Elimina los archivos con menos registros
     """
     # Verificar que existe el archivo de programas
     if not ARCHIVO_PROGRAMAS.exists():
@@ -135,61 +244,46 @@ def actualizar_historico_programas_nuevos() -> None:
     # Inicializar variable para el orden de columnas
     columnas_orden_historico = None
     
-    # Leer el archivo histórico existente (si existe) para obtener el orden de columnas
-    if ARCHIVO_HISTORICO.exists():
-        print(f"Leyendo archivo histórico existente: {ARCHIVO_HISTORICO}")
-        try:
-            from etl.exceptions_helpers import leer_excel_con_reintentos
-            df_historico_existente = leer_excel_con_reintentos(
-                ARCHIVO_HISTORICO, sheet_name=HOJA_HISTORICO
+    # Buscar y consolidar archivos históricos existentes (maneja duplicados con/sin espacio)
+    df_historico_existente = _consolidar_archivos_historicos_duplicados()
+    
+    if df_historico_existente is not None:
+        print(f"Archivo histórico existente cargado: {len(df_historico_existente)} registros")
+        log_info(f"Archivo histórico existente cargado: {len(df_historico_existente)} registros")
+        
+        # Obtener el orden de columnas del archivo histórico existente
+        columnas_orden_historico = list(df_historico_existente.columns)
+        
+        # Construir DataFrame con todas las columnas en el orden correcto
+        df_para_historico = pd.DataFrame(index=df_extraido.index)
+        
+        # Agregar cada columna en el orden del histórico
+        for col in columnas_orden_historico:
+            if col in df_extraido.columns:
+                # Si la columna se extrae de Programas.xlsx, usar su valor
+                df_para_historico[col] = df_extraido[col]
+            else:
+                # Si la columna no se extrae, rellenar con None/NaN
+                df_para_historico[col] = None
+        
+        # Verificar que todas las columnas requeridas están presentes
+        columnas_faltantes_en_historico = [
+            col for col in [COLUMNA_FECHA] + COLUMNAS_REQUERIDAS 
+            if col not in columnas_orden_historico
+        ]
+        if columnas_faltantes_en_historico:
+            error_msg = (
+                f"Faltan columnas requeridas en el archivo histórico: "
+                f"{', '.join(columnas_faltantes_en_historico)}"
             )
-            log_info(f"Archivo histórico existente cargado: {len(df_historico_existente)} registros")
-            
-            # Obtener el orden de columnas del archivo histórico existente
-            columnas_orden_historico = list(df_historico_existente.columns)
-            
-            # Construir DataFrame con todas las columnas en el orden correcto
-            df_para_historico = pd.DataFrame(index=df_extraido.index)
-            
-            # Agregar cada columna en el orden del histórico
-            for col in columnas_orden_historico:
-                if col in df_extraido.columns:
-                    # Si la columna se extrae de Programas.xlsx, usar su valor
-                    df_para_historico[col] = df_extraido[col]
-                else:
-                    # Si la columna no se extrae, rellenar con None/NaN
-                    df_para_historico[col] = None
-            
-            # Verificar que todas las columnas requeridas están presentes
-            columnas_faltantes_en_historico = [
-                col for col in [COLUMNA_FECHA] + COLUMNAS_REQUERIDAS 
-                if col not in columnas_orden_historico
-            ]
-            if columnas_faltantes_en_historico:
-                error_msg = (
-                    f"Faltan columnas requeridas en el archivo histórico: "
-                    f"{', '.join(columnas_faltantes_en_historico)}"
-                )
-                log_error(error_msg)
-                raise ValueError(error_msg)
-            
-            # Concatenar los nuevos registros con los existentes (sin eliminar ningún registro)
-            df_historico_final = pd.concat(
-                [df_historico_existente, df_para_historico], ignore_index=True
-            )
-            print(f"Total de registros en histórico: {len(df_historico_final)}")
-        except Exception as e:
-            error_msg = f"Error al leer el archivo histórico existente: {e}"
             log_error(error_msg)
-            print(f"[WARN] {error_msg}. Creando nuevo archivo histórico.")
-            # Si hay error, crear DataFrame con el orden completo definido
-            df_para_historico = pd.DataFrame(index=df_extraido.index)
-            for col in COLUMNAS_ORDEN_HISTORICO:
-                if col in df_extraido.columns:
-                    df_para_historico[col] = df_extraido[col]
-                else:
-                    df_para_historico[col] = None
-            df_historico_final = df_para_historico
+            raise ValueError(error_msg)
+        
+        # Concatenar los nuevos registros con los existentes (sin eliminar ningún registro)
+        df_historico_final = pd.concat(
+            [df_historico_existente, df_para_historico], ignore_index=True
+        )
+        print(f"Total de registros en histórico: {len(df_historico_final)}")
     else:
         print("No existe archivo histórico. Creando nuevo archivo.")
         # Crear DataFrame con todas las columnas en el orden definido
