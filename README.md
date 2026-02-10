@@ -122,7 +122,6 @@ Cuando ejecutas el análisis SNIES, se ejecutan los siguientes pasos en orden:
 5. **Clasificación de programas nuevos**: Compara cada programa nuevo con la oferta EAFIT (catálogo) y asigna, mediante el modelo ML, si es referente, el programa EAFIT correspondiente y la probabilidad (`ES_REFERENTE`, `PROGRAMA_EAFIT_CODIGO`, `PROGRAMA_EAFIT_NOMBRE`, `PROBABILIDAD`)
 6. **Normalización final**: Aplica normalización de ortografía y formato
 7. **Actualización de histórico de programas nuevos**: Agrega los programas nuevos detectados a `outputs/HistoricoProgramasNuevos.xlsx`
-8. **Limpieza automática de archivos históricos**: Si hay más de 20 archivos en `outputs/historico/`, los consolida en `HistoricoProgramasNuevos.xlsx` y elimina los archivos individuales para evitar que la carpeta se llene
 
 ### Comportamiento cuando falla la descarga
 
@@ -136,19 +135,6 @@ La etapa de descarga (`etl/descargaSNIES.py`) está diseñada para **no modifica
 - **SNIES falla**:
   - **No se realizan cambios** sobre `outputs/Programas.xlsx` ni se mueven archivos a histórico
   - El pipeline se detiene y deja el error registrado en `logs/pipeline.log`
-
-### Limpieza automática de archivos históricos
-
-Para evitar que la carpeta `outputs/historico/` se llene de muchos archivos `.xlsx`, el sistema incluye una **limpieza automática**:
-
-- **Automática**: Al finalizar cada ejecución del pipeline, si hay más de **20 archivos** en `outputs/historico/`, se consolidan automáticamente en `outputs/HistoricoProgramasNuevos.xlsx` y se eliminan los archivos individuales.
-- **Manual**: Desde el menú principal, botón **"Limpiar archivos históricos"** en la sección de utilidades. Esto consolida todos los archivos históricos (sin umbral mínimo) y los elimina después de consolidarlos.
-
-La consolidación:
-- Lee todos los archivos `.xlsx` de `outputs/historico/`
-- Extrae todos los programas de cada archivo
-- Los agrega a `HistoricoProgramasNuevos.xlsx` (eliminando duplicados)
-- Elimina los archivos históricos individuales consolidados
 
 ### Ejecución de Componentes Individuales
 

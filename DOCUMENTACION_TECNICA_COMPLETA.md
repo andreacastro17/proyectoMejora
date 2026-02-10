@@ -148,7 +148,7 @@ El sistema sigue una **arquitectura en capas** con separación clara de responsa
 - **Menú Principal**: Dashboard con acceso a todas las funcionalidades
 - **Health Check**: Diagnóstico automático del sistema (conexión, archivos, modelos, permisos)
 - **Configuración**: Gestión de carpeta base del proyecto
-- **Utilidades**: Acceso rápido a logs, outputs, desbloqueo, limpieza
+- **Utilidades**: Acceso rápido a logs, outputs, desbloqueo
 
 **Características**:
 - Diseño responsive con scroll automático
@@ -289,8 +289,6 @@ def _on_resize()               # Ajusta elementos responsive
 9. Guardado de archivo final
 10. Actualización de histórico de programas nuevos
 11. Exportación a Power BI
-9. Actualización de histórico
-10. Limpieza de históricos (opcional)
 
 **Manejo de Errores**:
 - Cada etapa tiene `try-except` específico
@@ -486,16 +484,6 @@ def conectar_powerbi_directo() -> bool                      # Placeholder para f
 - Agrega programas nuevos a `outputs/HistoricoProgramasNuevos.xlsx`
 - Elimina duplicados por código SNIES
 - Mantiene trazabilidad temporal
-
-#### 3.8 limpieza_historicos.py
-
-**Responsabilidad**: Consolida y limpia archivos históricos antiguos.
-
-**Lógica**:
-- Si hay más de 20 archivos en `outputs/historico/`, consolida
-- Extrae todos los programas de archivos históricos
-- Agrega a `HistoricoProgramasNuevos.xlsx`
-- Elimina archivos individuales consolidados
 
 ### 4. Capa de Servicios
 
@@ -698,14 +686,6 @@ log_info(mensaje)               # Información
 │  PASO 10: ACTUALIZACIÓN DE HISTÓRICO                        │
 │  • Agregar programas nuevos a HistoricoProgramasNuevos.xlsx │
 │  • Eliminar duplicados por código SNIES                      │
-└─────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│  PASO 11: LIMPIEZA DE HISTÓRICOS (OPCIONAL)                 │
-│  • Si hay >20 archivos en historico/, consolidar            │
-│  • Agregar a HistoricoProgramasNuevos.xlsx                  │
-│  • Eliminar archivos individuales                           │
 └─────────────────────────────────────────────────────────────┘
                             │
                             ▼

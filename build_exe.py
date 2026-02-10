@@ -153,39 +153,44 @@ def resolver_icono():
 def validar_archivos_necesarios() -> tuple[bool, list[str]]:
     """Valida que existan los archivos necesarios antes de empaquetar."""
     base_path = Path(__file__).parent
-    archivos_requeridos = [
-        ("app/main.py", "Archivo principal de la aplicación"),
-        ("ref/referentesUnificados.csv", "Archivo de referentes (puede ser .xlsx o .csv)"),
-        ("ref/catalogoOfertasEAFIT.csv", "Catálogo EAFIT (puede ser .xlsx o .csv)"),
-    ]
     
+    def buscar_archivo_referencia(nombre_base: str) -> bool:
+        """
+        Busca un archivo de referencia en ref/ o ref/backup/ con extensiones .xlsx o .csv.
+        Retorna True si lo encuentra, False en caso contrario.
+        """
+        ref_dir = base_path / "ref"
+        # Buscar en ref/ y luego en ref/backup/
+        for carpeta in (ref_dir, ref_dir / "backup"):
+            if not carpeta.exists():
+                continue
+            for ext in [".xlsx", ".csv", ".XLSX", ".CSV"]:
+                archivo = carpeta / f"{nombre_base}{ext}"
+                if archivo.exists():
+                    return True
+        return False
+    
+    faltantes = []
+    advertencias = []
+    
+    # Verificar archivo principal de la aplicación
+    archivo_main = base_path / "app" / "main.py"
+    if not archivo_main.exists():
+        faltantes.append("app/main.py - Archivo principal de la aplicación")
+    
+    # Verificar archivos de referencia (buscan en ref/ y ref/backup/)
+    if not buscar_archivo_referencia("referentesUnificados"):
+        faltantes.append("ref/referentesUnificados.xlsx o ref/referentesUnificados.csv (o en ref/backup/) - Archivo de referentes")
+    
+    if not buscar_archivo_referencia("catalogoOfertasEAFIT"):
+        faltantes.append("ref/catalogoOfertasEAFIT.xlsx o ref/catalogoOfertasEAFIT.csv (o en ref/backup/) - Catálogo EAFIT")
+    
+    # Verificar archivos opcionales
     archivos_opcionales = [
         ("docs/normalizacionFinal.xlsx", "Archivo de normalización final"),
         ("models/clasificador_referentes.pkl", "Modelo ML (se entrenará si no existe)"),
     ]
     
-    faltantes = []
-    advertencias = []
-    
-    # Verificar requeridos
-    for archivo, descripcion in archivos_requeridos:
-        archivo_path = base_path / archivo
-        # Verificar si existe el archivo o alguna variante (.xlsx, .csv)
-        existe = archivo_path.exists()
-        if not existe:
-            # Buscar variantes
-            variantes = [
-                archivo_path.with_suffix('.xlsx'),
-                archivo_path.with_suffix('.csv'),
-                archivo_path.with_suffix('.XLSX'),
-                archivo_path.with_suffix('.CSV'),
-            ]
-            existe = any(v.exists() for v in variantes)
-        
-        if not existe:
-            faltantes.append(f"{archivo} - {descripcion}")
-    
-    # Verificar opcionales
     for archivo, descripcion in archivos_opcionales:
         archivo_path = base_path / archivo
         if not archivo_path.exists():

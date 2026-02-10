@@ -8,7 +8,6 @@
   "max_wait_download_sec": 180,
   "umbral_referente": 0.70,
   "download_retries": 2,
-  "max_archivos_historicos": 20,
   "_comentarios": {
     "outputs_dir": "Ruta absoluta para outputs. Dejar vacío para usar ruta relativa al proyecto.",
     "ref_dir": "Ruta absoluta para archivos de referencia. Dejar vacío para usar ruta relativa.",
@@ -18,8 +17,7 @@
     "headless": "true para ejecutar Chrome sin interfaz gráfica, false para ver el navegador.",
     "max_wait_download_sec": "Tiempo máximo de espera para descargas en segundos.",
     "umbral_referente": "Umbral (0.0 - 1.0) para marcar ES_REFERENTE = 'Sí'. Default: 0.70",
-    "download_retries": "Intentos de descarga SNIES (default: 2).",
-    "max_archivos_historicos": "Consolidar histórico cuando haya más de N archivos (default: 20)."
+    "download_retries": "Intentos de descarga SNIES (default: 2)."
   }
 }
 

@@ -1403,7 +1403,8 @@ class ManualReviewPage(ttk.Frame):
                     base_full.loc[mask, col] = val
 
         try:
-            with pd.ExcelWriter(self.file_path, mode="a", if_sheet_exists="replace", engine="openpyxl") as writer:
+            # Usar mode="w" para sobrescribir completamente el archivo (más seguro que mode="a")
+            with pd.ExcelWriter(self.file_path, mode="w", engine="openpyxl") as writer:
                 base_full.drop(columns=["_CODIGO_NORM"]).to_excel(writer, sheet_name="Programas", index=False)
             self.pending_updates.clear()
             self._touch_pending()
@@ -1980,16 +1981,20 @@ class RetrainPage(ttk.Frame):
                 mask_codigo = df_referentes["_CODIGO_NORM"] == codigo
                 
                 if mask_codigo.any():
-                    # Existe en referentes
+                    # Existe en referentes (puede haber múltiples filas con el mismo código)
+                    # Obtener el primer índice que coincide
+                    idx_match = df_referentes[mask_codigo].index[0]
+                    label_actual = df_referentes.loc[idx_match, "label"]
+                    
                     if es_referente:
                         # Marcar como referente (label=1)
-                        if df_referentes.loc[mask_codigo, "label"].iloc[0] != 1:
+                        if label_actual != 1:
                             df_referentes.loc[mask_codigo, "label"] = 1
                             cambios_realizados += 1
                             self._log(f"  ✓ {codigo}: Actualizado a label=1 (referente confirmado)")
                     else:
                         # Marcar como NO referente (label=0) - FALSO POSITIVO CORREGIDO
-                        if df_referentes.loc[mask_codigo, "label"].iloc[0] != 0:
+                        if label_actual != 0:
                             df_referentes.loc[mask_codigo, "label"] = 0
                             cambios_realizados += 1
                             self._log(f"  ✗ {codigo}: Cambiado a label=0 (falso positivo corregido)")
@@ -2604,7 +2609,6 @@ class MainMenuGUI:
             ("🔓 Desbloquear", self._unlock_if_needed),
             ("📂 Outputs", self._open_outputs),
             ("📊 Programas.xlsx", self._open_programas),
-            ("🧹 Limpiar", self._limpiar_historicos),
         ]
         
         self._util_buttons = []
@@ -3250,43 +3254,6 @@ class MainMenuGUI:
         except Exception as exc:
             safe_messagebox_error("Error", str(exc), parent=self.root)
     
-    def _limpiar_historicos(self):
-        """Consolida y limpia archivos históricos manualmente."""
-        from etl.limpieza_historicos import consolidar_historicos  # Lazy import
-        
-        if not ensure_base_dir(self.root, prompt_if_missing=True):
-            return
-        
-        if not _ask_yes_no(
-            "Confirmar limpieza",
-            "¿Consolidar archivos históricos en HistoricoProgramasNuevos.xlsx y eliminar archivos individuales?\n\n"
-            "Esto consolidará todos los archivos en outputs/historico/ y los eliminará después de consolidarlos.",
-            parent=self.root
-        ):
-            return
-        
-        try:
-            archivos_eliminados, registros_agregados = consolidar_historicos(umbral=1)  # Umbral 1 = consolidar todos
-            
-            if archivos_eliminados > 0:
-                messagebox.showinfo(
-                    "Limpieza completada",
-                    f"Se consolidaron {archivos_eliminados} archivos históricos.\n\n"
-                    f"Se agregaron {registros_agregados} registros a HistoricoProgramasNuevos.xlsx.\n\n"
-                    f"Los archivos individuales fueron eliminados.",
-                    parent=self.root
-                )
-            else:
-                messagebox.showinfo(
-                    "No se requirió limpieza",
-                    "No hay archivos históricos suficientes para consolidar.\n\n"
-                    "La limpieza automática se ejecuta cuando hay más de 20 archivos.",
-                    parent=self.root
-                )
-        except Exception as exc:
-            safe_messagebox_error("Error", f"Error al limpiar archivos históricos:\n\n{exc}", parent=self.root)
-
-
 class PipelinePage(ttk.Frame):
     """Interfaz gráfica para el pipeline de análisis SNIES."""
     
@@ -3951,7 +3918,36 @@ def run_pipeline(
                 pipeline_failed[0] = True
                 return 1
             
-            log("✓ Procesamiento completado")
+            # Verificar si hay programas nuevos detectados
+            if "PROGRAMA_NUEVO" in df_programas.columns:
+                # Contar programas nuevos usando el mismo patrón que se usa en otras partes del código
+                programas_nuevos = df_programas[
+                    df_programas["PROGRAMA_NUEVO"].astype(str).str.strip().str.upper() == "SÍ"
+                ]
+                cantidad_nuevos = len(programas_nuevos)
+                
+                log(f"Programas nuevos detectados: {cantidad_nuevos}")
+                
+                if cantidad_nuevos == 0:
+                    # No hay programas nuevos, detener el pipeline con mensaje informativo
+                    info_msg = (
+                        "No se han detectado programas nuevos después de comparar con los archivos históricos.\n\n"
+                        "Esto significa que todos los programas en el archivo descargado ya estaban presentes "
+                        "en ejecuciones anteriores del pipeline.\n\n"
+                        "Intente más tarde cuando haya nuevos programas disponibles en el portal SNIES."
+                    )
+                    log(f"[INFO] {info_msg}")
+                    log_info(info_msg)
+                    log_etapa_completada("Procesamiento de programas nuevos", f"duración: {time.time() - t_etapa:.1f}s")
+                    progress(3, "Programas nuevos", "done")
+                    log("=== Pipeline detenido: No hay programas nuevos para procesar ===")
+                    # Retornar código de éxito (0) porque no es un error, simplemente no hay trabajo que hacer
+                    return 0
+                else:
+                    log(f"✓ Procesamiento completado: {cantidad_nuevos} programa(s) nuevo(s) detectado(s)")
+            else:
+                log("⚠️ Advertencia: No se encontró la columna PROGRAMA_NUEVO. Continuando con precaución...")
+            
             log_etapa_completada("Procesamiento de programas nuevos", f"duración: {time.time() - t_etapa:.1f}s")
             progress(3, "Programas nuevos", "done")
         except Exception as exc:
@@ -4112,18 +4108,6 @@ def run_pipeline(
             log_error(error_msg)
             progress(7, "Histórico programas nuevos", "done")
             # No retornamos error aquí porque el histórico es complementario
-
-        # Limpieza automática de archivos históricos (si hay muchos)
-        try:
-            from etl.limpieza_historicos import limpiar_historicos_automatico
-            log("Verificando si se requiere limpieza de archivos históricos...")
-            if limpiar_historicos_automatico():
-                log("✓ Archivos históricos consolidados y limpiados")
-            else:
-                log("No se requiere limpieza de archivos históricos (pocos archivos)")
-        except Exception as exc:
-            log(f"[WARN] Error en limpieza automática de históricos: {exc}")
-            # No es crítico, continuar
 
         tiempo_fin = time.time()
         duracion_minutos = (tiempo_fin - tiempo_inicio) / 60.0
