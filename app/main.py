@@ -3688,6 +3688,7 @@ def run_pipeline(
         log_etapa_iniciada,
         log_exception,
         log_fin,
+        log_info,
         log_inicio,
         log_warning,
     )

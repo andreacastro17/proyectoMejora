@@ -133,6 +133,9 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
 
         total = len(df_actual)
         log_resultado(f"Filas procesadas: {total} (sin histórico)")
+        # Modo memoria: el pipeline escribe después; retornar DataFrame
+        if df is not None:
+            return df_actual
         print(f"Guardando archivo actualizado: {ARCHIVO_PROGRAMAS}")
         try:
             escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
@@ -154,6 +157,8 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
         log_warning("Marcando todos los programas como nuevos (sin histórico válido).")
         df_actual[COLUMNA_NUEVO] = "Sí"
         df_actual = df_actual.drop(columns=['_codigo_normalizado'])
+        if df is not None:
+            return df_actual
         try:
             escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
             log_info(f"Archivo actualizado guardado: {ARCHIVO_PROGRAMAS.name}")
@@ -169,6 +174,8 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
         log_warning(f"El archivo histórico {archivo_historico.name} está abierto. Marcando todos como nuevos.")
         df_actual[COLUMNA_NUEVO] = "Sí"
         df_actual = df_actual.drop(columns=['_codigo_normalizado'])
+        if df is not None:
+            return df_actual
         try:
             escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
             log_info(f"Archivo actualizado guardado: {ARCHIVO_PROGRAMAS.name}")

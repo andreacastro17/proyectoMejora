@@ -24,16 +24,23 @@ def _get_default_base_path() -> Path:
     """
     Obtiene la ruta base por defecto del proyecto.
     
-    Si se ejecuta como .EXE, usa la carpeta del ejecutable.
+    Si se ejecuta como .EXE (PyInstaller):
+    - Si el .exe está dentro de una carpeta llamada "dist", se usa la carpeta padre
+      de "dist" como base (raíz del proyecto), para que outputs, ref, models e
+      históricos sean los de la raíz del proyecto y no los de dist/.
+    - Si el .exe está en otra ruta (ej. instalación distribuida), se usa la
+      carpeta del ejecutable como base.
     Si se ejecuta como script, usa la carpeta del proyecto.
     """
     if getattr(sys, 'frozen', False):
         # Ejecutándose como .EXE (PyInstaller)
-        # sys.executable es la ruta del .EXE
         base_path = Path(sys.executable).parent
+        # Si el .exe está en proyectoMejora/dist/SniesManager.exe, usar proyectoMejora como base
+        # para que outputs, ref, históricos, etc. sean los de la raíz del proyecto
+        if base_path.name == "dist" and base_path.parent.exists():
+            base_path = base_path.parent
     else:
         # Ejecutándose como script de Python
-        # Usar la carpeta del proyecto (dos niveles arriba desde etl/)
         base_path = Path(__file__).resolve().parents[1]
     
     return base_path
