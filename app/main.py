@@ -660,8 +660,8 @@ class ManualReviewPage(ttk.Frame):
             return
 
         self.file_path = ARCHIVO_PROGRAMAS
-        # Columnas visibles y editables (mitigación: no permitir editar datos fuente SNIES)
-        self.display_columns = [
+        # Columnas principales (vista resumida)
+        self.main_columns = [
             "CÓDIGO_SNIES_DEL_PROGRAMA",
             "NOMBRE_INSTITUCIÓN",
             "NOMBRE_DEL_PROGRAMA",
@@ -672,6 +672,12 @@ class ManualReviewPage(ttk.Frame):
             "PROGRAMA_EAFIT_CODIGO",
             "PROGRAMA_EAFIT_NOMBRE",
         ]
+        # Columnas visibles actuales (por defecto todas, se actualiza al cargar)
+        self.display_columns = self.main_columns.copy()
+        # Todas las columnas disponibles (se establece al cargar el archivo)
+        self.all_columns: list[str] = []
+        # Estado de la vista: True = completa (todas), False = principal (9 columnas)
+        self.view_complete = True
         self.editable_columns = {
             "ES_REFERENTE",
             "PROGRAMA_EAFIT_CODIGO",
@@ -716,6 +722,8 @@ class ManualReviewPage(ttk.Frame):
         self.btn_delete = ttk.Button(row1, text="Descartar cambios (fila)", command=self._discard_row_changes)
         self.btn_delete.pack(side=tk.LEFT, padx=6)
         ttk.Button(row1, text="Descartar todo", command=self._discard_all_changes).pack(side=tk.LEFT, padx=6)
+        self.btn_toggle_view = ttk.Button(row1, text="Vista principal", command=self._toggle_view, state=tk.DISABLED)
+        self.btn_toggle_view.pack(side=tk.LEFT, padx=6)
         
         # Fila 2: Marcado y restauración
         row2 = ttk.Frame(btns, style="App.TFrame")
@@ -1080,25 +1088,62 @@ class ManualReviewPage(ttk.Frame):
                 threading.Thread(target=ejecutar_clasificacion, daemon=True).start()
                 return  # Salir aquí, se recargará cuando termine la clasificación
             
-            # Usar todas las columnas del archivo para la vista
-            self.display_columns = list(df_full.columns)
+            # Guardar todas las columnas disponibles
+            self.all_columns = list(df_full.columns)
+            # Por defecto mostrar todas las columnas (vista completa)
+            self.view_complete = True
+            self.display_columns = self.all_columns.copy()
             # Recrear la tabla con todas las columnas (el Treeview se creó con un subconjunto en __init__)
-            self.table.destroy()
-            self.table = EditableTable(
-                self,
-                columns=self.display_columns,
-                height=18,
-                editable_columns=self.editable_columns,
-                on_change=self._on_cell_change,
-            )
-            self.table.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
-            self.table.tree.bind("<<TreeviewSelect>>", self._on_select)
+            self._recreate_table()
+            
+            # Actualizar texto del botón y habilitarlo
+            self.btn_toggle_view.config(text="Vista principal", state=tk.NORMAL)
 
-            self.df_view = df_full[self.display_columns].copy()
-            self._log(f"Cargado: {self.file_path.name} ({len(self.df_view)} filas, {len(self.display_columns)} columnas).")
+            self.df_view = df_full[self.all_columns].copy()  # Guardar todas las columnas en df_view
+            self._log(f"Cargado: {self.file_path.name} ({len(self.df_view)} filas, {len(self.all_columns)} columnas disponibles).")
             self._apply_filter()
         except Exception as exc:
             messagebox.showerror("Error", f"No se pudo leer el Excel: {exc}", parent=self)
+
+    def _recreate_table(self):
+        """Recrea la tabla con las columnas actuales en display_columns."""
+        self.table.destroy()
+        self.table = EditableTable(
+            self,
+            columns=self.display_columns,
+            height=18,
+            editable_columns=self.editable_columns,
+            on_change=self._on_cell_change,
+        )
+        self.table.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        self.table.tree.bind("<<TreeviewSelect>>", self._on_select)
+
+    def _toggle_view(self):
+        """Alterna entre vista completa (todas las columnas) y vista principal (9 columnas)."""
+        if not self.all_columns:
+            self._log("⚠️ Primero carga el archivo Programas.xlsx")
+            return
+        
+        # Alternar estado
+        self.view_complete = not self.view_complete
+        
+        if self.view_complete:
+            # Cambiar a vista completa (todas las columnas)
+            self.display_columns = self.all_columns.copy()
+            self.btn_toggle_view.config(text="Vista principal")
+            self._log(f"Vista completa activada ({len(self.display_columns)} columnas)")
+        else:
+            # Cambiar a vista principal (solo las 9 columnas principales)
+            # Asegurar que las columnas principales existan en el archivo
+            self.display_columns = [c for c in self.main_columns if c in self.all_columns]
+            self.btn_toggle_view.config(text="Vista completa")
+            self._log(f"Vista principal activada ({len(self.display_columns)} columnas)")
+        
+        # Recrear la tabla con las nuevas columnas
+        self._recreate_table()
+        
+        # Reaplicar filtros con las nuevas columnas
+        self._apply_filter()
 
     def _render_page(self):
         if self._filtered_df is None:
