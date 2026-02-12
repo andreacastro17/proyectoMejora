@@ -37,6 +37,7 @@ COLUMNAS_REQUERIDAS = [
     "ES_REFERENTE",
     "PROGRAMA_EAFIT_CODIGO",
     "PROGRAMA_EAFIT_NOMBRE",
+    "ÁREA_DE_CONOCIMIENTO",  # Agregada para guardar área imputada
 ]
 
 # Nombre de la columna de fecha (primera columna)
@@ -58,10 +59,35 @@ COLUMNAS_ORDEN_HISTORICO = [
     "ES_REFERENTE",
     "PROGRAMA_EAFIT_CODIGO",
     "PROGRAMA_EAFIT_NOMBRE",
+    "ÁREA_DE_CONOCIMIENTO",  # Agregada para guardar área imputada
     "Afinidad",  # No se extrae de Programas.xlsx
     "Nivel",  # No se extrae de Programas.xlsx
     "ESTADO_PROGRAMA",  # No se extrae de Programas.xlsx
 ]
+
+
+def _limpiar_archivos_temporales_excel(directorio: Path) -> None:
+    """
+    Elimina archivos temporales de Excel (que empiezan con ~$) en el directorio especificado.
+    
+    Estos archivos se crean cuando Excel tiene un archivo abierto y pueden causar problemas.
+    """
+    import glob
+    import os
+    
+    # Buscar archivos temporales de Excel (patrón ~$*.xlsx)
+    patron = str(directorio / "~$*.xlsx")
+    archivos_temp = glob.glob(patron)
+    
+    for archivo_temp in archivos_temp:
+        try:
+            os.remove(archivo_temp)
+            print(f"Archivo temporal eliminado: {os.path.basename(archivo_temp)}")
+            log_info(f"Archivo temporal eliminado: {os.path.basename(archivo_temp)}")
+        except Exception as e:
+            # Si no se puede eliminar (probablemente porque Excel lo está usando), solo registrar advertencia
+            print(f"[WARN] No se pudo eliminar archivo temporal {os.path.basename(archivo_temp)}: {e}")
+            log_warning(f"No se pudo eliminar archivo temporal {os.path.basename(archivo_temp)}: {e}")
 
 
 def _consolidar_archivos_historicos_duplicados() -> pd.DataFrame | None:
@@ -76,6 +102,9 @@ def _consolidar_archivos_historicos_duplicados() -> pd.DataFrame | None:
     """
     from etl.exceptions_helpers import leer_excel_con_reintentos
     
+    # Limpiar archivos temporales de Excel antes de procesar
+    _limpiar_archivos_temporales_excel(ARCHIVO_HISTORICO.parent)
+    
     archivos_encontrados = []
     # Buscar variaciones: el archivo principal ahora es el que tiene espacio
     variaciones = [
@@ -87,6 +116,9 @@ def _consolidar_archivos_historicos_duplicados() -> pd.DataFrame | None:
     # Buscar todos los archivos históricos posibles
     for archivo in variaciones:
         if archivo.exists():
+            # Ignorar archivos temporales de Excel
+            if archivo.name.startswith("~$"):
+                continue
             try:
                 df = leer_excel_con_reintentos(archivo, sheet_name=HOJA_HISTORICO)
                 archivos_encontrados.append((archivo, df, len(df)))
@@ -180,6 +212,9 @@ def actualizar_historico_programas_nuevos() -> None:
     - Mantiene el archivo con más registros (ARCHIVO_HISTORICO)
     - Elimina los archivos con menos registros
     """
+    # Limpiar archivos temporales de Excel antes de procesar
+    _limpiar_archivos_temporales_excel(ARCHIVO_HISTORICO.parent)
+    
     # Verificar que existe el archivo de programas
     if not ARCHIVO_PROGRAMAS.exists():
         error_msg = f"No se encontró el archivo: {ARCHIVO_PROGRAMAS}"

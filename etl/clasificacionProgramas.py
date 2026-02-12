@@ -229,15 +229,27 @@ def cargar_catalogo_eafit(archivo: Path = None) -> pd.DataFrame:
         ValueError: Si el archivo no tiene las columnas requeridas
     """
     if archivo is None:
-        archivo = get_archivo_catalogo_eafit()
+        try:
+            archivo = get_archivo_catalogo_eafit()
+            print(f"[INFO] Ruta del catálogo EAFIT resuelta: {archivo}")
+        except FileNotFoundError as e:
+            print(f"[ERROR] No se pudo encontrar el archivo del catálogo EAFIT")
+            print(f"  Error: {e}")
+            raise FileNotFoundError(
+                f"No se encontró el archivo del catálogo EAFIT.\n\n"
+                f"Buscado en: ref/backup/ y ref/\n"
+                f"Archivo esperado: catalogoOfertasEAFIT.xlsx o catalogoOfertasEAFIT.csv\n\n"
+                f"Error original: {e}"
+            ) from e
     
     if not archivo.exists():
         raise FileNotFoundError(
             f"No se encontró el archivo del catálogo EAFIT: {archivo}\n\n"
-            "Verifica que el archivo exista en la carpeta ref/ o configura la ruta en config.json"
+            "Verifica que el archivo exista en la carpeta ref/backup/ o ref/ o configura la ruta en config.json"
         )
     
     print(f"Cargando catálogo EAFIT desde: {archivo}")
+    print(f"  Ruta absoluta: {archivo.resolve()}")
     try:
         df = leer_datos_flexible(archivo)
     except Exception as e:
@@ -249,6 +261,27 @@ def cargar_catalogo_eafit(archivo: Path = None) -> pd.DataFrame:
     # Validar columnas requeridas
     columnas_requeridas = ['Nombre Programa EAFIT', 'CAMPO_AMPLIO', 'ESTADO_PROGRAMA']
     columnas_faltantes = [col for col in columnas_requeridas if col not in df.columns]
+    
+    # Log de columnas disponibles para diagnóstico
+    print(f"  Columnas disponibles en catálogo EAFIT ({len(df.columns)} total):")
+    for i, col in enumerate(df.columns[:15], 1):  # Mostrar primeras 15 columnas
+        print(f"    {i}. {col}")
+    if len(df.columns) > 15:
+        print(f"    ... y {len(df.columns) - 15} más")
+    
+    # Verificar si existe columna de código EAFIT
+    posibles_columnas_codigo = ['Codigo EAFIT', 'Código Programa', 'CODIGO_PROGRAMA', 'Codigo Programa']
+    columna_codigo_encontrada = None
+    for col in posibles_columnas_codigo:
+        if col in df.columns:
+            columna_codigo_encontrada = col
+            print(f"  ✓ Columna de código encontrada: '{col}'")
+            break
+    
+    if not columna_codigo_encontrada:
+        print(f"  ⚠ ADVERTENCIA: No se encontró columna de código EAFIT. Buscadas: {posibles_columnas_codigo}")
+        print(f"    Esto puede causar problemas al buscar programas EAFIT por código.")
+    
     if columnas_faltantes:
         raise ValueError(
             f"El catálogo EAFIT no tiene las columnas requeridas: {', '.join(columnas_faltantes)}\n\n"
@@ -986,10 +1019,23 @@ def clasificar_programas_nuevos(
     df_nuevos = df_programas[df_programas['PROGRAMA_NUEVO'] == 'Sí'].copy()
     
     if len(df_nuevos) == 0:
-        info_msg = "No hay programas nuevos para clasificar."
+        info_msg = "No hay programas nuevos para clasificar. Retornando DataFrame completo con todos los programas."
         print(info_msg)
         log_info(info_msg)
-        return pd.DataFrame()
+        # Asegurar que las columnas de clasificación existan en el DataFrame retornado
+        # Esto evita errores cuando el pipeline espera estas columnas más adelante
+        columnas_clasificacion = ['ES_REFERENTE', 'PROBABILIDAD', 'PROGRAMA_EAFIT_CODIGO', 'PROGRAMA_EAFIT_NOMBRE']
+        for col in columnas_clasificacion:
+            if col not in df_programas.columns:
+                # Inicializar columnas con valores por defecto si no existen
+                if col == 'ES_REFERENTE':
+                    df_programas[col] = 'No'
+                elif col == 'PROBABILIDAD':
+                    df_programas[col] = 0.0
+                else:  # PROGRAMA_EAFIT_CODIGO o PROGRAMA_EAFIT_NOMBRE
+                    df_programas[col] = None
+        # Retornar el DataFrame completo en lugar de uno vacío para que el pipeline pueda continuar
+        return df_programas
     
     print(f"Clasificando {len(df_nuevos)} programas nuevos...")
     log_info(f"Iniciando clasificación de {len(df_nuevos)} programas nuevos")
@@ -998,10 +1044,40 @@ def clasificar_programas_nuevos(
     modelo_clasificador, modelo_embeddings, encoder = cargar_modelos()
     
     # Cargar catálogo EAFIT
-    df_catalogo_eafit = cargar_catalogo_eafit()
+    print("=" * 60)
+    print("Cargando catálogo EAFIT para clasificación...")
+    try:
+        df_catalogo_eafit = cargar_catalogo_eafit()
+        print(f"✓ Catálogo EAFIT cargado: {len(df_catalogo_eafit)} programas activos")
+        if len(df_catalogo_eafit) == 0:
+            error_msg = (
+                "CRÍTICO: El catálogo EAFIT está vacío después del filtro de programas activos.\n\n"
+                "Esto significa que no hay programas EAFIT activos para comparar, por lo que NO se pueden "
+                "identificar referentes. Verifica el archivo del catálogo EAFIT."
+            )
+            print(f"[ERROR] {error_msg}")
+            log_error(error_msg)
+            raise ValueError(error_msg)
+    except FileNotFoundError as e:
+        error_msg = (
+            f"CRÍTICO: No se pudo cargar el catálogo EAFIT: {e}\n\n"
+            "El sistema necesita el archivo 'catalogoOfertasEAFIT.xlsx' o 'catalogoOfertasEAFIT.csv' "
+            "en la carpeta ref/backup/ o ref/ para poder identificar referentes.\n\n"
+            "Sin este archivo, NO se pueden clasificar programas como referentes."
+        )
+        print(f"[ERROR] {error_msg}")
+        log_error(error_msg)
+        raise
+    except Exception as e:
+        error_msg = f"Error al cargar catálogo EAFIT: {e}"
+        print(f"[ERROR] {error_msg}")
+        log_error(error_msg)
+        raise
+    
     # Precalcular embeddings del catálogo una sola vez (evita recalcular por cada programa nuevo)
     print("Precalculando embeddings del catálogo EAFIT...")
     textos_catalogo = df_catalogo_eafit['Nombre Programa EAFIT_norm'].astype(str).tolist()
+    print(f"  Total de programas en catálogo para comparación: {len(textos_catalogo)}")
     try:
         embeddings_catalogo = modelo_embeddings.encode(
             textos_catalogo,
@@ -1064,6 +1140,7 @@ def clasificar_programas_nuevos(
         
         # Inicializar como NO referente si no hay nivel válido
         es_referente_final = False
+        razon_no_referente = []
         
         # Solo puede ser referente si se cumplen TODAS estas condiciones:
         # 1. Hay un programa EAFIT asignado
@@ -1075,13 +1152,24 @@ def clasificar_programas_nuevos(
         if resultado['programa_eafit_codigo'] is not None and nivel_programa_nuevo_norm:
             # Obtener el nivel y estado del programa EAFIT desde catalogoOfertasEAFIT.xlsx
             programa_eafit_codigo = resultado['programa_eafit_codigo']
-            programa_eafit_info = df_catalogo_eafit[
-                df_catalogo_eafit['Codigo EAFIT'] == programa_eafit_codigo
-            ]
+            
+            # Intentar buscar por diferentes nombres de columna de código
+            programa_eafit_info = pd.DataFrame()
+            posibles_columnas_codigo = ['Codigo EAFIT', 'Código Programa', 'CODIGO_PROGRAMA', 'Codigo Programa']
+            
+            for col_codigo in posibles_columnas_codigo:
+                if col_codigo in df_catalogo_eafit.columns:
+                    programa_eafit_info = df_catalogo_eafit[
+                        df_catalogo_eafit[col_codigo].astype(str) == str(programa_eafit_codigo)
+                    ]
+                    if not programa_eafit_info.empty:
+                        break
             
             if not programa_eafit_info.empty:
                 nivel_eafit_norm = programa_eafit_info.iloc[0].get('NIVEL_DE_FORMACIÓN_norm', '')
                 estado_programa_eafit = programa_eafit_info.iloc[0].get('ESTADO_PROGRAMA_norm', '')
+                estado_original = programa_eafit_info.iloc[0].get('ESTADO_PROGRAMA', '')
+                
                 if 'ESTADO_PROGRAMA' in programa_eafit_info.columns:
                     # Si no hay columna normalizada, usar la original
                     if not estado_programa_eafit:
@@ -1089,6 +1177,7 @@ def clasificar_programas_nuevos(
                 else:
                     # Si no hay columna ESTADO_PROGRAMA, no se puede validar → NO es referente
                     estado_programa_eafit = 'inactivo'  # Por seguridad, asumir inactivo si no se puede verificar
+                    razon_no_referente.append("No se encontró columna ESTADO_PROGRAMA en catálogo EAFIT")
                 
                 # VALIDACIÓN DIRECTA: Comparar los niveles normalizados Y verificar estado activo
                 # Ambas condiciones son OBLIGATORIAS: nivel debe coincidir Y programa debe estar activo
@@ -1098,49 +1187,32 @@ def clasificar_programas_nuevos(
                         if estado_programa_eafit == 'activo':
                             # Los niveles coinciden Y el programa está activo → puede ser referente (depende de probabilidad)
                             es_referente_final = resultado['es_referente']
+                            if not es_referente_final:
+                                razon_no_referente.append(f"Probabilidad ({resultado.get('probabilidad', 0.0):.4f}) no alcanza el umbral")
                         else:
                             # Los niveles coinciden PERO el programa NO está activo → NO es referente
                             # Esta es una condición obligatoria: solo programas activos pueden ser referentes
                             es_referente_final = False
-                            estado_original = programa_eafit_info.iloc[0].get('ESTADO_PROGRAMA', estado_programa_eafit) if not programa_eafit_info.empty else estado_programa_eafit
-                            print(
-                                f"VALIDACIÓN ESTADO: Programa '{nombre_programa}' "
-                                f"NO es referente de '{resultado['programa_eafit_nombre']}' "
-                                f"(ESTADO_PROGRAMA: '{estado_original}') - "
-                                f"Programa EAFIT no está activo (solo programas activos pueden ser referentes)"
-                            )
+                            razon_no_referente.append(f"Programa EAFIT no está activo (estado: '{estado_original}')")
                     else:
                         # Los niveles NO coinciden → NO es referente
                         es_referente_final = False
-                        print(
-                            f"VALIDACIÓN NIVEL: Programa '{nombre_programa}' "
-                            f"(NIVEL_DE_FORMACIÓN: '{nivel_formacion}' → '{nivel_programa_nuevo_norm}') "
-                            f"NO es referente de '{resultado['programa_eafit_nombre']}' "
-                            f"(NIVEL_DE_FORMACIÓN: '{nivel_eafit_norm}') - Niveles diferentes"
-                        )
+                        razon_no_referente.append(f"Niveles no coinciden: '{nivel_programa_nuevo_norm}' != '{nivel_eafit_norm}'")
                 else:
                     # El programa EAFIT no tiene nivel válido
                     es_referente_final = False
-                    print(
-                        f"VALIDACIÓN NIVEL: Programa EAFIT '{resultado['programa_eafit_nombre']}' "
-                        f"no tiene NIVEL_DE_FORMACIÓN válido"
-                    )
+                    razon_no_referente.append("Programa EAFIT no tiene NIVEL_DE_FORMACIÓN válido")
             else:
                 # No se encontró el programa EAFIT en el catálogo
                 es_referente_final = False
+                razon_no_referente.append(f"No se encontró programa EAFIT con código '{programa_eafit_codigo}' en catálogo")
+        elif resultado['programa_eafit_codigo'] is None:
+            es_referente_final = False
+            razon_no_referente.append("No se encontró ningún programa EAFIT candidato")
         elif not nivel_programa_nuevo_norm:
             # El programa nuevo no tiene nivel válido → NO puede ser referente
             es_referente_final = False
-            if nivel_formacion:
-                print(
-                    f"VALIDACIÓN NIVEL: Programa '{nombre_programa}' "
-                    f"tiene NIVEL_DE_FORMACIÓN inválido: '{nivel_formacion}'"
-                )
-            else:
-                print(
-                    f"VALIDACIÓN NIVEL: Programa '{nombre_programa}' "
-                    f"no tiene NIVEL_DE_FORMACIÓN"
-                )
+            razon_no_referente.append(f"Nivel de formación inválido: '{nivel_formacion}'")
         
         if progress_callback and (num % 10 == 0 or num == total_nuevos):
             try:
@@ -1165,23 +1237,69 @@ def clasificar_programas_nuevos(
     
     df_resultados = pd.DataFrame(resultados)
     
-    # Agregar columnas al archivo original
+    # Agregar columnas al archivo original (si no existen)
     print("Agregando resultados al archivo original...")
-    for col in ['ES_REFERENTE', 'PROBABILIDAD', 'PROGRAMA_EAFIT_CODIGO', 
-                'PROGRAMA_EAFIT_NOMBRE']:
-        df_programas[col] = None
+    columnas_clasificacion = ['ES_REFERENTE', 'PROBABILIDAD', 'PROGRAMA_EAFIT_CODIGO', 
+                              'PROGRAMA_EAFIT_NOMBRE']
+    for col in columnas_clasificacion:
+        if col not in df_programas.columns:
+            df_programas[col] = None
+            print(f"  Columna '{col}' creada (no existía)")
+    
+    # Normalizar códigos SNIES para comparación robusta
+    def _normalizar_codigo_snies(valor: object) -> str:
+        """Normaliza un código SNIES para comparación (maneja float, string, etc.)."""
+        if pd.isna(valor):
+            return ""
+        # Convertir a string y limpiar
+        s = str(valor).strip()
+        # Remover .0 si es float convertido a string
+        if s.endswith(".0"):
+            s = s[:-2]
+        return s
+    
+    # Crear columna normalizada temporal para comparación
+    df_programas['_CODIGO_SNIES_NORM'] = df_programas['CÓDIGO_SNIES_DEL_PROGRAMA'].apply(_normalizar_codigo_snies)
     
     # Mapear resultados al DataFrame original
+    programas_mapeados = 0
+    programas_no_encontrados = []
+    
     for resultado in resultados:
         codigo_snies = resultado['CÓDIGO_SNIES_DEL_PROGRAMA']
-        mask = df_programas['CÓDIGO_SNIES_DEL_PROGRAMA'] == codigo_snies
+        codigo_norm = _normalizar_codigo_snies(codigo_snies)
+        
+        # Buscar usando la columna normalizada
+        mask = df_programas['_CODIGO_SNIES_NORM'] == codigo_norm
         
         if mask.any():
             df_programas.loc[mask, 'ES_REFERENTE'] = resultado['ES_REFERENTE']
             df_programas.loc[mask, 'PROBABILIDAD'] = resultado['PROBABILIDAD']
             df_programas.loc[mask, 'PROGRAMA_EAFIT_CODIGO'] = resultado['PROGRAMA_EAFIT_CODIGO']
             df_programas.loc[mask, 'PROGRAMA_EAFIT_NOMBRE'] = resultado['PROGRAMA_EAFIT_NOMBRE']
+            programas_mapeados += mask.sum()
+        else:
+            programas_no_encontrados.append(codigo_snies)
     
+    # Eliminar columna temporal
+    df_programas = df_programas.drop(columns=['_CODIGO_SNIES_NORM'])
+    
+    # Log de diagnóstico
+    if programas_no_encontrados:
+        print(f"[WARN] {len(programas_no_encontrados)} programas no se encontraron en el DataFrame para mapear resultados:")
+        for codigo in programas_no_encontrados[:5]:  # Mostrar solo los primeros 5
+            print(f"  - {codigo}")
+        if len(programas_no_encontrados) > 5:
+            print(f"  ... y {len(programas_no_encontrados) - 5} más")
+    
+    print(f"Mapeados {programas_mapeados} registros con resultados de clasificación.")
+    
+    # Validación: verificar que los valores se mapearon correctamente
+    if programas_mapeados > 0:
+        df_validacion = df_programas[df_programas['ES_REFERENTE'].notna()].copy()
+        referentes_mapeados = (df_validacion['ES_REFERENTE'] == 'Sí').sum()
+        no_referentes_mapeados = (df_validacion['ES_REFERENTE'] == 'No').sum()
+        print(f"Validación: {referentes_mapeados} referentes y {no_referentes_mapeados} no referentes mapeados correctamente.")
     
     # Si se proporcionó df_programas, solo retornar (sin escribir)
     if df_programas is not None and archivo_programas is None:

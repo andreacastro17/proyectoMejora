@@ -24,16 +24,25 @@ def _get_default_base_path() -> Path:
     """
     Obtiene la ruta base por defecto del proyecto.
     
-    Si se ejecuta como .EXE, usa la carpeta del ejecutable.
+    Si se ejecuta como .EXE (PyInstaller):
+    - Si el .exe está dentro de una carpeta llamada "dist", se usa la carpeta padre
+      de "dist" como base (raíz del proyecto), para que outputs, ref, models e
+      históricos sean los de la raíz del proyecto y no los de dist/.
+    - Si el .exe está en otra ruta (ej. instalación distribuida), se usa la
+      carpeta del ejecutable como base.
     Si se ejecuta como script, usa la carpeta del proyecto.
     """
     if getattr(sys, 'frozen', False):
         # Ejecutándose como .EXE (PyInstaller)
-        # sys.executable es la ruta del .EXE
-        base_path = Path(sys.executable).parent
+        # Resolver la ruta para normalizar y manejar symlinks/case sensitivity
+        base_path = Path(sys.executable).resolve().parent
+        # Si el .exe está en proyectoMejora/dist/SniesManager.exe, usar proyectoMejora como base
+        # para que outputs, ref, históricos, etc. sean los de la raíz del proyecto
+        # Verificación case-insensitive y más robusta
+        if base_path.name.lower() == "dist" and base_path.parent.exists() and base_path.parent.is_dir():
+            base_path = base_path.parent
     else:
         # Ejecutándose como script de Python
-        # Usar la carpeta del proyecto (dos niveles arriba desde etl/)
         base_path = Path(__file__).resolve().parents[1]
     
     return base_path
@@ -193,9 +202,9 @@ ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos .xlsx"  # Con espaci
 
 def _resolve_referencia_path(ref_dir: Path, nombre_base: str) -> Path:
     """Resuelve ruta a referentesUnificados o catalogoOfertasEAFIT (.xlsx o .csv).
-    Busca en ref_dir y, si no existe, en ref_dir/backup (común cuando los archivos están en ref/backup/).
+    Busca primero en ref_dir/backup (donde suelen estar los archivos), luego en ref_dir.
     """
-    for carpeta in (ref_dir, ref_dir / "backup"):
+    for carpeta in (ref_dir / "backup", ref_dir):
         if not carpeta.exists():
             continue
         for ext in [".xlsx", ".csv"]:
@@ -275,8 +284,8 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     
     # Funciones para detección automática de formato en archivos de referencia
     def _cargar_archivo_referencia(base_path: Path, nombre_base: str) -> Path:
-        """Busca .xlsx o .csv en base_path y, si no existe, en base_path/backup."""
-        for carpeta in (base_path, base_path / "backup"):
+        """Busca .xlsx o .csv primero en base_path/backup (donde suelen estar los archivos), luego en base_path."""
+        for carpeta in (base_path / "backup", base_path):
             if not carpeta.exists():
                 continue
             for ext in ['.xlsx', '.csv']:
@@ -344,16 +353,30 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
 
 # Exponer funciones de utilidad para uso en otros módulos
 def cargar_archivo_referencia(base_path: Path, nombre_base: str) -> Path:
-    """Busca .xlsx o .csv en base_path y, si no existe, en base_path/backup."""
-    for carpeta in (base_path, base_path / "backup"):
+    """Busca .xlsx o .csv en base_path/backup primero, luego en base_path."""
+    # PRIORIDAD: Buscar primero en backup/ (donde suelen estar los archivos)
+    carpetas_busqueda = [base_path / "backup", base_path]
+    
+    for carpeta in carpetas_busqueda:
         if not carpeta.exists():
             continue
         for ext in ['.xlsx', '.csv']:
             archivo = carpeta / f"{nombre_base}{ext}"
             if archivo.exists():
+                print(f"[INFO] Archivo {nombre_base} encontrado en: {archivo}")
                 return archivo
+    
+    # Si no se encuentra, mostrar información de diagnóstico
+    print(f"[ERROR] No se encontró {nombre_base}.xlsx ni {nombre_base}.csv")
+    print(f"  Buscado en: {base_path / 'backup'}")
+    print(f"  Buscado en: {base_path}")
+    if base_path.exists():
+        print(f"  Archivos en {base_path}: {list(base_path.glob('*'))[:5]}")
+        if (base_path / "backup").exists():
+            print(f"  Archivos en {base_path / 'backup'}: {list((base_path / 'backup').glob('*'))[:5]}")
+    
     raise FileNotFoundError(
-        f"No se encontró {nombre_base}.xlsx ni {nombre_base}.csv en {base_path} ni en {base_path / 'backup'}"
+        f"No se encontró {nombre_base}.xlsx ni {nombre_base}.csv en {base_path / 'backup'} ni en {base_path}"
     )
 
 def leer_datos_flexible(ruta: Path, **kwargs) -> pd.DataFrame:

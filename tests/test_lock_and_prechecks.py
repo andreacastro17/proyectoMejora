@@ -57,7 +57,9 @@ def test_run_pipeline_creates_and_removes_lock(tmp_path: Path, monkeypatch):
     monkeypatch.setitem(sys.modules, "etl.normalizacion", mock_normalizar)
     
     mock_procesamiento = types.ModuleType("etl.procesamientoSNIES")
-    mock_procesamiento.procesar_programas_nuevos = lambda: None
+    # Mock debe retornar DataFrame para cumplir con el tipo de retorno
+    import pandas as pd
+    mock_procesamiento.procesar_programas_nuevos = lambda df=None, archivo=None: df if df is not None else pd.DataFrame()
     monkeypatch.setitem(sys.modules, "etl.procesamientoSNIES", mock_procesamiento)
     
     mock_norm_final = types.ModuleType("etl.normalizacion_final")
@@ -133,7 +135,9 @@ def test_run_pipeline_schema_validation_failure(tmp_path: Path, monkeypatch):
     monkeypatch.setitem(sys.modules, "etl.normalizacion", mock_normalizar)
     
     mock_procesamiento = types.ModuleType("etl.procesamientoSNIES")
-    mock_procesamiento.procesar_programas_nuevos = lambda: None
+    # Mock debe retornar DataFrame para cumplir con el tipo de retorno
+    import pandas as pd
+    mock_procesamiento.procesar_programas_nuevos = lambda df=None, archivo=None: df if df is not None else pd.DataFrame()
     monkeypatch.setitem(sys.modules, "etl.procesamientoSNIES", mock_procesamiento)
     
     mock_norm_final = types.ModuleType("etl.normalizacion_final")

@@ -26,6 +26,7 @@ COLUMNA_NUEVO = "PROGRAMA_NUEVO"
 def obtener_ultimo_archivo_historico(directorio: Path) -> Path | None:
     """
     Obtiene el archivo más reciente en el directorio histórico basado en la fecha de modificación.
+    Ignora archivos temporales de Excel (que empiezan con ~$).
     
     Args:
         directorio: Ruta al directorio que contiene los archivos históricos
@@ -37,6 +38,12 @@ def obtener_ultimo_archivo_historico(directorio: Path) -> Path | None:
         return None
     
     archivos_xlsx = list(directorio.glob("*.xlsx"))
+    if not archivos_xlsx:
+        return None
+    
+    # Filtrar archivos temporales de Excel (que empiezan con ~$)
+    archivos_xlsx = [f for f in archivos_xlsx if not f.name.startswith("~$")]
+    
     if not archivos_xlsx:
         return None
     
@@ -133,6 +140,9 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
 
         total = len(df_actual)
         log_resultado(f"Filas procesadas: {total} (sin histórico)")
+        # Modo memoria: el pipeline escribe después; retornar DataFrame
+        if df is not None:
+            return df_actual
         print(f"Guardando archivo actualizado: {ARCHIVO_PROGRAMAS}")
         try:
             escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
@@ -142,7 +152,7 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
             error_msg = explicar_error_archivo_abierto(ARCHIVO_PROGRAMAS, "escribir")
             log_error(error_msg)
             raise PermissionError(error_msg) from e
-        return
+        return df_actual
     
     print(f"Leyendo archivo histórico: {archivo_historico.name}")
     print(f"Ruta completa: {archivo_historico}")
@@ -154,6 +164,8 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
         log_warning("Marcando todos los programas como nuevos (sin histórico válido).")
         df_actual[COLUMNA_NUEVO] = "Sí"
         df_actual = df_actual.drop(columns=['_codigo_normalizado'])
+        if df is not None:
+            return df_actual
         try:
             escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
             log_info(f"Archivo actualizado guardado: {ARCHIVO_PROGRAMAS.name}")
@@ -161,7 +173,7 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
             error_msg = explicar_error_archivo_abierto(ARCHIVO_PROGRAMAS, "escribir")
             log_error(error_msg)
             raise PermissionError(error_msg) from e
-        return
+        return df_actual
     
     try:
         df_historico = leer_excel_con_reintentos(archivo_historico, sheet_name=HOJA_PROGRAMAS)
@@ -169,6 +181,8 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
         log_warning(f"El archivo histórico {archivo_historico.name} está abierto. Marcando todos como nuevos.")
         df_actual[COLUMNA_NUEVO] = "Sí"
         df_actual = df_actual.drop(columns=['_codigo_normalizado'])
+        if df is not None:
+            return df_actual
         try:
             escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
             log_info(f"Archivo actualizado guardado: {ARCHIVO_PROGRAMAS.name}")
@@ -176,7 +190,7 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
             error_msg = explicar_error_archivo_abierto(ARCHIVO_PROGRAMAS, "escribir")
             log_error(error_msg)
             raise PermissionError(error_msg) from e
-        return
+        return df_actual
     
     # Eliminar filas vacías (donde todas las columnas son nulas)
     filas_antes_hist = len(df_historico)
@@ -197,7 +211,7 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
         if df is not None:
             return df_actual
         
-        # Si se está trabajando con archivo, escribir y retornar None (no se usa)
+        # Si se está trabajando con archivo, escribir y retornar el DataFrame
         print(f"Guardando archivo actualizado: {ARCHIVO_PROGRAMAS}")
         try:
             escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
@@ -207,7 +221,7 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
             error_msg = explicar_error_archivo_abierto(ARCHIVO_PROGRAMAS, "escribir")
             log_error(error_msg)
             raise PermissionError(error_msg) from e
-        return None
+        return df_actual
     
     # Eliminar filas donde CÓDIGO_SNIES_DEL_PROGRAMA está vacío en el histórico
     df_historico = df_historico.dropna(subset=[COLUMNA_ID])
@@ -262,7 +276,7 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
     if df is not None:
         return df_actual
     
-    # Si se está trabajando con archivo, escribir y no retornar nada (comportamiento legacy)
+    # Si se está trabajando con archivo, escribir y retornar el DataFrame
     print(f"Guardando archivo actualizado: {ARCHIVO_PROGRAMAS}")
     try:
         escribir_excel_con_reintentos(ARCHIVO_PROGRAMAS, df_actual, sheet_name=HOJA_PROGRAMAS)
@@ -272,6 +286,7 @@ def procesar_programas_nuevos(df: pd.DataFrame | None = None, archivo: Path | No
         error_msg = explicar_error_archivo_abierto(ARCHIVO_PROGRAMAS, "escribir")
         log_error(error_msg)
         raise PermissionError(error_msg) from e
+    return df_actual
 
 
 if __name__ == "__main__":
