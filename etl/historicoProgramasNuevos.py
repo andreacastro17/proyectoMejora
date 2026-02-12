@@ -75,18 +75,14 @@ def _limpiar_archivos_temporales_excel(directorio: Path) -> None:
     import glob
     import os
     
-    # Buscar archivos temporales de Excel (patrón ~$*.xlsx)
     patron = str(directorio / "~$*.xlsx")
     archivos_temp = glob.glob(patron)
     
     for archivo_temp in archivos_temp:
         try:
             os.remove(archivo_temp)
-            print(f"Archivo temporal eliminado: {os.path.basename(archivo_temp)}")
             log_info(f"Archivo temporal eliminado: {os.path.basename(archivo_temp)}")
         except Exception as e:
-            # Si no se puede eliminar (probablemente porque Excel lo está usando), solo registrar advertencia
-            print(f"[WARN] No se pudo eliminar archivo temporal {os.path.basename(archivo_temp)}: {e}")
             log_warning(f"No se pudo eliminar archivo temporal {os.path.basename(archivo_temp)}: {e}")
 
 
@@ -262,15 +258,31 @@ def actualizar_historico_programas_nuevos() -> None:
         col for col in COLUMNAS_REQUERIDAS if col not in df_nuevos.columns
     ]
     if columnas_faltantes:
-        error_msg = (
-            f"No se encontraron las siguientes columnas en el archivo: "
-            f"{', '.join(columnas_faltantes)}"
-        )
-        log_error(error_msg)
-        raise ValueError(error_msg)
+        # Si falta ÁREA_DE_CONOCIMIENTO, crear la columna vacía (puede no existir si aún no se ha imputado)
+        if "ÁREA_DE_CONOCIMIENTO" in columnas_faltantes:
+            df_nuevos["ÁREA_DE_CONOCIMIENTO"] = None
+            columnas_faltantes.remove("ÁREA_DE_CONOCIMIENTO")
+            log_info("Columna ÁREA_DE_CONOCIMIENTO no encontrada, se creará vacía en el histórico")
+        
+        # Si aún faltan otras columnas críticas, lanzar error
+        if columnas_faltantes:
+            error_msg = (
+                f"No se encontraron las siguientes columnas en el archivo: "
+                f"{', '.join(columnas_faltantes)}"
+            )
+            log_error(error_msg)
+            raise ValueError(error_msg)
     
     # Seleccionar solo las columnas requeridas que se extraen de Programas.xlsx
     df_extraido = df_nuevos[COLUMNAS_REQUERIDAS].copy()
+    
+    # Log para verificar que se están guardando las áreas
+    if "ÁREA_DE_CONOCIMIENTO" in df_extraido.columns:
+        areas_asignadas = df_extraido["ÁREA_DE_CONOCIMIENTO"].notna().sum()
+        areas_totales = len(df_extraido)
+        log_info(f"Programas nuevos con área asignada: {areas_asignadas}/{areas_totales}")
+        if areas_asignadas > 0:
+            print(f"✓ {areas_asignadas} programas nuevos tienen área de conocimiento asignada")
     
     # Agregar la fecha de ejecución
     fecha_ejecucion = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -289,6 +301,22 @@ def actualizar_historico_programas_nuevos() -> None:
         # Obtener el orden de columnas del archivo histórico existente
         columnas_orden_historico = list(df_historico_existente.columns)
         
+        # Verificar y agregar columnas faltantes al histórico existente (migración de esquema)
+        # Esto permite que históricos antiguos se actualicen con nuevas columnas sin perder datos
+        columnas_faltantes_en_historico = [
+            col for col in [COLUMNA_FECHA] + COLUMNAS_REQUERIDAS 
+            if col not in columnas_orden_historico
+        ]
+        if columnas_faltantes_en_historico:
+            # Agregar columnas faltantes al histórico existente con valores None/NaN para registros antiguos
+            log_info(f"Agregando columnas faltantes al histórico existente: {', '.join(columnas_faltantes_en_historico)}")
+            print(f"⚠️ El histórico no tiene las siguientes columnas. Se agregarán automáticamente: {', '.join(columnas_faltantes_en_historico)}")
+            for col in columnas_faltantes_en_historico:
+                df_historico_existente[col] = None
+            # Actualizar el orden de columnas para incluir las nuevas
+            columnas_orden_historico = list(df_historico_existente.columns)
+            log_info(f"Histórico actualizado con nuevas columnas. Total de columnas: {len(columnas_orden_historico)}")
+        
         # Construir DataFrame con todas las columnas en el orden correcto
         df_para_historico = pd.DataFrame(index=df_extraido.index)
         
@@ -300,19 +328,6 @@ def actualizar_historico_programas_nuevos() -> None:
             else:
                 # Si la columna no se extrae, rellenar con None/NaN
                 df_para_historico[col] = None
-        
-        # Verificar que todas las columnas requeridas están presentes
-        columnas_faltantes_en_historico = [
-            col for col in [COLUMNA_FECHA] + COLUMNAS_REQUERIDAS 
-            if col not in columnas_orden_historico
-        ]
-        if columnas_faltantes_en_historico:
-            error_msg = (
-                f"Faltan columnas requeridas en el archivo histórico: "
-                f"{', '.join(columnas_faltantes_en_historico)}"
-            )
-            log_error(error_msg)
-            raise ValueError(error_msg)
         
         # Concatenar los nuevos registros con los existentes (sin eliminar ningún registro)
         df_historico_final = pd.concat(
@@ -349,20 +364,128 @@ def actualizar_historico_programas_nuevos() -> None:
         mode="w",
         engine="openpyxl",
     ) as writer:
-        df_historico_final.to_excel(
-            writer, sheet_name=HOJA_HISTORICO, index=False
-        )
+        df_historico_final.to_excel(writer, sheet_name=HOJA_HISTORICO, index=False)
     
-    total_registros = len(df_historico_final)
-    nuevos_registros = len(df_para_historico)
-    log_info(f"Archivo histórico actualizado: {ARCHIVO_HISTORICO.name}")
-    log_resultado(f"Registros agregados al histórico: {nuevos_registros}")
-    log_resultado(f"Total de registros en histórico: {total_registros}")
-    print(f"Archivo histórico actualizado exitosamente.")
-    print(f"  - Registros agregados en esta ejecución: {nuevos_registros}")
-    print(f"  - Total de registros en histórico: {total_registros}")
+    print(f"✓ Archivo histórico guardado: {len(df_historico_final)} registros totales")
+    log_info(f"Archivo histórico guardado: {ARCHIVO_HISTORICO.name} ({len(df_historico_final)} registros totales)")
+
+
+def actualizar_registros_historicos_ajustes_manuales(
+    cambios: dict[str, dict[str, any]],
+    df_programas: pd.DataFrame | None = None,
+) -> None:
+    """
+    Actualiza registros existentes en el histórico cuando se hacen ajustes manuales.
+    
+    Esta función se llama desde la página de ajustes manuales para sincronizar
+    los cambios de referentes (ES_REFERENTE, PROGRAMA_EAFIT_CODIGO, PROGRAMA_EAFIT_NOMBRE)
+    con el archivo histórico.
+    
+    Args:
+        cambios: Diccionario con código SNIES normalizado como clave y diccionario de cambios como valor.
+                 Ejemplo: {"12345": {"ES_REFERENTE": "Sí", "PROGRAMA_EAFIT_CODIGO": 123}}
+        df_programas: DataFrame opcional con los datos de Programas.xlsx. Si es None, se lee del archivo.
+    """
+    # Limpiar archivos temporales de Excel antes de procesar
+    _limpiar_archivos_temporales_excel(ARCHIVO_HISTORICO.parent)
+    
+    # Si no hay cambios, no hacer nada
+    if not cambios:
+        log_info("No hay cambios para actualizar en el histórico")
+        return
+    
+    # Leer Programas.xlsx si no se proporciona
+    if df_programas is None:
+        from etl.exceptions_helpers import leer_excel_con_reintentos
+        try:
+            df_programas = leer_excel_con_reintentos(ARCHIVO_PROGRAMAS, sheet_name=HOJA_PROGRAMAS)
+        except Exception as e:
+            error_msg = f"No se pudo leer Programas.xlsx para actualizar histórico: {e}"
+            log_error(error_msg)
+            raise FileNotFoundError(error_msg) from e
+    
+    # Normalizar códigos SNIES en Programas.xlsx para comparación
+    def _normalizar_codigo(valor: object) -> str:
+        if pd.isna(valor):
+            return ""
+        codigo_str = str(valor).strip().upper()
+        codigo_str = codigo_str.replace(".0", "")
+        return codigo_str
+    
+    df_programas["_CODIGO_NORM"] = df_programas["CÓDIGO_SNIES_DEL_PROGRAMA"].apply(_normalizar_codigo)
+    
+    # Cargar histórico existente
+    df_historico = _consolidar_archivos_historicos_duplicados()
+    
+    if df_historico is None or len(df_historico) == 0:
+        log_info("No existe archivo histórico para actualizar. Los cambios se guardarán cuando se ejecute el pipeline.")
+        return
+    
+    # Normalizar códigos SNIES en histórico para comparación
+    if "CÓDIGO_SNIES_DEL_PROGRAMA" not in df_historico.columns:
+        log_warning("El histórico no tiene columna CÓDIGO_SNIES_DEL_PROGRAMA. No se pueden actualizar registros.")
+        return
+    
+    df_historico["_CODIGO_NORM"] = df_historico["CÓDIGO_SNIES_DEL_PROGRAMA"].apply(_normalizar_codigo)
+    
+    # Columnas que se pueden actualizar desde ajustes manuales
+    columnas_actualizables = ["ES_REFERENTE", "PROGRAMA_EAFIT_CODIGO", "PROGRAMA_EAFIT_NOMBRE"]
+    
+    # Actualizar registros en el histórico
+    registros_actualizados = 0
+    for codigo_norm, cambios_dict in cambios.items():
+        if not codigo_norm:
+            continue
+        
+        # Buscar el registro en el histórico
+        mask_historico = df_historico["_CODIGO_NORM"] == codigo_norm
+        
+        if not mask_historico.any():
+            # El programa no está en el histórico (probablemente no es nuevo)
+            continue
+        
+        # Obtener los valores actualizados de Programas.xlsx
+        mask_programas = df_programas["_CODIGO_NORM"] == codigo_norm
+        if not mask_programas.any():
+            continue
+        
+        # Actualizar solo las columnas que están en cambios_dict y son actualizables
+        for col in columnas_actualizables:
+            if col in cambios_dict:
+                nuevo_valor = cambios_dict[col]
+                # Obtener el valor de Programas.xlsx para asegurar consistencia
+                valor_programas = df_programas.loc[mask_programas, col].iloc[0] if mask_programas.any() else nuevo_valor
+                
+                # Actualizar en histórico
+                if col in df_historico.columns:
+                    df_historico.loc[mask_historico, col] = valor_programas
+                    registros_actualizados += 1
+    
+    # Limpiar columna temporal
+    df_historico = df_historico.drop(columns=["_CODIGO_NORM"])
+    
+    if registros_actualizados > 0:
+        # Guardar histórico actualizado
+        print(f"Actualizando {registros_actualizados} registros en el histórico...")
+        log_info(f"Actualizando {registros_actualizados} registros en el histórico con ajustes manuales")
+        
+        try:
+            with pd.ExcelWriter(
+                ARCHIVO_HISTORICO,
+                mode="w",
+                engine="openpyxl",
+            ) as writer:
+                df_historico.to_excel(writer, sheet_name=HOJA_HISTORICO, index=False)
+            
+            print(f"✓ Histórico actualizado: {registros_actualizados} registros modificados")
+            log_info(f"Histórico actualizado exitosamente: {registros_actualizados} registros modificados")
+        except Exception as e:
+            error_msg = f"Error al guardar histórico actualizado: {e}"
+            log_error(error_msg)
+            raise RuntimeError(error_msg) from e
+    else:
+        log_info("No se encontraron registros en el histórico para actualizar con los cambios realizados")
 
 
 if __name__ == "__main__":
     actualizar_historico_programas_nuevos()
-
