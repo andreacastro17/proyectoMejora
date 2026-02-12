@@ -33,10 +33,10 @@ from etl.config import (
     get_base_dir,
     set_base_dir,
     update_paths_for_base_dir,
-    HISTORIC_DIR,
     ARCHIVO_NORMALIZACION,
     MODELS_DIR,
 )
+# HISTORIC_DIR se importa dentro de run_pipeline después de set_base_dir para asegurar que esté inicializado
 
 # Imports pesados se hacen lazy (solo cuando se ejecuta el pipeline)
 # Esto acelera el arranque de la aplicación
@@ -454,6 +454,7 @@ class EditableTable(ttk.Frame):
         height: int = 15,
         editable_columns: set[str] | None = None,
         on_change: Callable[[int, str, str], None] | None = None,
+        dropdown_values: dict[str, list[str]] | None = None,
     ):
         super().__init__(master)
         self.columns = columns
@@ -461,6 +462,12 @@ class EditableTable(ttk.Frame):
         self._item_to_index: dict[str, int] = {}
         self.editable_columns = editable_columns if editable_columns is not None else set(columns)
         self.on_change = on_change
+        # IMPORTANTE: Usar la MISMA referencia del dict para que las actualizaciones se reflejen
+        # Si se pasa None, crear un nuevo dict vacío
+        if dropdown_values is not None:
+            self.dropdown_values = dropdown_values  # Usar la referencia pasada (compartida)
+        else:
+            self.dropdown_values = {}  # Crear nuevo dict vacío solo si no se pasó ninguno
 
         self.tree = ttk.Treeview(self, columns=columns, show="headings", height=height)
         vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
@@ -612,6 +619,71 @@ class EditableTable(ttk.Frame):
             editor.bind("<FocusOut>", commit)
             editor.bind("<Return>", commit)
             editor.bind("<Escape>", lambda e: (editor.destroy(), setattr(self, '_editor', None)))
+        elif column in self.dropdown_values:
+            # Para columnas con valores personalizados (dropdown), usar Combobox
+            dropdown_options = self.dropdown_values[column]
+            if not dropdown_options:
+                # Si no hay opciones, usar Entry normal como fallback
+                editor = tk.Entry(self.tree)
+                editor.insert(0, value)
+                editor.select_range(0, tk.END)
+                editor.focus_set()
+                editor.place(x=x, y=y, width=w, height=h)
+                
+                def commit(_evt=None):
+                    new_val = editor.get()
+                    self._data[idx][column] = new_val
+                    current_vals = list(self.tree.item(row_id, "values"))
+                    current_vals[col_index] = new_val
+                    self.tree.item(row_id, values=current_vals)
+                    if self.on_change is not None:
+                        try:
+                            self.on_change(idx, column, new_val)
+                        except Exception:
+                            pass
+                    editor.destroy()
+                    self._editor = None
+                
+                editor.bind("<Return>", commit)
+                editor.bind("<FocusOut>", commit)
+                editor.bind("<Escape>", lambda e: (editor.destroy(), setattr(self, '_editor', None)))
+            else:
+                # Crear Combobox con las opciones del catálogo
+                editor = ttk.Combobox(self.tree, values=dropdown_options, state="readonly", width=50)
+                # Buscar el valor actual en las opciones (puede estar vacío o tener un valor)
+                current_value = value.strip() if value else ""
+                if current_value in dropdown_options:
+                    editor.set(current_value)
+                else:
+                    editor.set("")  # Si no está en las opciones, dejar vacío
+                editor.focus_set()
+                # Hacer el dropdown más ancho para mostrar nombres completos (mínimo 500px para ver mejor)
+                # También ajustar posición si es necesario para que no se salga de la ventana
+                dropdown_width = max(w, 500)
+                editor.place(x=x, y=y, width=dropdown_width, height=h)
+                # Abrir el dropdown automáticamente para mejor UX
+                editor.event_generate('<Button-1>')
+                editor.event_generate('<Down>')
+                
+                def commit(_evt=None):
+                    new_val = editor.get()
+                    self._data[idx][column] = new_val
+                    # actualizar visualmente
+                    current_vals = list(self.tree.item(row_id, "values"))
+                    current_vals[col_index] = new_val
+                    self.tree.item(row_id, values=current_vals)
+                    if self.on_change is not None:
+                        try:
+                            self.on_change(idx, column, new_val)
+                        except Exception:
+                            pass
+                    editor.destroy()
+                    self._editor = None
+                
+                editor.bind("<<ComboboxSelected>>", commit)
+                editor.bind("<FocusOut>", commit)
+                editor.bind("<Return>", commit)
+                editor.bind("<Escape>", lambda e: (editor.destroy(), setattr(self, '_editor', None)))
         else:
             # Para otras columnas, usar Entry normal
             editor = tk.Entry(self.tree)
@@ -694,6 +766,11 @@ class ManualReviewPage(ttk.Frame):
         self.pending_updates: dict[str, dict[str, object]] = {}
         # Backup oculto antes de guardar (para restaurar si es necesario)
         self.last_backup_path: Path | None = None
+        
+        # Cargar catálogo EAFIT para dropdown de programas (inicializar variables, se carga después de crear msg)
+        self.catalogo_eafit_df = None
+        self.programas_eafit_nombres = []
+        self.programas_eafit_dict = {}  # Mapeo nombre -> código
 
         header = ttk.Frame(self, padding=12, style="Page.TFrame")
         header.pack(fill=tk.X)
@@ -777,17 +854,35 @@ class ManualReviewPage(ttk.Frame):
         self.msg = tk.Text(self, height=6, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 9), bg=EAFIT["card_bg"], fg=EAFIT["text"])
         self.msg.pack(fill=tk.X, padx=10, pady=(0, 10))
 
+        # Preparar valores iniciales para dropdown de PROGRAMA_EAFIT_NOMBRE (vacío por ahora)
+        # IMPORTANTE: Crear el dict ANTES de pasarlo a EditableTable para poder actualizarlo después
+        # Usar una referencia compartida para que las actualizaciones se reflejen
+        self.dropdown_values_dict = {}
+        
         self.table = EditableTable(
             self,
             columns=self.display_columns,
             height=18,
             editable_columns=self.editable_columns,
             on_change=self._on_cell_change,
+            dropdown_values=self.dropdown_values_dict,  # Pasar la referencia al dict (compartido)
         )
         self.table.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
         # Actualizar estado de selección
         self.table.tree.bind("<<TreeviewSelect>>", self._on_select)
 
+        # Ahora que msg está creado, cargar catálogo EAFIT y actualizar dropdown
+        self._cargar_catalogo_eafit()
+        # Actualizar dropdown_values después de cargar el catálogo
+        # IMPORTANTE: Actualizar el mismo dict que se pasó a la tabla (referencia compartida)
+        if self.programas_eafit_nombres:
+            # Actualizar el dict compartido (esto actualizará automáticamente self.table.dropdown_values)
+            self.dropdown_values_dict["PROGRAMA_EAFIT_NOMBRE"] = self.programas_eafit_nombres
+            self._log(f"✓ Dropdown de PROGRAMA_EAFIT_NOMBRE configurado con {len(self.programas_eafit_nombres)} opciones")
+            self._log(f"💡 Haz doble clic en la columna PROGRAMA_EAFIT_NOMBRE para ver el dropdown con todos los programas EAFIT")
+        else:
+            self._log("⚠️ No se pudieron cargar programas EAFIT para el dropdown")
+        
         self._log("Tip: edita una celda con doble clic. Ajusta ES_REFERENTE y PROGRAMA_EAFIT_* si hay falsos positivos.")
         # Auto-cargar si existe el archivo (mejor UX).
         if self.file_path.exists():
@@ -839,6 +934,48 @@ class ManualReviewPage(ttk.Frame):
         except Exception:
             pass
 
+    def _cargar_catalogo_eafit(self):
+        """Carga el catálogo EAFIT para el dropdown de programas."""
+        try:
+            from etl.clasificacionProgramas import cargar_catalogo_eafit
+            import pandas as pd
+            self.catalogo_eafit_df = cargar_catalogo_eafit()
+            
+            # Obtener nombres de programas EAFIT (solo activos ya están filtrados)
+            if 'Nombre Programa EAFIT' in self.catalogo_eafit_df.columns:
+                # Intentar obtener código también
+                posibles_columnas_codigo = ['Codigo EAFIT', 'Código Programa', 'CODIGO_PROGRAMA', 'Codigo Programa']
+                columna_codigo = None
+                for col in posibles_columnas_codigo:
+                    if col in self.catalogo_eafit_df.columns:
+                        columna_codigo = col
+                        break
+                
+                # Crear lista de nombres y diccionario nombre -> código
+                nombres = self.catalogo_eafit_df['Nombre Programa EAFIT'].astype(str).tolist()
+                self.programas_eafit_nombres = sorted(set(nombres))  # Ordenar y eliminar duplicados
+                
+                if columna_codigo:
+                    # Crear diccionario nombre -> código
+                    for _, row in self.catalogo_eafit_df.iterrows():
+                        nombre = str(row['Nombre Programa EAFIT'])
+                        codigo = str(row[columna_codigo]) if pd.notna(row[columna_codigo]) else ""
+                        if nombre and codigo:
+                            self.programas_eafit_dict[nombre] = codigo
+                
+                if hasattr(self, 'msg'):
+                    self._log(f"Catálogo EAFIT cargado: {len(self.programas_eafit_nombres)} programas disponibles para selección")
+            else:
+                if hasattr(self, 'msg'):
+                    self._log("⚠️ No se encontró columna 'Nombre Programa EAFIT' en catálogo EAFIT")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            if hasattr(self, 'msg'):
+                self._log(f"⚠️ No se pudo cargar catálogo EAFIT: {e}")
+            self.programas_eafit_nombres = []
+            self.programas_eafit_dict = {}
+    
     def _on_cell_change(self, row_idx: int, column: str, new_val: str):
         # Guardar cambios en buffer global (persisten entre páginas)
         rows = self.table.get_rows()
@@ -847,6 +984,19 @@ class ManualReviewPage(ttk.Frame):
         codigo = self._norm_codigo(rows[row_idx].get("CÓDIGO_SNIES_DEL_PROGRAMA"))
         if not codigo:
             return
+        
+        # Si se selecciona un programa EAFIT por nombre, actualizar el código automáticamente
+        if column == "PROGRAMA_EAFIT_NOMBRE" and new_val and new_val in self.programas_eafit_dict:
+            codigo_eafit = self.programas_eafit_dict[new_val]
+            # Actualizar el código en la fila de datos usando set_cell_value (actualiza datos y visualización)
+            if "PROGRAMA_EAFIT_CODIGO" in self.display_columns:
+                self.table.set_cell_value(row_idx, "PROGRAMA_EAFIT_CODIGO", codigo_eafit)
+            
+            # Guardar también el código en los cambios pendientes
+            if codigo not in self.pending_updates:
+                self.pending_updates[codigo] = {}
+            self.pending_updates[codigo]["PROGRAMA_EAFIT_CODIGO"] = codigo_eafit
+            self._log(f"✓ Código EAFIT actualizado automáticamente: {codigo_eafit} para programa '{new_val[:50]}...'")
         
         # Validación inteligente: Si intenta marcar ES_REFERENTE='Sí', validar niveles
         if column == "ES_REFERENTE" and new_val.upper() in ("SÍ", "SI", "YES", "1", "TRUE"):
@@ -1108,12 +1258,14 @@ class ManualReviewPage(ttk.Frame):
     def _recreate_table(self):
         """Recrea la tabla con las columnas actuales en display_columns."""
         self.table.destroy()
+        # IMPORTANTE: Pasar el mismo dropdown_values_dict compartido para preservar el dropdown
         self.table = EditableTable(
             self,
             columns=self.display_columns,
             height=18,
             editable_columns=self.editable_columns,
             on_change=self._on_cell_change,
+            dropdown_values=self.dropdown_values_dict,  # Pasar la referencia compartida
         )
         self.table.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
         self.table.tree.bind("<<TreeviewSelect>>", self._on_select)
@@ -1400,7 +1552,45 @@ class ManualReviewPage(ttk.Frame):
                 if col in self.editable_columns or col in ("AJUSTE_MANUAL", "FECHA_AJUSTE"):
                     if col not in base_full.columns:
                         base_full[col] = None
-                    base_full.loc[mask, col] = val
+                    
+                    # Convertir valores al tipo correcto según la columna
+                    try:
+                        if col == "PROGRAMA_EAFIT_CODIGO":
+                            # Convertir a numérico (int o float según el tipo original)
+                            if val == "" or val is None or pd.isna(val):
+                                val_converted = None
+                            else:
+                                # Intentar convertir a int primero, luego float si falla
+                                try:
+                                    val_converted = int(float(str(val)))
+                                except (ValueError, TypeError):
+                                    val_converted = None
+                            # Convertir la columna a object si es necesario para permitir valores mixtos
+                            if base_full[col].dtype != 'object':
+                                base_full[col] = base_full[col].astype('object')
+                            base_full.loc[mask, col] = val_converted
+                        elif col == "PROBABILIDAD":
+                            # Convertir a float
+                            if val == "" or val is None or pd.isna(val):
+                                val_converted = None
+                            else:
+                                try:
+                                    val_converted = float(str(val))
+                                except (ValueError, TypeError):
+                                    val_converted = None
+                            base_full.loc[mask, col] = val_converted
+                        else:
+                            # Para otras columnas (ES_REFERENTE, PROGRAMA_EAFIT_NOMBRE, etc.), mantener como string
+                            base_full.loc[mask, col] = val
+                    except Exception as e:
+                        # Si hay error al convertir, intentar asignar directamente y convertir la columna a object
+                        try:
+                            if base_full[col].dtype != 'object':
+                                base_full[col] = base_full[col].astype('object')
+                            base_full.loc[mask, col] = val
+                        except Exception as e2:
+                            self._log(f"⚠️ Error al guardar {col} para código {codigo}: {e2}")
+                            continue
 
         try:
             # Usar mode="w" para sobrescribir completamente el archivo (más seguro que mode="a")
@@ -2306,6 +2496,537 @@ class MergePage(ttk.Frame):
         messagebox.showinfo("OK", f"Consolidado generado:\n{out_path}", parent=self)
 
 
+class ImputationPage(ttk.Frame):
+    """Página para imputar valores faltantes en ÁREA_DE_CONOCIMIENTO usando IA (KNN con embeddings)."""
+
+    def __init__(self, parent: tk.Misc, on_back=None):
+        super().__init__(parent)
+        self.on_back = on_back
+        
+        # Import lazy de módulos ETL (solo cuando se abre esta página)
+        from etl.normalizacion import ARCHIVO_PROGRAMAS
+        
+        self.base_dir = ensure_base_dir(self)
+        if not self.base_dir:
+            if on_back:
+                on_back()
+            return
+
+        self.file_path = ARCHIVO_PROGRAMAS
+        self.is_running = False
+        self.df_faltantes = None  # DataFrame con registros que tienen valores faltantes
+        self.codigos_antes_imputacion = None  # Códigos SNIES de registros que tenían valores faltantes antes de la imputación
+
+        frame = ttk.Frame(self, padding=14, style="Page.TFrame")
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        header_frame = ttk.Frame(frame, style="Page.TFrame")
+        header_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        ttk.Label(header_frame, text="🤖 Revisión de Áreas (Imputación IA)", style="Header.TLabel").pack(side=tk.LEFT)
+        if on_back:
+            ttk.Button(header_frame, text="← Volver al menú", command=lambda: on_back() if on_back else None, style="Back.TButton").pack(side=tk.RIGHT)
+        
+        self.subheader_label = ttk.Label(
+            frame, 
+            text="Rellena valores faltantes en ÁREA_DE_CONOCIMIENTO usando KNN con embeddings semánticos. "
+                 "El sistema encuentra los 5 programas más similares que tienen área asignada y asigna esa categoría.",
+            style="SubHeader.TLabel"
+        )
+        self.subheader_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 8))
+
+        # Información del archivo y estadísticas
+        info_frame = ttk.Frame(frame, style="Page.TFrame")
+        info_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        ttk.Label(info_frame, text="Archivo a procesar:").pack(side=tk.LEFT, padx=(0, 8))
+        self.file_label = ttk.Label(info_frame, text=str(self.file_path), style="Muted.TLabel", font=("Segoe UI", 9))
+        self.file_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Label de estadísticas
+        self.stats_label = ttk.Label(
+            info_frame, 
+            text="", 
+            style="Muted.TLabel", 
+            font=("Segoe UI", 9, "bold"),
+            foreground=EAFIT["azul_zafre"]
+        )
+        self.stats_label.pack(side=tk.RIGHT, padx=(8, 0))
+
+        # Botones de acción
+        btn_row = ttk.Frame(frame, style="Page.TFrame")
+        btn_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        
+        # Botones principales (izquierda)
+        btn_left = ttk.Frame(btn_row, style="Page.TFrame")
+        btn_left.pack(side=tk.LEFT)
+        self.btn_imputar = ttk.Button(btn_left, text="🤖 Ejecutar Imputación IA", command=self._ejecutar_imputacion, style="Primary.TButton")
+        self.btn_imputar.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_left, text="📂 Abrir en Excel", command=self._open_excel, style="Secondary.TButton").pack(side=tk.LEFT, padx=8)
+        ttk.Button(btn_left, text="🔄 Recargar", command=self._recargar_info, style="Secondary.TButton").pack(side=tk.LEFT, padx=8)
+        
+        # Botón para actualizar histórico (derecha)
+        btn_right = ttk.Frame(btn_row, style="Page.TFrame")
+        btn_right.pack(side=tk.RIGHT)
+        self.btn_update_historico = ttk.Button(
+            btn_right,
+            text="📝 Actualizar Histórico",
+            command=self._actualizar_historico,
+            style="Secondary.TButton"
+        )
+        self.btn_update_historico.pack(side=tk.RIGHT)
+
+        # Tabla de registros con valores faltantes
+        table_frame = ttk.Frame(frame, style="Page.TFrame")
+        table_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
+        
+        table_header = ttk.Frame(table_frame, style="Page.TFrame")
+        table_header.pack(fill=tk.X, pady=(0, 4))
+        self.table_title_label = ttk.Label(
+            table_header, 
+            text="📋 Registros con ÁREA_DE_CONOCIMIENTO faltante", 
+            style="SubHeader.TLabel",
+            font=("Segoe UI", 10, "bold")
+        )
+        self.table_title_label.pack(side=tk.LEFT)
+        
+        # Columnas a mostrar en la tabla
+        self.table_columns = [
+            "CÓDIGO_SNIES_DEL_PROGRAMA",
+            "NOMBRE_INSTITUCIÓN",
+            "NOMBRE_DEL_PROGRAMA",
+            "NIVEL_DE_FORMACIÓN",
+            "ÁREA_DE_CONOCIMIENTO",
+        ]
+        
+        # Tabla de solo lectura (sin columnas editables)
+        self.table = EditableTable(
+            table_frame,
+            columns=self.table_columns,
+            height=15,
+            editable_columns=set(),  # Sin columnas editables
+            on_change=None,
+        )
+        self.table.pack(fill=tk.BOTH, expand=True)
+
+        # Área de log (más pequeña ahora)
+        log_frame = ttk.Frame(frame, style="Page.TFrame")
+        log_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 0))
+        ttk.Label(log_frame, text="📝 Log de ejecución:", style="SubHeader.TLabel").pack(anchor="w", pady=(0, 4))
+        self.msg = tk.Text(
+            log_frame, 
+            height=6, 
+            wrap=tk.WORD, 
+            state=tk.DISABLED, 
+            font=("Consolas", 9), 
+            bg=EAFIT["card_bg"], 
+            fg=EAFIT["text"]
+        )
+        self.msg.pack(fill=tk.BOTH, expand=True)
+
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(4, weight=1)  # Tabla expandible
+        frame.grid_rowconfigure(5, weight=0)  # Log fijo
+
+        # Cargar información inicial
+        self._recargar_info()
+
+    def _on_resize(self, w: int, h: int) -> None:
+        """Responsive: ajusta wraplengths y altura de tabla dinámicamente."""
+        if hasattr(self, 'subheader_label'):
+            wraplength = max(400, w - 100)
+            self.subheader_label.config(wraplength=wraplength)
+        if hasattr(self, 'file_label'):
+            wraplength = max(300, w - 200)
+            self.file_label.config(wraplength=wraplength)
+        # Ajustar altura de la tabla: header + botones + log ~ 250px
+        if hasattr(self, 'table'):
+            table_pixels = max(150, h - 250)
+            self.table.set_height_from_pixels(table_pixels)
+
+    def _log(self, s: str):
+        """Agrega un mensaje al área de log."""
+        self.msg.config(state=tk.NORMAL)
+        ts = time.strftime("%H:%M:%S")
+        self.msg.insert(tk.END, f"[{ts}] {s}\n")
+        self.msg.see(tk.END)
+        self.msg.config(state=tk.DISABLED)
+        self.update_idletasks()
+
+    def _recargar_info(self):
+        """Recarga la información del archivo, muestra estadísticas y actualiza la tabla."""
+        import pandas as pd
+        from etl.exceptions_helpers import leer_excel_con_reintentos
+        
+        if not self.file_path.exists():
+            self._log(f"⚠️ El archivo no existe: {self.file_path}")
+            self.btn_imputar.config(state=tk.DISABLED)
+            self._actualizar_tabla([])  # Limpiar tabla
+            return
+        
+        try:
+            df = leer_excel_con_reintentos(self.file_path, sheet_name="Programas")
+            
+            if "ÁREA_DE_CONOCIMIENTO" not in df.columns:
+                self._log("⚠️ El archivo no tiene la columna 'ÁREA_DE_CONOCIMIENTO'")
+                self.btn_imputar.config(state=tk.DISABLED)
+                self._actualizar_tabla([])  # Limpiar tabla
+                return
+            
+            # Usar la misma lógica que el módulo de imputación
+            def _es_valor_faltante(valor: object) -> bool:
+                if pd.isna(valor):
+                    return True
+                valor_str = str(valor).strip().lower()
+                valores_faltantes = ["", "sin clasificar", "sin clasificacion", "n/a", "na", "none", "null"]
+                return valor_str in valores_faltantes
+            
+            mask_faltantes = df["ÁREA_DE_CONOCIMIENTO"].apply(_es_valor_faltante)
+            cantidad_faltantes = mask_faltantes.sum()
+            total = len(df)
+            
+            # Filtrar registros con valores faltantes
+            self.df_faltantes = df[mask_faltantes].copy()
+            
+            # Actualizar estadísticas en el label
+            self.stats_label.config(
+                text=f"Total: {total} | Con área: {total - cantidad_faltantes} | Faltantes: {cantidad_faltantes}"
+            )
+            
+            self._log(f"📊 Estadísticas del archivo:")
+            self._log(f"   Total de programas: {total}")
+            self._log(f"   Con área asignada: {total - cantidad_faltantes}")
+            self._log(f"   Sin área (faltantes): {cantidad_faltantes}")
+            
+            # Actualizar tabla con registros faltantes
+            if cantidad_faltantes > 0:
+                self._actualizar_tabla(self.df_faltantes)
+                self._log(f"✓ Mostrando {cantidad_faltantes} registros con valores faltantes en la tabla.")
+                self.btn_imputar.config(state=tk.NORMAL)
+            else:
+                self._actualizar_tabla([])
+                self._log("✓ No hay valores faltantes. No se requiere imputación.")
+                self.btn_imputar.config(state=tk.DISABLED)
+                
+        except Exception as exc:
+            self._log(f"❌ Error al leer el archivo: {exc}")
+            self.btn_imputar.config(state=tk.DISABLED)
+            self._actualizar_tabla([])
+    
+    def _actualizar_tabla(self, df_faltantes, es_resultado_imputacion=False):
+        """Actualiza la tabla con los registros que tienen valores faltantes o los resultados de imputación."""
+        import pandas as pd
+        
+        # Limpiar tabla actual
+        self.table.set_rows([])
+        
+        # Manejar diferentes tipos de entrada (DataFrame, lista vacía, None)
+        if df_faltantes is None:
+            titulo = "📋 Resultados de la imputación (0 registros)" if es_resultado_imputacion else "📋 Registros con ÁREA_DE_CONOCIMIENTO faltante (0 registros)"
+            self.table_title_label.config(text=titulo)
+            return
+        
+        # Si es una lista vacía
+        if isinstance(df_faltantes, list) and len(df_faltantes) == 0:
+            titulo = "📋 Resultados de la imputación (0 registros)" if es_resultado_imputacion else "📋 Registros con ÁREA_DE_CONOCIMIENTO faltante (0 registros)"
+            self.table_title_label.config(text=titulo)
+            return
+        
+        # Si es un DataFrame vacío
+        if hasattr(df_faltantes, 'empty') and df_faltantes.empty:
+            titulo = "📋 Resultados de la imputación (0 registros)" if es_resultado_imputacion else "📋 Registros con ÁREA_DE_CONOCIMIENTO faltante (0 registros)"
+            self.table_title_label.config(text=titulo)
+            return
+        
+        # Si es un DataFrame con datos
+        if hasattr(df_faltantes, 'iterrows'):
+            # Preparar datos para la tabla
+            rows = []
+            for _, row in df_faltantes.iterrows():
+                row_dict = {}
+                for col in self.table_columns:
+                    valor = row.get(col, "")
+                    # Convertir NaN a string vacío
+                    if pd.isna(valor):
+                        valor = ""
+                    else:
+                        valor = str(valor)
+                    row_dict[col] = valor
+                rows.append(row_dict)
+            
+            # Actualizar título de la tabla según el contexto
+            if es_resultado_imputacion:
+                self.table_title_label.config(
+                    text=f"✅ Resultados de la imputación ({len(rows)} registros procesados)"
+                )
+            else:
+                self.table_title_label.config(
+                    text=f"📋 Registros con ÁREA_DE_CONOCIMIENTO faltante ({len(rows)} registros)"
+                )
+            
+            # Establecer filas en la tabla
+            self.table.set_rows(rows)
+        else:
+            # Si no es un DataFrame, intentar tratarlo como lista de diccionarios
+            if isinstance(df_faltantes, list):
+                self.table.set_rows(df_faltantes)
+                if es_resultado_imputacion:
+                    self.table_title_label.config(
+                        text=f"✅ Resultados de la imputación ({len(df_faltantes)} registros procesados)"
+                    )
+                else:
+                    self.table_title_label.config(
+                        text=f"📋 Registros con ÁREA_DE_CONOCIMIENTO faltante ({len(df_faltantes)} registros)"
+                    )
+            else:
+                titulo = "📋 Resultados de la imputación (0 registros)" if es_resultado_imputacion else "📋 Registros con ÁREA_DE_CONOCIMIENTO faltante (0 registros)"
+                self.table_title_label.config(text=titulo)
+    
+    def _mostrar_resultados_imputacion(self, df_resultados, cantidad_imputados, faltantes_despues):
+        """Muestra los resultados de la imputación en la tabla."""
+        import pandas as pd
+        
+        # Preparar datos para la tabla
+        rows = []
+        for _, row in df_resultados.iterrows():
+            row_dict = {}
+            for col in self.table_columns:
+                valor = row.get(col, "")
+                # Convertir NaN a string vacío
+                if pd.isna(valor):
+                    valor = ""
+                else:
+                    valor = str(valor)
+                row_dict[col] = valor
+            rows.append(row_dict)
+        
+        # Actualizar título de la tabla
+        self.table_title_label.config(
+            text=f"✅ Resultados de la imputación ({len(rows)} registros procesados | {cantidad_imputados} imputados | {faltantes_despues} aún faltantes)"
+        )
+        
+        # Establecer filas en la tabla
+        self.table.set_rows(rows)
+        
+        # Log adicional
+        self._log(f"📊 Mostrando {len(rows)} registros procesados en la tabla.")
+        if cantidad_imputados > 0:
+            self._log(f"   ✓ {cantidad_imputados} registros fueron imputados exitosamente.")
+        if faltantes_despues > 0:
+            self._log(f"   ⚠️ {faltantes_despues} registros aún tienen valores faltantes.")
+    
+    def _actualizar_estadisticas_despues(self, df_resultado):
+        """Actualiza las estadísticas después de la imputación."""
+        import pandas as pd
+        
+        def _es_valor_faltante(valor: object) -> bool:
+            if pd.isna(valor):
+                return True
+            valor_str = str(valor).strip().lower()
+            valores_faltantes = ["", "sin clasificar", "sin clasificacion", "n/a", "na", "none", "null"]
+            return valor_str in valores_faltantes
+        
+        mask_faltantes = df_resultado["ÁREA_DE_CONOCIMIENTO"].apply(_es_valor_faltante)
+        cantidad_faltantes = mask_faltantes.sum()
+        total = len(df_resultado)
+        
+        # Actualizar estadísticas en el label
+        self.stats_label.config(
+            text=f"Total: {total} | Con área: {total - cantidad_faltantes} | Faltantes: {cantidad_faltantes}"
+        )
+
+    def _open_excel(self):
+        """Abre el archivo Programas.xlsx en Excel."""
+        try:
+            _open_in_excel(self.file_path)
+        except Exception as exc:
+            safe_messagebox_error("Error", f"No se pudo abrir el archivo:\n{exc}", parent=self)
+
+    def _ejecutar_imputacion(self):
+        """Ejecuta la imputación de áreas en un hilo separado."""
+        if self.is_running:
+            messagebox.showwarning("Atención", "La imputación ya está en ejecución.", parent=self)
+            return
+        
+        if not self.file_path.exists():
+            safe_messagebox_error("Error", f"El archivo no existe:\n{self.file_path}", parent=self)
+            return
+        
+        # Confirmar antes de ejecutar
+        if not _ask_yes_no(
+            "Confirmar Imputación",
+            f"¿Ejecutar imputación de ÁREA_DE_CONOCIMIENTO?\n\n"
+            f"Esto puede tardar varios minutos dependiendo del número de valores faltantes.\n"
+            f"El archivo {self.file_path.name} será modificado.",
+            parent=self
+        ):
+            return
+        
+        self.is_running = True
+        self.btn_imputar.config(state=tk.DISABLED)
+        self._log("=" * 60)
+        self._log("🚀 Iniciando imputación de ÁREA_DE_CONOCIMIENTO...")
+        self._log("=" * 60)
+        
+        def ejecutar_en_hilo():
+            try:
+                from etl.imputacionAreas import ejecutar_imputacion_areas
+                
+                # Ejecutar imputación (modo archivo: lee y escribe directamente)
+                self._log("📖 Leyendo archivo...")
+                
+                # Leer antes para contar faltantes
+                import pandas as pd
+                from etl.exceptions_helpers import leer_excel_con_reintentos
+                df_antes = leer_excel_con_reintentos(self.file_path, sheet_name="Programas")
+                
+                def _es_valor_faltante(valor: object) -> bool:
+                    if pd.isna(valor):
+                        return True
+                    valor_str = str(valor).strip().lower()
+                    valores_faltantes = ["", "sin clasificar", "sin clasificacion", "n/a", "na", "none", "null"]
+                    return valor_str in valores_faltantes
+                
+                faltantes_antes = df_antes["ÁREA_DE_CONOCIMIENTO"].apply(_es_valor_faltante).sum()
+                
+                # Guardar códigos SNIES de los registros que tenían valores faltantes ANTES de la imputación
+                mask_faltantes_antes = df_antes["ÁREA_DE_CONOCIMIENTO"].apply(_es_valor_faltante)
+                df_faltantes_antes = df_antes[mask_faltantes_antes].copy()
+                
+                # Normalizar códigos SNIES para comparación
+                def _norm_codigo(v: object) -> str:
+                    if v is None:
+                        return ""
+                    s = str(v).strip()
+                    if s.endswith(".0"):
+                        s = s[:-2]
+                    return s
+                
+                codigos_antes = set(df_faltantes_antes["CÓDIGO_SNIES_DEL_PROGRAMA"].apply(_norm_codigo))
+                
+                self._log(f"📝 Registros con valores faltantes antes: {len(codigos_antes)}")
+                
+                # Ejecutar imputación
+                self._log("🔄 Ejecutando imputación...")
+                df_resultado = ejecutar_imputacion_areas(archivo=self.file_path)
+                
+                # Contar después
+                faltantes_despues = df_resultado["ÁREA_DE_CONOCIMIENTO"].apply(_es_valor_faltante).sum()
+                cantidad_imputados = faltantes_antes - faltantes_despues
+                
+                # Filtrar los registros que tenían valores faltantes ANTES (para mostrar resultados)
+                df_resultado["_CODIGO_NORM"] = df_resultado["CÓDIGO_SNIES_DEL_PROGRAMA"].apply(_norm_codigo)
+                df_resultados_imputacion = df_resultado[df_resultado["_CODIGO_NORM"].isin(codigos_antes)].copy()
+                df_resultados_imputacion = df_resultados_imputacion.drop(columns=["_CODIGO_NORM"])
+                
+                # Filtrar registros que aún tienen valores faltantes (si los hay)
+                mask_faltantes_despues = df_resultado["ÁREA_DE_CONOCIMIENTO"].apply(_es_valor_faltante)
+                df_faltantes_despues = df_resultado[mask_faltantes_despues].copy()
+                
+                self._log("=" * 60)
+                self._log("✅ Imputación completada exitosamente!")
+                self._log(f"   Valores imputados: {cantidad_imputados}")
+                self._log(f"   Valores aún faltantes: {faltantes_despues}")
+                self._log(f"   Archivo actualizado: {self.file_path.name}")
+                self._log("=" * 60)
+                
+                # Actualizar tabla con los resultados de la imputación
+                def actualizar_ui():
+                    # Mostrar los registros que fueron procesados (con sus nuevos valores imputados)
+                    self._mostrar_resultados_imputacion(df_resultados_imputacion, cantidad_imputados, faltantes_despues)
+                    
+                    # Actualizar estadísticas
+                    self._actualizar_estadisticas_despues(df_resultado)
+                    
+                    # Mostrar mensaje de éxito
+                    messagebox.showinfo(
+                        "Imputación Completada",
+                        f"La imputación se completó exitosamente.\n\n"
+                        f"Valores imputados: {cantidad_imputados}\n"
+                        f"Valores aún faltantes: {faltantes_despues}\n"
+                        f"Archivo actualizado: {self.file_path.name}\n\n"
+                        f"Los resultados se muestran en la tabla.\n\n"
+                        f"💡 Puedes usar el botón 'Actualizar Histórico' para agregar los programas nuevos al histórico.",
+                        parent=self
+                    )
+                
+                self.after(0, actualizar_ui)
+                
+            except Exception as exc:
+                error_msg = str(exc)
+                self._log("=" * 60)
+                self._log(f"❌ Error durante la imputación: {error_msg}")
+                self._log("=" * 60)
+                self.after(0, lambda: safe_messagebox_error("Error", f"Error durante la imputación:\n{error_msg}", parent=self))
+            finally:
+                self.after(0, lambda: self._finalizar_imputacion())
+        
+        # Ejecutar en hilo separado para no bloquear la UI
+        thread = threading.Thread(target=ejecutar_en_hilo, daemon=True)
+        thread.start()
+
+    def _finalizar_imputacion(self):
+        """Restaura el estado de la UI después de la imputación."""
+        self.is_running = False
+        self.btn_imputar.config(state=tk.NORMAL)
+        # No recargar automáticamente aquí porque los resultados ya se muestran en actualizar_ui()
+        # Si el usuario quiere ver el estado actualizado, puede usar el botón "Recargar"
+    
+    def _actualizar_historico(self):
+        """Actualiza el histórico de programas nuevos manualmente."""
+        if not self.file_path.exists():
+            safe_messagebox_error("Error", f"El archivo no existe:\n{self.file_path}", parent=self)
+            return
+        
+        # Confirmar antes de actualizar
+        if not _ask_yes_no(
+            "Actualizar Histórico",
+            f"¿Actualizar el histórico de programas nuevos?\n\n"
+            f"Esto agregará los programas marcados como 'PROGRAMA_NUEVO = Sí' "
+            f"de {self.file_path.name} al archivo HistoricoProgramasNuevos .xlsx.",
+            parent=self
+        ):
+            return
+        
+        self.btn_update_historico.config(state=tk.DISABLED)
+        self._log("=" * 60)
+        self._log("📝 Iniciando actualización del histórico...")
+        
+        def ejecutar_en_hilo():
+            try:
+                from etl.historicoProgramasNuevos import actualizar_historico_programas_nuevos
+                
+                actualizar_historico_programas_nuevos()
+                
+                self._log("=" * 60)
+                self._log("✅ Histórico actualizado exitosamente!")
+                self._log("=" * 60)
+                
+                # Mostrar mensaje de éxito
+                self.after(0, lambda: messagebox.showinfo(
+                    "Histórico Actualizado",
+                    f"El histórico de programas nuevos se actualizó exitosamente.\n\n"
+                    f"Los programas nuevos de {self.file_path.name} han sido agregados a "
+                    f"HistoricoProgramasNuevos .xlsx",
+                    parent=self
+                ))
+                
+            except Exception as exc:
+                error_msg = str(exc)
+                self._log("=" * 60)
+                self._log(f"❌ Error al actualizar el histórico: {error_msg}")
+                self._log("=" * 60)
+                self.after(0, lambda: safe_messagebox_error(
+                    "Error",
+                    f"Error al actualizar el histórico:\n{error_msg}",
+                    parent=self
+                ))
+            finally:
+                self.after(0, lambda: self.btn_update_historico.config(state=tk.NORMAL))
+        
+        # Ejecutar en hilo separado para no bloquear la UI
+        thread = threading.Thread(target=ejecutar_en_hilo, daemon=True)
+        thread.start()
+
+
 class MainMenuGUI:
     """Menú principal del sistema."""
 
@@ -2521,6 +3242,12 @@ class MainMenuGUI:
             self._open_merge,
             icon="🔀",
         )
+        compact_action_row(
+            "Revisión de Áreas",
+            "Imputa valores faltantes en ÁREA_DE_CONOCIMIENTO usando IA.",
+            self._open_imputacion,
+            icon="🤖",
+        )
         
         # Card: Configuración (más compacta y limpia)
         config_card = ttk.Frame(left_column, padding=28, style="Card.TFrame")
@@ -2645,8 +3372,8 @@ class MainMenuGUI:
         
         steps_data = [
             ("1", "Pipeline"),
-            ("2", "Ajuste"),
-            ("3", "Reentrenar"),
+            ("2", "Imputar (IA)"),
+            ("3", "Ajuste"),
             ("4", "Consolidar")
         ]
         
@@ -3136,6 +3863,8 @@ class MainMenuGUI:
             self.root.minsize(900, 600)
         elif page_name == "merge":
             self.root.minsize(700, 450)
+        elif page_name == "imputacion":
+            self.root.minsize(700, 500)
         
         self.root.update_idletasks()
         
@@ -3186,6 +3915,12 @@ class MainMenuGUI:
         if not ensure_base_dir(self.root, prompt_if_missing=True):
             return
         self._show_page("merge", MergePage)
+
+    def _open_imputacion(self):
+        if not ensure_base_dir(self.root, prompt_if_missing=True):
+            return
+        # ImputationPage está definida en este mismo archivo
+        self._show_page("imputacion", ImputationPage)
 
     def _open_logs(self):
         base = get_configured_base_dir()
@@ -3677,8 +4412,20 @@ def run_pipeline(
     progress_callback(stage_idx, stage_name, status)
       - status: "start" | "done"
     """
+    # CRÍTICO: Actualizar rutas para usar el base_dir proporcionado
+    # Esto asegura que todas las rutas (outputs, ref, models, etc.) apunten al directorio correcto
+    try:
+        update_paths_for_base_dir(base_dir)
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[ERROR] No se pudo configurar el directorio base: {e}")
+        else:
+            print(f"[ERROR] No se pudo configurar el directorio base: {e}")
+        return 1
+    
     # Imports lazy de módulos ETL pesados (solo cuando se ejecuta el pipeline)
     import pandas as pd
+    from etl.config import HISTORIC_DIR
     from etl.historicoProgramasNuevos import actualizar_historico_programas_nuevos
     from etl.normalizacion import ARCHIVO_PROGRAMAS, normalizar_programas
     from etl.normalizacion_final import aplicar_normalizacion_final
@@ -3756,6 +4503,8 @@ def run_pipeline(
 
         progress(0, "Inicializando", "start")
         log("=== Paso 1: Resguardo de históricos ===")
+        # Importar HISTORIC_DIR aquí para asegurar que esté disponible después de set_base_dir
+        from etl.config import HISTORIC_DIR
         log(
             f"Si se logra obtener una versión nueva de Programas.xlsx, "
             f"el archivo anterior se trasladará a: {HISTORIC_DIR}"
@@ -3813,6 +4562,18 @@ def run_pipeline(
 
         nombre_archivo = ruta_descargada.name
         log(f"✓ Archivo descargado: {nombre_archivo}")
+        
+        # Verificar si había un Programas.xlsx anterior que fue movido a histórico
+        from etl.config import HISTORIC_DIR
+        archivos_historicos_recientes = sorted(
+            HISTORIC_DIR.glob("Programas_*.xlsx"),
+            key=lambda x: x.stat().st_mtime,
+            reverse=True
+        )[:1]  # Solo el más reciente
+        if archivos_historicos_recientes:
+            archivo_historico_reciente = archivos_historicos_recientes[0]
+            log(f"✓ Archivo anterior movido a histórico: {archivo_historico_reciente.name}")
+        
         log_etapa_completada("Descarga SNIES", f"{nombre_archivo} (duración: {time.time() - t_etapa:.1f}s)")
         progress(1, "Descarga SNIES", "done")
 
@@ -3930,27 +4691,48 @@ def run_pipeline(
                 log(f"Programas nuevos detectados: {cantidad_nuevos}")
                 
                 if cantidad_nuevos == 0:
-                    # No hay programas nuevos, detener el pipeline con mensaje informativo
+                    # No hay programas nuevos, cargar la última ejecución correcta del histórico
                     info_msg = (
                         "No se han detectado programas nuevos después de comparar con los archivos históricos.\n\n"
                         "Esto significa que todos los programas en el archivo descargado ya estaban presentes "
                         "en ejecuciones anteriores del pipeline.\n\n"
-                        "Intente más tarde cuando haya nuevos programas disponibles en el portal SNIES."
+                        "Se cargará la última ejecución correcta del histórico para continuar trabajando con esos datos."
                     )
                     log(f"[INFO] {info_msg}")
                     log_info(info_msg)
+                    
+                    # Intentar cargar el último archivo histórico
+                    from etl.procesamientoSNIES import obtener_ultimo_archivo_historico
+                    from etl.exceptions_helpers import leer_excel_con_reintentos
+                    
+                    archivo_historico = obtener_ultimo_archivo_historico(HISTORIC_DIR)
+                    if archivo_historico and archivo_historico.exists():
+                        try:
+                            log(f"Cargando última ejecución correcta desde: {archivo_historico.name}")
+                            df_programas = leer_excel_con_reintentos(archivo_historico, sheet_name="Programas")
+                            log(f"✓ Archivo histórico cargado: {len(df_programas)} programas")
+                            log_info(f"Cargado archivo histórico: {archivo_historico.name} ({len(df_programas)} programas)")
+                        except Exception as e:
+                            error_msg = f"No se pudo cargar el archivo histórico: {e}"
+                            log(f"[ERROR] {error_msg}")
+                            log_error(error_msg)
+                            log("Continuando con el archivo actual (sin programas nuevos)...")
+                    else:
+                        log("⚠️ No se encontró archivo histórico. Continuando con el archivo actual (sin programas nuevos)...")
+                        log_warning("No se encontró archivo histórico para cargar")
+                    
+                    log("El pipeline continuará con los datos disponibles (sin programas nuevos para clasificar).")
                     log_etapa_completada("Procesamiento de programas nuevos", f"duración: {time.time() - t_etapa:.1f}s")
                     progress(3, "Programas nuevos", "done")
-                    log("=== Pipeline detenido: No hay programas nuevos para procesar ===")
-                    # Retornar código de éxito (0) porque no es un error, simplemente no hay trabajo que hacer
-                    return 0
+                    # Continuar con el pipeline en lugar de detenerse
                 else:
                     log(f"✓ Procesamiento completado: {cantidad_nuevos} programa(s) nuevo(s) detectado(s)")
+                    log_etapa_completada("Procesamiento de programas nuevos", f"duración: {time.time() - t_etapa:.1f}s")
+                    progress(3, "Programas nuevos", "done")
             else:
                 log("⚠️ Advertencia: No se encontró la columna PROGRAMA_NUEVO. Continuando con precaución...")
-            
-            log_etapa_completada("Procesamiento de programas nuevos", f"duración: {time.time() - t_etapa:.1f}s")
-            progress(3, "Programas nuevos", "done")
+                log_etapa_completada("Procesamiento de programas nuevos", f"duración: {time.time() - t_etapa:.1f}s")
+                progress(3, "Programas nuevos", "done")
         except Exception as exc:
             error_msg = f"Falló el procesamiento de programas nuevos: {exc}"
             log(f"[ERROR] {error_msg}")
@@ -4007,32 +4789,92 @@ def run_pipeline(
             df_programas = clasificar_programas_nuevos(df_programas=df_programas, progress_callback=_progress_clasif)  # Modo optimizado: en memoria
             
             # Validar que la clasificación retornó un DataFrame válido
-            if df_programas is None or len(df_programas) == 0:
-                error_msg = "La clasificación retornó un DataFrame vacío o None."
+            if df_programas is None:
+                error_msg = "La clasificación retornó None."
                 log(f"[WARN] {error_msg}")
                 log_warning(error_msg)
-                # Continuar sin clasificación en lugar de fallar
-                progress(4, "Clasificación", "done")
+                # Intentar cargar el último histórico
+                log("[INFO] Intentando cargar último histórico...")
+                from etl.procesamientoSNIES import obtener_ultimo_archivo_historico
+                from etl.exceptions_helpers import leer_excel_con_reintentos
+                
+                archivo_historico = obtener_ultimo_archivo_historico(HISTORIC_DIR)
+                if archivo_historico and archivo_historico.exists():
+                    try:
+                        log(f"Cargando última ejecución correcta desde: {archivo_historico.name}")
+                        df_programas = leer_excel_con_reintentos(archivo_historico, sheet_name="Programas")
+                        log(f"✓ Archivo histórico cargado: {len(df_programas)} programas")
+                    except Exception as e:
+                        error_msg = f"No se pudo cargar el archivo histórico: {e}"
+                        log(f"[WARN] {error_msg}")
+                        log_warning(error_msg)
+                        progress(4, "Clasificación", "done")
+                        # Continuar sin clasificación
+                else:
+                    log("[WARN] No se encontró archivo histórico. Continuando sin clasificación...")
+                    progress(4, "Clasificación", "done")
+            elif len(df_programas) == 0:
+                # Si no hay programas nuevos, clasificar_programas_nuevos retorna el DataFrame completo
+                # Si aún así está vacío, intentar cargar el último histórico
+                log("[INFO] No hay programas para procesar. Intentando cargar último histórico...")
+                from etl.procesamientoSNIES import obtener_ultimo_archivo_historico
+                from etl.exceptions_helpers import leer_excel_con_reintentos
+                
+                archivo_historico = obtener_ultimo_archivo_historico(HISTORIC_DIR)
+                if archivo_historico and archivo_historico.exists():
+                    try:
+                        log(f"Cargando última ejecución correcta desde: {archivo_historico.name}")
+                        df_programas = leer_excel_con_reintentos(archivo_historico, sheet_name="Programas")
+                        log(f"✓ Archivo histórico cargado: {len(df_programas)} programas")
+                    except Exception as e:
+                        error_msg = f"No se pudo cargar el archivo histórico: {e}"
+                        log(f"[WARN] {error_msg}")
+                        log_warning(error_msg)
+                        progress(4, "Clasificación", "done")
+                        # Continuar sin clasificación
+                else:
+                    log("[WARN] No se encontró archivo histórico. Continuando sin clasificación...")
+                    progress(4, "Clasificación", "done")
             else:
                 log("✓ Clasificación completada")
                 log_etapa_completada("Clasificación de programas nuevos", f"duración: {time.time() - t_etapa_clasif:.1f}s")
                 progress(4, "Clasificación", "done")
         except FileNotFoundError as exc:
-            # Error específico cuando faltan modelos después del entrenamiento
-            error_msg = f"No se encontraron modelos ML después del entrenamiento: {exc}"
-            log(f"[WARN] {error_msg}")
-            log("Continuando sin clasificación...")
+            # Error específico cuando faltan modelos o catálogo EAFIT
+            error_msg = f"Error crítico en clasificación: {exc}"
+            log(f"[ERROR] {error_msg}")
+            log("=" * 60)
+            log("IMPORTANTE: Sin el catálogo EAFIT o los modelos ML, NO se pueden identificar referentes.")
+            log("Verifica que:")
+            log("  1. El archivo 'catalogoOfertasEAFIT.xlsx' o '.csv' esté en ref/backup/ o ref/")
+            log("  2. Los modelos ML estén entrenados y disponibles en models/")
+            log("=" * 60)
+            log_error(error_msg)
+            log_warning("Continuando sin clasificación...")
+            progress(4, "Clasificación", "done")
+        except ValueError as exc:
+            # Error de validación (catálogo vacío, columnas faltantes, etc.)
+            error_msg = f"Error de validación en clasificación: {exc}"
+            log(f"[ERROR] {error_msg}")
+            log("=" * 60)
+            log("IMPORTANTE: El catálogo EAFIT no es válido o está vacío.")
+            log("Sin un catálogo válido, NO se pueden identificar referentes.")
+            log("=" * 60)
             log_error(error_msg)
             log_warning("Continuando sin clasificación...")
             progress(4, "Clasificación", "done")
         except Exception as exc:
             error_msg = f"Falló la clasificación de programas nuevos: {exc}"
-            log(f"[WARN] {error_msg}")
-            log("Continuando sin clasificación...")
+            log(f"[ERROR] {error_msg}")
+            log("=" * 60)
+            log("Detalles del error:")
+            import traceback
+            log(traceback.format_exc())
+            log("=" * 60)
             log_error(error_msg)
             log_warning("Continuando sin clasificación...")
             progress(4, "Clasificación", "done")
-            # No retornamos error aquí porque la clasificación es opcional
+            # No retornamos error aquí porque la clasificación es opcional, pero registramos el error completo
 
         # Verificar cancelación antes de normalización final
         if cancel_event and cancel_event.is_set():

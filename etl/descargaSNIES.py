@@ -57,14 +57,22 @@ def _mover_archivo_existente(archivo_programas: str) -> None:
 
     Este método NO debe llamarse antes de confirmar que existe una "nueva" versión
     lista para reemplazarla. Así evitamos modificar archivos si fallan todas las fuentes.
+    
+    Raises:
+        PermissionError: Si el archivo está abierto en otro programa (Excel, etc.)
+        OSError: Si hay otro error al mover el archivo
     """
     historic_dir_str = str(HISTORIC_DIR)
+    
+    # Asegurar que el directorio histórico existe
+    Path(historic_dir_str).mkdir(parents=True, exist_ok=True)
 
     if not os.path.exists(archivo_programas):
         print(f"No existe archivo {os.path.basename(archivo_programas)} en el directorio. Continuando...")
         return
     
     print(f"Archivo {os.path.basename(archivo_programas)} encontrado. Moviendo a histórico...")
+    log_info(f"Movimiento a histórico iniciado: {os.path.basename(archivo_programas)}")
     
     # Obtener la fecha de modificación del archivo (fecha de descarga original)
     fecha_modificacion = os.path.getmtime(archivo_programas)
@@ -81,10 +89,22 @@ def _mover_archivo_existente(archivo_programas: str) -> None:
         counter += 1
     
     try:
+        # Intentar mover el archivo
         os.replace(archivo_programas, destination)
         nombre_archivo_historico = os.path.basename(destination)
-        print(f"  -> Archivo movido a histórico: {nombre_archivo_historico}")
-        log_info(f"Archivo movido a histórico: {nombre_archivo_historico}")
+        print(f"  ✓ Archivo movido exitosamente a histórico: {nombre_archivo_historico}")
+        print(f"  → Ubicación: {destination}")
+        log_info(f"Archivo movido a histórico: {nombre_archivo_historico} → {destination}")
+    except PermissionError as e:
+        # Re-lanzar PermissionError para que el llamador pueda manejarlo (intentar copiar)
+        error_msg = (
+            f"No se pudo mover archivo al histórico ({os.path.basename(archivo_programas)}): "
+            f"El archivo está abierto en otro programa (Excel, etc.). "
+            f"Por favor, ciérralo e intenta de nuevo. Detalle: {e}"
+        )
+        print(f"[ERROR] {error_msg}")
+        log_error(error_msg)
+        raise PermissionError(error_msg) from e
     except OSError as e:
         error_msg = f"No se pudo mover archivo al histórico ({os.path.basename(archivo_programas)}): {e}"
         print(f"[ERROR] {error_msg}")
