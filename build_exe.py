@@ -395,6 +395,46 @@ coll = COLLECT(
         f.write(spec_content)
     return spec_file
 
+
+def copiar_ejecutable_a_raiz(modo_onefile: bool) -> None:
+    """
+    Copia el ejecutable (y en onedir la carpeta _internal) a la raíz del proyecto
+    para que el usuario pueda abrirlo desde ahí sin entrar en dist/.
+    La copia es totalmente funcional: el .exe usa la carpeta donde está como base.
+    """
+    base_path = Path(__file__).parent  # raíz del proyecto
+    src_exe = Path("dist") / "SniesManager.exe"
+    dst_exe = base_path / "SniesManager.exe"
+
+    if not src_exe.exists():
+        print_colored("[ADVERTENCIA] No se encontró dist/SniesManager.exe, no se copia a la raíz.", Colors.YELLOW)
+        return
+
+    try:
+        shutil.copy2(src_exe, dst_exe)
+        print_colored(f"[OK] Copia del ejecutable en la raíz: {dst_exe}", Colors.GREEN)
+    except Exception as e:
+        print_colored(f"[ADVERTENCIA] No se pudo copiar el .exe a la raíz: {e}", Colors.YELLOW)
+        return
+
+    if not modo_onefile:
+        src_internal = Path("dist") / "_internal"
+        dst_internal = base_path / "_internal"
+        if src_internal.exists():
+            try:
+                if dst_internal.exists():
+                    shutil.rmtree(dst_internal)
+                shutil.copytree(src_internal, dst_internal)
+                print_colored(f"[OK] Carpeta _internal copiada a la raíz (necesaria para el .exe)", Colors.GREEN)
+            except Exception as e:
+                print_colored(f"[ADVERTENCIA] No se pudo copiar _internal a la raíz: {e}", Colors.YELLOW)
+                print_colored("   Puedes ejecutar el .exe desde dist/ o copiar _internal manualmente.", Colors.YELLOW)
+        else:
+            print_colored("[ADVERTENCIA] No se encontró dist/_internal; la copia en la raíz puede no funcionar en modo onedir.", Colors.YELLOW)
+
+    print_colored("   Puedes usar SniesManager.exe en la raíz del proyecto (ref/, models/, docs/ ya están ahí).", Colors.GREEN)
+
+
 def construir_exe(modo_onefile: bool = False) -> bool:
     """Construye el ejecutable usando PyInstaller.
     
@@ -467,6 +507,8 @@ def construir_exe(modo_onefile: bool = False) -> bool:
                 print_colored("  2. Copie las carpetas ref/, models/, docs/ junto al ejecutable", Colors.YELLOW)
                 print_colored("  3. El ejecutable creará archivos temporales al ejecutarse", Colors.YELLOW)
                 
+                print_colored("\n=== Copiando ejecutable a la raíz del proyecto ===", Colors.GREEN)
+                copiar_ejecutable_a_raiz(modo_onefile=True)
                 return True
             else:
                 print_colored(f"\n[ERROR] No se encontró el ejecutable en: {final_exe}", Colors.RED)
@@ -514,6 +556,8 @@ def construir_exe(modo_onefile: bool = False) -> bool:
                 print_colored("\n[IMPORTANTE] Para distribuir, copie TODA la carpeta 'dist/'", Colors.YELLOW)
                 print_colored("   El .exe necesita la carpeta '_internal/' junto a él", Colors.YELLOW)
                 
+                print_colored("\n=== Copiando ejecutable a la raíz del proyecto ===", Colors.GREEN)
+                copiar_ejecutable_a_raiz(modo_onefile=False)
                 return True
             elif dist_app_exe.exists():
                 # El ejecutable está en dist/SniesManager/SniesManager.exe (estructura alternativa)
@@ -561,6 +605,8 @@ def construir_exe(modo_onefile: bool = False) -> bool:
                 print_colored("\n[IMPORTANTE] Para distribuir, copie TODA la carpeta 'dist/'", Colors.YELLOW)
                 print_colored("   El .exe necesita la carpeta '_internal/' junto a él", Colors.YELLOW)
                 
+                print_colored("\n=== Copiando ejecutable a la raíz del proyecto ===", Colors.GREEN)
+                copiar_ejecutable_a_raiz(modo_onefile=False)
                 return True
             else:
                 print_colored(f"\n[ERROR] No se encontró el ejecutable en ninguna ubicación esperada", Colors.RED)
@@ -804,6 +850,7 @@ def main() -> int:
     if modo_onefile:
         exe_path = Path("dist") / "SniesManager.exe"
         print_colored(f"\nEl ejecutable está en: {exe_path}", Colors.GREEN)
+        print_colored("También hay una copia en la raíz del proyecto; puedes abrirla desde ahí.", Colors.GREEN)
         print_colored("\n[IMPORTANTE] Para distribuir:", Colors.YELLOW)
         print_colored("  1. Copie el archivo SniesManager.exe", Colors.YELLOW)
         print_colored("  2. Asegúrese de que las carpetas ref/, models/, docs/ estén en la misma ubicación", Colors.YELLOW)
@@ -811,12 +858,12 @@ def main() -> int:
     else:
         exe_path = Path("dist") / "SniesManager.exe"
         print_colored(f"\nEl ejecutable está en: {exe_path}", Colors.GREEN)
-        print_colored("Carpetas copiadas: _internal/, ref/, models/, docs/", Colors.GREEN)
+        print_colored("También hay una copia en la raíz del proyecto (SniesManager.exe + _internal/)", Colors.GREEN)
+        print_colored("  -> Puedes abrir SniesManager.exe desde la raíz; ref/, models/, docs/ ya están ahí.", Colors.GREEN)
         print_colored("\n[IMPORTANTE] Para distribuir:", Colors.YELLOW)
         print_colored("  1. Copie TODA la carpeta 'dist/' completa", Colors.YELLOW)
         print_colored("  2. Incluya: SniesManager.exe, _internal/, ref/, models/, docs/", Colors.YELLOW)
         print_colored("  3. Mantenga todas las carpetas juntas (el .exe necesita _internal/)", Colors.YELLOW)
-        print_colored("  4. Ejecute SniesManager.exe desde la carpeta dist/", Colors.YELLOW)
     
     print_colored("\nRevisa dist/INSTRUCCIONES.txt para más información.", Colors.YELLOW)
     

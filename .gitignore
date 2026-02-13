@@ -10,6 +10,7 @@ dist/
 *.pkg
 *.pyz
 *.spec
+_internal/
 
 # Modelos y datos grandes
 *.pkl
