@@ -1596,13 +1596,40 @@ class ManualReviewPage(ttk.Frame):
             # Usar mode="w" para sobrescribir completamente el archivo (más seguro que mode="a")
             with pd.ExcelWriter(self.file_path, mode="w", engine="openpyxl") as writer:
                 base_full.drop(columns=["_CODIGO_NORM"]).to_excel(writer, sheet_name="Programas", index=False)
+            
+            # Actualizar también el histórico con los cambios de referentes
+            # Solo actualizar columnas relacionadas con referentes (ES_REFERENTE, PROGRAMA_EAFIT_*)
+            cambios_referentes = {}
+            for codigo, changes in self.pending_updates.items():
+                cambios_ref = {
+                    col: val for col, val in changes.items() 
+                    if col in ("ES_REFERENTE", "PROGRAMA_EAFIT_CODIGO", "PROGRAMA_EAFIT_NOMBRE")
+                }
+                if cambios_ref:
+                    cambios_referentes[codigo] = cambios_ref
+            
+            if cambios_referentes:
+                try:
+                    from etl.historicoProgramasNuevos import actualizar_registros_historicos_ajustes_manuales
+                    actualizar_registros_historicos_ajustes_manuales(cambios_referentes, df_programas=base_full.drop(columns=["_CODIGO_NORM"]))
+                    self._log("✓ Cambios de referentes también actualizados en HistoricoProgramasNuevos .xlsx")
+                except Exception as exc:
+                    # No fallar si no se puede actualizar el histórico, solo registrar advertencia
+                    self._log(f"⚠️ No se pudo actualizar el histórico con los cambios: {exc}")
+                    try:
+                        from etl.pipeline_logger import log_warning
+                        log_warning(f"Error al actualizar histórico con ajustes manuales: {exc}")
+                    except ImportError:
+                        pass  # Si no está disponible, solo usar el log de la UI
+            
             self.pending_updates.clear()
             self._touch_pending()
             self._load()
             self._log("✓ Cambios guardados en Programas.xlsx")
             messagebox.showinfo(
                 "Guardado",
-                "Los cambios se guardaron correctamente en Programas.xlsx.",
+                "Los cambios se guardaron correctamente en Programas.xlsx" + 
+                (" y en HistoricoProgramasNuevos .xlsx" if cambios_referentes else "") + ".",
                 parent=self
             )
         except PermissionError:
@@ -2563,16 +2590,8 @@ class ImputationPage(ttk.Frame):
         ttk.Button(btn_left, text="📂 Abrir en Excel", command=self._open_excel, style="Secondary.TButton").pack(side=tk.LEFT, padx=8)
         ttk.Button(btn_left, text="🔄 Recargar", command=self._recargar_info, style="Secondary.TButton").pack(side=tk.LEFT, padx=8)
         
-        # Botón para actualizar histórico (derecha)
-        btn_right = ttk.Frame(btn_row, style="Page.TFrame")
-        btn_right.pack(side=tk.RIGHT)
-        self.btn_update_historico = ttk.Button(
-            btn_right,
-            text="📝 Actualizar Histórico",
-            command=self._actualizar_historico,
-            style="Secondary.TButton"
-        )
-        self.btn_update_historico.pack(side=tk.RIGHT)
+        # NOTA: La imputación solo guarda en Programas.xlsx, NO actualiza el histórico
+        # El histórico se actualiza automáticamente al finalizar el pipeline con programas nuevos
 
         # Tabla de registros con valores faltantes
         table_frame = ttk.Frame(frame, style="Page.TFrame")
@@ -2970,61 +2989,9 @@ class ImputationPage(ttk.Frame):
         # No recargar automáticamente aquí porque los resultados ya se muestran en actualizar_ui()
         # Si el usuario quiere ver el estado actualizado, puede usar el botón "Recargar"
     
-    def _actualizar_historico(self):
-        """Actualiza el histórico de programas nuevos manualmente."""
-        if not self.file_path.exists():
-            safe_messagebox_error("Error", f"El archivo no existe:\n{self.file_path}", parent=self)
-            return
-        
-        # Confirmar antes de actualizar
-        if not _ask_yes_no(
-            "Actualizar Histórico",
-            f"¿Actualizar el histórico de programas nuevos?\n\n"
-            f"Esto agregará los programas marcados como 'PROGRAMA_NUEVO = Sí' "
-            f"de {self.file_path.name} al archivo HistoricoProgramasNuevos .xlsx.",
-            parent=self
-        ):
-            return
-        
-        self.btn_update_historico.config(state=tk.DISABLED)
-        self._log("=" * 60)
-        self._log("📝 Iniciando actualización del histórico...")
-        
-        def ejecutar_en_hilo():
-            try:
-                from etl.historicoProgramasNuevos import actualizar_historico_programas_nuevos
-                
-                actualizar_historico_programas_nuevos()
-                
-                self._log("=" * 60)
-                self._log("✅ Histórico actualizado exitosamente!")
-                self._log("=" * 60)
-                
-                # Mostrar mensaje de éxito
-                self.after(0, lambda: messagebox.showinfo(
-                    "Histórico Actualizado",
-                    f"El histórico de programas nuevos se actualizó exitosamente.\n\n"
-                    f"Los programas nuevos de {self.file_path.name} han sido agregados a "
-                    f"HistoricoProgramasNuevos .xlsx",
-                    parent=self
-                ))
-                
-            except Exception as exc:
-                error_msg = str(exc)
-                self._log("=" * 60)
-                self._log(f"❌ Error al actualizar el histórico: {error_msg}")
-                self._log("=" * 60)
-                self.after(0, lambda: safe_messagebox_error(
-                    "Error",
-                    f"Error al actualizar el histórico:\n{error_msg}",
-                    parent=self
-                ))
-            finally:
-                self.after(0, lambda: self.btn_update_historico.config(state=tk.NORMAL))
-        
-        # Ejecutar en hilo separado para no bloquear la UI
-        thread = threading.Thread(target=ejecutar_en_hilo, daemon=True)
-        thread.start()
+    # NOTA: La función _actualizar_historico fue eliminada porque la imputación
+    # solo debe guardar en Programas.xlsx, NO en el histórico.
+    # El histórico se actualiza automáticamente al finalizar el pipeline.
 
 
 class MainMenuGUI:

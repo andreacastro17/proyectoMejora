@@ -136,9 +136,12 @@ def imputar_columna(
     # Generar embeddings para programas con valores asignados
     log_info(f"Generando embeddings para {len(textos_con_valor)} programas de referencia...")
     try:
+        import sys
+        # En entornos .exe, deshabilitar barra de progreso para evitar problemas con stdout
+        is_exe = getattr(sys, 'frozen', False)
         embeddings_con_valor = modelo_embeddings.encode(
             textos_con_valor,
-            show_progress_bar=True,
+            show_progress_bar=not is_exe,  # Deshabilitar en .exe
             batch_size=batch_size,
             convert_to_numpy=True,
         )
@@ -150,9 +153,12 @@ def imputar_columna(
     # Generar embeddings para programas con valores faltantes
     log_info(f"Generando embeddings para {len(textos_faltantes)} programas con valores faltantes...")
     try:
+        import sys
+        # En entornos .exe, deshabilitar barra de progreso para evitar problemas con stdout
+        is_exe = getattr(sys, 'frozen', False)
         embeddings_faltantes = modelo_embeddings.encode(
             textos_faltantes,
-            show_progress_bar=True,
+            show_progress_bar=not is_exe,  # Deshabilitar en .exe
             batch_size=batch_size,
             convert_to_numpy=True,
         )
@@ -279,9 +285,32 @@ def ejecutar_imputacion_areas(
     # Cargar modelo de embeddings una sola vez (reutilizable)
     log_info(f"Cargando modelo de embeddings: {MODELO_EMBEDDINGS}")
     try:
-        SentenceTransformer = _get_sentence_transformer()
-        modelo_embeddings = SentenceTransformer(MODELO_EMBEDDINGS)
-        log_info("Modelo de embeddings cargado exitosamente")
+        import sys
+        import os
+        
+        # En entornos .exe, stdout/stderr pueden ser None, causando errores en SentenceTransformer
+        # Guardar referencias originales y crear dummies si son None
+        stdout_backup = sys.stdout
+        stderr_backup = sys.stderr
+        
+        # Si stdout o stderr son None (común en .exe), crear objetos dummy
+        if sys.stdout is None:
+            import io
+            sys.stdout = io.StringIO()
+        if sys.stderr is None:
+            import io
+            sys.stderr = io.StringIO()
+        
+        try:
+            SentenceTransformer = _get_sentence_transformer()
+            # Cargar modelo con show_progress_bar=False para evitar problemas con stdout
+            modelo_embeddings = SentenceTransformer(MODELO_EMBEDDINGS)
+            log_info("Modelo de embeddings cargado exitosamente")
+        finally:
+            # Restaurar stdout/stderr originales
+            sys.stdout = stdout_backup
+            sys.stderr = stderr_backup
+            
     except ImportError as e:
         error_msg = (
             f"No se pudo cargar el modelo de embeddings: {e}\n\n"
