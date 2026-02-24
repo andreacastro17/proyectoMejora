@@ -1596,40 +1596,32 @@ class ManualReviewPage(ttk.Frame):
             # Usar mode="w" para sobrescribir completamente el archivo (más seguro que mode="a")
             with pd.ExcelWriter(self.file_path, mode="w", engine="openpyxl") as writer:
                 base_full.drop(columns=["_CODIGO_NORM"]).to_excel(writer, sheet_name="Programas", index=False)
-            
-            # Actualizar también el histórico con los cambios de referentes
-            # Solo actualizar columnas relacionadas con referentes (ES_REFERENTE, PROGRAMA_EAFIT_*)
-            cambios_referentes = {}
-            for codigo, changes in self.pending_updates.items():
-                cambios_ref = {
-                    col: val for col, val in changes.items() 
-                    if col in ("ES_REFERENTE", "PROGRAMA_EAFIT_CODIGO", "PROGRAMA_EAFIT_NOMBRE")
-                }
-                if cambios_ref:
-                    cambios_referentes[codigo] = cambios_ref
-            
-            if cambios_referentes:
+
+            # Intentar retro-sincronizar el histórico con los ajustes manuales
+            try:
+                from etl.historicoProgramasNuevos import sincronizar_historico_con_ajustes_manuales
+                sincronizar_historico_con_ajustes_manuales()
+                self._log("✓ Histórico sincronizado con ajustes manuales en HistoricoProgramasNuevos .xlsx")
+                sincronizado_ok = True
+            except Exception as exc:
+                sincronizado_ok = False
+                # No fallar si no se puede actualizar el histórico, solo registrar advertencia
+                self._log(f"⚠️ No se pudo sincronizar el histórico con los ajustes manuales: {exc}")
                 try:
-                    from etl.historicoProgramasNuevos import actualizar_registros_historicos_ajustes_manuales
-                    actualizar_registros_historicos_ajustes_manuales(cambios_referentes, df_programas=base_full.drop(columns=["_CODIGO_NORM"]))
-                    self._log("✓ Cambios de referentes también actualizados en HistoricoProgramasNuevos .xlsx")
-                except Exception as exc:
-                    # No fallar si no se puede actualizar el histórico, solo registrar advertencia
-                    self._log(f"⚠️ No se pudo actualizar el histórico con los cambios: {exc}")
-                    try:
-                        from etl.pipeline_logger import log_warning
-                        log_warning(f"Error al actualizar histórico con ajustes manuales: {exc}")
-                    except ImportError:
-                        pass  # Si no está disponible, solo usar el log de la UI
-            
+                    from etl.pipeline_logger import log_warning
+                    log_warning(f"Error al sincronizar histórico con ajustes manuales: {exc}")
+                except Exception:
+                    # Si no está disponible, solo usamos el log de la UI
+                    pass
+
             self.pending_updates.clear()
             self._touch_pending()
             self._load()
             self._log("✓ Cambios guardados en Programas.xlsx")
+            mensaje_hist = " y en HistoricoProgramasNuevos .xlsx" if sincronizado_ok else ""
             messagebox.showinfo(
                 "Guardado",
-                "Los cambios se guardaron correctamente en Programas.xlsx" + 
-                (" y en HistoricoProgramasNuevos .xlsx" if cambios_referentes else "") + ".",
+                f"Los cambios se guardaron correctamente en Programas.xlsx{mensaje_hist}.",
                 parent=self
             )
         except PermissionError:
