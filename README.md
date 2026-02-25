@@ -6,13 +6,15 @@ Este proyecto automatiza la descarga, procesamiento y clasificación de programa
 
 El sistema utiliza técnicas de Machine Learning (embeddings semánticos y Random Forest) para clasificar automáticamente los programas nuevos y determinar si son referentes de programas EAFIT existentes.
 
-## Características Principales
+## Características principales
 
 - **Descarga Automatizada**: Descarga automática de datos de programas desde el portal SNIES usando Selenium
 - **Normalización de Datos**: Normalización y limpieza de textos para facilitar el procesamiento
 - **Detección de Programas Nuevos**: Comparación con archivos históricos para identificar programas nuevos
 - **Clasificación con ML**: Modelo de Machine Learning que identifica si un programa nuevo es referente de algún programa EAFIT
-- **Exportación para Power BI**: Preparación de datos para visualización en dashboards
+- **Histórico consolidado**: Actualización automática del archivo histórico de programas nuevos
+- **Ajustes manuales y reentrenamiento**: Interfaz para corregir referentes, sincronizar el histórico y reentrenar el modelo
+- **Imputación de áreas**: Módulo opcional para imputar el campo `ÁREA_DE_CONOCIMIENTO` con modelos de embeddings
 
 ## Estructura del Proyecto
 
@@ -22,12 +24,14 @@ proyectoMejora/
 │   ├── __init__.py
 │   └── main.py            # Pipeline principal
 ├── etl/                    # Scripts de extracción, transformación y carga
-│   ├── descargaSNIES.py   # Descarga de datos desde SNIES
-│   ├── normalizacion.py   # Normalización de columnas de texto
+│   ├── descargaSNIES.py       # Descarga de datos desde SNIES
+│   ├── normalizacion.py       # Normalización de columnas de texto
+│   ├── normalizacion_final.py # Normalización final de campos
 │   ├── procesamientoSNIES.py  # Identificación de programas nuevos
 │   ├── clasificacionProgramas.py  # Modelo ML de clasificación
-│   └── exportacionPowerBI.py     # Exportación para Power BI
-├── dashboards/            # Dashboards y visualizaciones
+│   ├── historicoProgramasNuevos.py  # Manejo del histórico de programas nuevos
+│   ├── imputacionAreas.py     # Imputación de ÁREA_DE_CONOCIMIENTO
+│   └── config.py              # Configuración centralizada de rutas y base_dir
 ├── models/                 # Modelos de ML entrenados
 │   ├── clasificador_referentes.pkl
 │   ├── encoder_programas_eafit.pkl
@@ -80,21 +84,24 @@ Asegúrate de tener los siguientes archivos en la carpeta `ref/`:
 - `referentesUnificados.csv`: Archivo con programas referentes confirmados para entrenar el modelo
 - `catalogoOfertasEAFIT.csv`: Catálogo completo de programas ofrecidos por EAFIT
 
-### Rutas de Archivos
+### Rutas de archivos
 
-Los scripts utilizan rutas absolutas configuradas internamente. Si necesitas cambiar las rutas, modifica las constantes en cada script:
+Las rutas principales se gestionan de forma centralizada en `etl/config.py`, que:
 
-- `etl/descargaSNIES.py`: `DOWNLOAD_DIR` y `HISTORIC_DIR`
-- `etl/normalizacion.py`: `ARCHIVO_PROGRAMAS`
-- `etl/procesamientoSNIES.py`: `ARCHIVO_PROGRAMAS_ACTUAL` y `DIRECTORIO_HISTORICO`
+- Detecta si se está ejecutando en modo script o como ejecutable (`.exe`).
+- Permite configurar la carpeta base del proyecto (`base_dir`) y otras rutas a través de `config.json`.
+- Expone constantes como:
+  - `ARCHIVO_PROGRAMAS`: `outputs/Programas.xlsx`
+  - `ARCHIVO_HISTORICO`: archivo maestro histórico (por defecto `outputs/HistoricoProgramasNuevos .xlsx`)
+  - `HISTORIC_DIR`: carpeta `outputs/historico/` para respaldos de `Programas.xlsx`
 
 ## Uso
 
-### Ejecución Completa del Pipeline
+### Ejecución completa del pipeline
 
 Para ejecutar el sistema (abre el **Menú Principal**):
 
-cls```bash
+```bash
 python app/main.py
 ```
 
@@ -121,7 +128,7 @@ Cuando ejecutas el análisis SNIES, se ejecutan los siguientes pasos en orden:
 4. **Procesamiento de programas nuevos**: Identifica programas nuevos comparando con archivos históricos (columna `PROGRAMA_NUEVO`)
 5. **Clasificación de programas nuevos**: Compara cada programa nuevo con la oferta EAFIT (catálogo) y asigna, mediante el modelo ML, si es referente, el programa EAFIT correspondiente y la probabilidad (`ES_REFERENTE`, `PROGRAMA_EAFIT_CODIGO`, `PROGRAMA_EAFIT_NOMBRE`, `PROBABILIDAD`)
 6. **Normalización final**: Aplica normalización de ortografía y formato
-7. **Actualización de histórico de programas nuevos**: Agrega los programas nuevos detectados a `outputs/HistoricoProgramasNuevos.xlsx`
+7. **Actualización de histórico de programas nuevos**: Agrega los programas nuevos detectados al archivo maestro histórico `outputs/HistoricoProgramasNuevos .xlsx`
 
 ### Comportamiento cuando falla la descarga
 

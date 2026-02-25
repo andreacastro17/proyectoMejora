@@ -276,8 +276,7 @@ def crear_spec_file(modo_onefile: bool = False) -> Path:
         'etl', 'etl.config', 'etl.descargaSNIES', 'etl.normalizacion',
         'etl.normalizacion_final', 'etl.procesamientoSNIES',
         'etl.clasificacionProgramas', 'etl.historicoProgramasNuevos',
-        'etl.exportacionPowerBI', 'etl.pipeline_logger',
-        'etl.exceptions_helpers',
+        'etl.pipeline_logger', 'etl.exceptions_helpers',
     ]
     
     hidden_imports_str = ",\n        ".join([f"'{imp}'" for imp in hidden_imports])
