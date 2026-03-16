@@ -16,6 +16,7 @@ import json
 import os
 import sys
 from pathlib import Path
+import datetime
 
 import pandas as pd
 
@@ -199,6 +200,71 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 ARCHIVO_PROGRAMAS = OUTPUTS_DIR / "Programas.xlsx"
 ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos .xlsx"  # Con espacio al final (archivo principal con todos los históricos)
 
+# ========= PIPELINE MERCADO (Fase 1+) =========
+TEMP_DIR = OUTPUTS_DIR / "temp"
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
+RAW_HISTORIC_DIR = HISTORIC_DIR / "raw"
+RAW_HISTORIC_DIR.mkdir(parents=True, exist_ok=True)
+HOJA_REFERENTE_CATEGORIAS = "1_Consolidado"
+CHECKPOINT_BASE_MAESTRA = TEMP_DIR / "base_maestra.parquet"
+MODELO_CLASIFICADOR_MERCADO = MODELS_DIR / "clasificador_mercado.pkl"
+
+# URLs y selectores para scrapers (Fase 2). Confirmar con cliente.
+SNIES_URLS = {
+    "matriculados": {"url": "", "selectors": {}},
+    "inscritos": {"url": "", "selectors": {}},
+}
+OLE_URLS = {"url": "", "selectors": {}}
+
+# Fase 4: scoring y comparación de costos
+BENCHMARK_COSTO = 13_400_000
+SMLMV = 1_300_000
+
+# Valores históricos conocidos del SMLMV por año calendario.
+# El año corriente usará obtener_smlmv_vigente(), salvo que se haga override en sesión.
+SMLMV_POR_ANO: dict[int, int] = {
+    2023: 1_160_000,
+    2024: 1_300_000,
+    2025: 1_423_500,
+}
+
+_smlmv_sesion: int | None = None
+
+
+def obtener_smlmv_vigente() -> int:
+    """
+    Retorna el SMLMV vigente según el año actual.
+
+    Si el año no está configurado en SMLMV_POR_ANO, devuelve la constante SMLMV como fallback.
+    """
+    year = datetime.datetime.now().year
+    return SMLMV_POR_ANO.get(year, SMLMV)
+
+
+def set_smlmv_sesion(valor: int) -> None:
+    """
+    Sobrescribe el SMLMV a usar durante esta sesión de la aplicación.
+
+    No persiste en disco ni modifica constantes; solo afecta llamadas a get_smlmv_sesion().
+    """
+    global _smlmv_sesion
+    _smlmv_sesion = int(valor)
+
+
+def get_smlmv_sesion() -> int:
+    """
+    Obtiene el SMLMV efectivo para la sesión actual.
+
+    - Si set_smlmv_sesion() fue llamado, retorna ese valor.
+    - En caso contrario, retorna obtener_smlmv_vigente().
+    """
+    if _smlmv_sesion is not None:
+        return _smlmv_sesion
+    return obtener_smlmv_vigente()
+
+# Fase 5: exportación estudio de mercado
+ARCHIVO_ESTUDIO_MERCADO = OUTPUTS_DIR / "Estudio_Mercado_Colombia.xlsx"
+
 
 def _resolve_referencia_path(ref_dir: Path, nombre_base: str) -> Path:
     """Resuelve ruta a referentesUnificados o catalogoOfertasEAFIT (.xlsx o .csv).
@@ -217,6 +283,7 @@ def _resolve_referencia_path(ref_dir: Path, nombre_base: str) -> Path:
 ARCHIVO_REFERENTES = _resolve_referencia_path(REF_DIR, "referentesUnificados")
 ARCHIVO_CATALOGO_EAFIT = _resolve_referencia_path(REF_DIR, "catalogoOfertasEAFIT")
 ARCHIVO_NORMALIZACION = DOCS_DIR / "normalizacionFinal.xlsx"
+ARCHIVO_REFERENTE_CATEGORIAS = _resolve_referencia_path(REF_DIR, "Referente_Categorias")
 
 # ========= CONFIGURACIÓN DE DESCARGA SNIES =========
 SNIES_URL = "https://hecaa.mineducacion.gov.co/consultaspublicas/programas"
@@ -263,7 +330,8 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     """
     global _BASE_PATH, OUTPUTS_DIR, HISTORIC_DIR, REF_DIR, MODELS_DIR, DOCS_DIR, LOGS_DIR
     global ARCHIVO_PROGRAMAS, ARCHIVO_HISTORICO, ARCHIVO_REFERENTES, ARCHIVO_CATALOGO_EAFIT, ARCHIVO_NORMALIZACION
-    
+    global TEMP_DIR, RAW_HISTORIC_DIR, CHECKPOINT_BASE_MAESTRA, MODELO_CLASIFICADOR_MERCADO, ARCHIVO_REFERENTE_CATEGORIAS, ARCHIVO_ESTUDIO_MERCADO
+
     if not set_base_dir(base_dir):
         raise ValueError(f"No se pudo establecer el directorio base: {base_dir}")
     
@@ -281,7 +349,14 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     ARCHIVO_PROGRAMAS = OUTPUTS_DIR / "Programas.xlsx"
     ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos .xlsx"  # Con espacio al final (archivo principal con todos los históricos)
     ARCHIVO_NORMALIZACION = DOCS_DIR / "normalizacionFinal.xlsx"
-    
+    TEMP_DIR = OUTPUTS_DIR / "temp"
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    RAW_HISTORIC_DIR = HISTORIC_DIR / "raw"
+    RAW_HISTORIC_DIR.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT_BASE_MAESTRA = TEMP_DIR / "base_maestra.parquet"
+    MODELO_CLASIFICADOR_MERCADO = MODELS_DIR / "clasificador_mercado.pkl"
+    ARCHIVO_ESTUDIO_MERCADO = OUTPUTS_DIR / "Estudio_Mercado_Colombia.xlsx"
+
     # Funciones para detección automática de formato en archivos de referencia
     def _cargar_archivo_referencia(base_path: Path, nombre_base: str) -> Path:
         """Busca .xlsx o .csv primero en base_path/backup (donde suelen estar los archivos), luego en base_path."""
@@ -336,12 +411,14 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     try:
         ARCHIVO_REFERENTES = _cargar_archivo_referencia(REF_DIR, "referentesUnificados")
         ARCHIVO_CATALOGO_EAFIT = _cargar_archivo_referencia(REF_DIR, "catalogoOfertasEAFIT")
+        ARCHIVO_REFERENTE_CATEGORIAS = _cargar_archivo_referencia(REF_DIR, "Referente_Categorias")
     except FileNotFoundError as e:
         print(f"[ERROR] {e}")
         # Fallback a rutas por defecto (para compatibilidad)
         ARCHIVO_REFERENTES = REF_DIR / "referentesUnificados.xlsx"
         ARCHIVO_CATALOGO_EAFIT = REF_DIR / "catalogoOfertasEAFIT.xlsx"
-    
+        ARCHIVO_REFERENTE_CATEGORIAS = REF_DIR / "Referente_Categorias.xlsx"
+
     # Crear directorios si no existen
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     HISTORIC_DIR.mkdir(parents=True, exist_ok=True)

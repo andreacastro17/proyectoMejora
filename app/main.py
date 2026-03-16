@@ -35,6 +35,8 @@ from etl.config import (
     update_paths_for_base_dir,
     ARCHIVO_NORMALIZACION,
     MODELS_DIR,
+    get_smlmv_sesion,
+    set_smlmv_sesion,
 )
 # HISTORIC_DIR se importa dentro de run_pipeline después de set_base_dir para asegurar que esté inicializado
 
@@ -2991,6 +2993,7 @@ class MainMenuGUI:
 
     def __init__(self, root: tk.Tk):
         self.root = root
+        self.root._main_menu_gui = self
         self.root.title("Clasificación de Programas SNIES - EAFIT")
         self.root.geometry("1200x720")
         self.root.minsize(900, 600)  # Tamaño mínimo más generoso para mejor visualización
@@ -3207,7 +3210,13 @@ class MainMenuGUI:
             self._open_imputacion,
             icon="🤖",
         )
-        
+        compact_action_row(
+            "Estudio de mercado Colombia",
+            "Pipeline de agregación por categoría y exportación a Estudio_Mercado_Colombia.xlsx.",
+            self._open_mercado,
+            icon="📊",
+        )
+
         # Card: Configuración (más compacta y limpia)
         config_card = ttk.Frame(left_column, padding=28, style="Card.TFrame")
         config_card.pack(fill=tk.X)
@@ -3824,6 +3833,10 @@ class MainMenuGUI:
             self.root.minsize(700, 450)
         elif page_name == "imputacion":
             self.root.minsize(700, 500)
+        elif page_name == "mercado":
+            self.root.minsize(700, 550)
+        elif page_name == "mercado_results":
+            self.root.minsize(1000, 600)
         
         self.root.update_idletasks()
         
@@ -3880,6 +3893,11 @@ class MainMenuGUI:
             return
         # ImputationPage está definida en este mismo archivo
         self._show_page("imputacion", ImputationPage)
+
+    def _open_mercado(self):
+        if not ensure_base_dir(self.root, prompt_if_missing=True):
+            return
+        self._show_page("mercado", MercadoPipelinePage)
 
     def _open_logs(self):
         base = get_configured_base_dir()
@@ -4357,6 +4375,869 @@ class PipelinePage(ttk.Frame):
             self._update_status("Error", "red")
             self._log_message(f"✗ ERROR: {error_msg}")
             messagebox.showerror("Error", f"Error durante la ejecución:\n\n{error_msg}", parent=self.root)
+
+
+class MercadoPipelinePage(ttk.Frame):
+    """Página dedicada al pipeline de estudio de mercado Colombia, con progreso en tiempo real."""
+
+    def __init__(self, parent: tk.Misc, on_back=None):
+        super().__init__(parent)
+        self.on_back = on_back
+        self.root = parent.winfo_toplevel()
+        self.is_running = False
+        self.cancel_event = threading.Event()
+        self._setup_ui()
+        self._check_checkpoints()
+
+    def _setup_ui(self):
+        main_frame = ttk.Frame(self, padding=20, style="Page.TFrame")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Header
+        header = ttk.Frame(main_frame, style="Page.TFrame")
+        header.pack(fill=tk.X, pady=(0, 20))
+        ttk.Label(header, text="📊 Estudio de Mercado Colombia", style="Header.TLabel").pack(side=tk.LEFT)
+        if self.on_back:
+            ttk.Button(header, text="← Volver al menú", command=lambda: self.on_back() if self.on_back else None, style="Back.TButton").pack(side=tk.RIGHT)
+
+        # Card: Checkpoints
+        cp_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
+        cp_card.pack(fill=tk.X, pady=(0, 14))
+        ttk.Label(cp_card, text="⚡ Checkpoints disponibles", style="SectionTitle.TLabel").pack(anchor="w")
+        self.reuse_base_var = tk.BooleanVar(value=False)
+        self.reuse_sabana_var = tk.BooleanVar(value=False)
+        self.cb_base = ttk.Checkbutton(
+            cp_card,
+            text="Reusar base_maestra.parquet (omitir Fase 1 — clasificación ML)",
+            variable=self.reuse_base_var,
+            state=tk.DISABLED,
+        )
+        self.cb_base.pack(anchor="w", pady=(8, 0))
+        ttk.Label(cp_card, text="Actívalo si ya ejecutaste la fase anteriormente y no hay cambios.", style="Muted.TLabel").pack(anchor="w", pady=(2, 8))
+        self.cb_sabana = ttk.Checkbutton(
+            cp_card,
+            text="Reusar sabana_consolidada.parquet (omitir Fase 3 — consolidación)",
+            variable=self.reuse_sabana_var,
+            state=tk.DISABLED,
+        )
+        self.cb_sabana.pack(anchor="w", pady=(0, 0))
+        ttk.Label(cp_card, text="Actívalo si ya ejecutaste la fase anteriormente y no hay cambios.", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+
+        # Card: SMLMV vigente
+        smlmv_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
+        smlmv_card.pack(fill=tk.X, pady=(0, 14))
+        ttk.Label(smlmv_card, text="💰 SMLMV vigente", style="SectionTitle.TLabel").pack(anchor="w")
+        current_smlmv = get_smlmv_sesion()
+        formatted_smlmv = f"{current_smlmv:,.0f}".replace(",", ".")
+        self.smlmv_label = ttk.Label(
+            smlmv_card,
+            text=f"Valor actual: ${formatted_smlmv}",
+            style="Muted.TLabel",
+        )
+        self.smlmv_label.pack(anchor="w", pady=(4, 4))
+        entry_row = ttk.Frame(smlmv_card, style="Card.TFrame")
+        entry_row.pack(fill=tk.X, pady=(0, 0))
+        ttk.Label(entry_row, text="Nuevo valor:", style="Muted.TLabel").pack(side=tk.LEFT)
+        self.smlmv_var = tk.StringVar(value=str(current_smlmv))
+        vcmd = (self.register(self._validate_digits), "%P")
+        self.smlmv_entry = ttk.Entry(entry_row, textvariable=self.smlmv_var, width=12, validate="key", validatecommand=vcmd)
+        self.smlmv_entry.pack(side=tk.LEFT, padx=(6, 6))
+        ttk.Button(entry_row, text="Actualizar", command=self._update_smlmv, style="Secondary.TButton").pack(side=tk.LEFT)
+        ttk.Label(
+            smlmv_card,
+            text="El valor se usa en la Fase 4 para calcular salarios en SMLMV. Se resetea al cerrar la app.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(4, 0))
+
+        # Card: Ejecución
+        run_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
+        run_card.pack(fill=tk.X, pady=(0, 14))
+        ttk.Label(run_card, text="🚀 Ejecutar", style="SectionTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            run_card,
+            text="Clasifica 30.744 programas, consolida matrículas OLE y genera Estudio_Mercado_Colombia.xlsx. Primera corrida ~37 min.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(6, 12), fill=tk.X)
+        btn_frame = ttk.Frame(run_card, style="Card.TFrame")
+        btn_frame.pack(fill=tk.X)
+        self.btn_execute = ttk.Button(btn_frame, text="▶️ Ejecutar", command=self._on_execute_clicked, style="Primary.TButton")
+        self.btn_execute.pack(side=tk.LEFT)
+        self.btn_cancel = ttk.Button(btn_frame, text="⏹️ Cancelar", command=self._on_cancel_clicked, state=tk.DISABLED, style="Danger.TButton")
+        self.btn_cancel.pack(side=tk.LEFT, padx=(10, 0))
+        self.btn_resultado = ttk.Button(btn_frame, text="📂 Ver resultado", command=self._open_resultado, state=tk.DISABLED, style="Secondary.TButton")
+        self.btn_resultado.pack(side=tk.LEFT, padx=(10, 0))
+        self.progress = ttk.Progressbar(run_card, mode="determinate", maximum=5, value=0)
+        self.progress.pack(fill=tk.X, pady=(12, 0))
+        self.progress_label = ttk.Label(btn_frame, text="Progreso: listo", style="Status.TLabel")
+        self.progress_label.pack(side=tk.LEFT, padx=(16, 0))
+
+        # Card: Logs
+        log_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
+        log_card.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        ttk.Label(log_card, text="📋 Progreso detallado", style="SectionTitle.TLabel").pack(anchor="w")
+        scrollbar = ttk.Scrollbar(log_card)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.messages_text = tk.Text(
+            log_card,
+            height=12,
+            wrap=tk.WORD,
+            yscrollcommand=scrollbar.set,
+            state=tk.DISABLED,
+            font=("Consolas", 9),
+            bg=EAFIT["card_bg"],
+            fg=EAFIT["text"],
+        )
+        self.messages_text.pack(fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.messages_text.yview)
+
+    def _check_checkpoints(self):
+        from etl.config import CHECKPOINT_BASE_MAESTRA
+        sabana_path = CHECKPOINT_BASE_MAESTRA.parent / "sabana_consolidada.parquet"
+        if CHECKPOINT_BASE_MAESTRA.exists():
+            self.cb_base.config(state=tk.NORMAL)
+            self.reuse_base_var.set(True)
+            self._log_message("✓ Checkpoint base_maestra encontrado")
+        if sabana_path.exists():
+            self.cb_sabana.config(state=tk.NORMAL)
+            self.reuse_sabana_var.set(True)
+            self._log_message("✓ Checkpoint sabana_consolidada encontrado")
+        if not CHECKPOINT_BASE_MAESTRA.exists() and not sabana_path.exists():
+            self._log_message("Sin checkpoints. Se ejecutarán todas las fases.")
+        # Mostrar el SMLMV efectivo que se usará en el scoring
+        try:
+            smlmv = get_smlmv_sesion()
+            formatted = f"{smlmv:,.0f}".replace(",", ".")
+            self._log_message(f"💰 SMLMV vigente: ${formatted}. Puedes ajustarlo antes de ejecutar.")
+        except Exception:
+            pass
+
+    def _validate_digits(self, value: str) -> bool:
+        """Validador simple para permitir solo dígitos (o vacío) en el Entry de SMLMV."""
+        return value.isdigit() or value == ""
+
+    def _update_smlmv(self):
+        """Actualiza el SMLMV de sesión desde el Entry y refresca la etiqueta."""
+        raw = (self.smlmv_var.get() or "").strip()
+        if not raw.isdigit():
+            safe_messagebox_error("Valor inválido", "Ingresa un número entero para el SMLMV.", parent=self.root)
+            return
+        try:
+            valor = int(raw)
+            if valor <= 0:
+                raise ValueError("El SMLMV debe ser positivo.")
+        except Exception as e:
+            safe_messagebox_error("Valor inválido", str(e), parent=self.root)
+            return
+        set_smlmv_sesion(valor)
+        formatted = f"{valor:,.0f}".replace(",", ".")
+        self.smlmv_label.config(text=f"Valor actual: ${formatted}")
+        self._log_message(f"SMLMV de sesión actualizado a ${formatted}")
+
+    def _log_message(self, message: str):
+        """Agrega un mensaje al área de texto (thread-safe vía root.after si se llama desde otro hilo)."""
+        def _do():
+            self.messages_text.config(state=tk.NORMAL)
+            timestamp = time.strftime("%H:%M:%S")
+            self.messages_text.insert(tk.END, f"[{timestamp}] {message}\n")
+            self.messages_text.see(tk.END)
+            self.messages_text.config(state=tk.DISABLED)
+            self.root.update_idletasks()
+        try:
+            self.root.after(0, _do)
+        except Exception:
+            _do()
+
+    def _on_execute_clicked(self):
+        if self.is_running:
+            messagebox.showwarning("Atención", "El pipeline ya se está ejecutando.", parent=self.root)
+            return
+        if not messagebox.askyesno(
+            "Confirmar ejecución",
+            "¿Desea ejecutar el pipeline de estudio de mercado ahora?\n\nPuede tardar varios minutos (~37 min en primera corrida).",
+            parent=self.root,
+        ):
+            return
+        self._execute_pipeline()
+
+    def _on_cancel_clicked(self):
+        if not self.is_running:
+            return
+        if not messagebox.askyesno(
+            "Cancelar ejecución",
+            "¿Está seguro de que desea cancelar?\n\nLos cambios realizados hasta el momento se perderán.",
+            parent=self.root,
+        ):
+            return
+        self.cancel_event.set()
+        self._log_message("[CANCELADO] Cancelación solicitada por el usuario...")
+
+    def _open_resultado(self):
+        if not ensure_base_dir(self.root, prompt_if_missing=False):
+            return
+        from etl.config import ARCHIVO_ESTUDIO_MERCADO
+        if not ARCHIVO_ESTUDIO_MERCADO.exists():
+            safe_messagebox_error(
+                "Sin resultado",
+                "Ejecuta el pipeline primero para generar el archivo.",
+                parent=self.root,
+            )
+            return
+        root = self.winfo_toplevel()
+        if hasattr(root, "_main_menu_gui"):
+            root._main_menu_gui._show_page("mercado_results", EstudioMercadoResultsPage)
+
+    def _execute_pipeline(self):
+        self.is_running = True
+        self.cancel_event.clear()
+        self.btn_execute.config(state=tk.DISABLED)
+        self.btn_cancel.config(state=tk.NORMAL)
+        self.btn_resultado.config(state=tk.DISABLED)
+        self.progress.config(value=0)
+        self.progress_label.config(text="Progreso: listo", foreground=EAFIT["text_muted"])
+        self.messages_text.config(state=tk.NORMAL)
+        self.messages_text.delete("1.0", tk.END)
+        self.messages_text.config(state=tk.DISABLED)
+        threading.Thread(target=self._run_thread, daemon=True).start()
+
+    def _update_progress(self, value: int, text: str):
+        self.progress.config(value=value)
+        self.progress_label.config(text=f"Progreso: {text}", foreground=EAFIT["text_muted"])
+
+    def _release_ui_after_run(self):
+        """Libera la UI tras la ejecución (siempre llamado desde finally). Detiene la barra y habilita Ejecutar."""
+        try:
+            self.progress.stop()
+        except Exception:
+            pass
+        self.btn_execute.config(state=tk.NORMAL)
+        self.btn_cancel.config(state=tk.DISABLED)
+        self.is_running = False
+
+    def _run_thread(self):
+        try:
+            base_dir = get_configured_base_dir()
+            if not base_dir or not base_dir.exists():
+                self.root.after(0, lambda: self._on_mercado_error("No hay carpeta del proyecto configurada."))
+                return
+            update_paths_for_base_dir(base_dir)
+            reuse_base = self.reuse_base_var.get()
+            reuse_sabana = self.reuse_sabana_var.get()
+
+            def ask_reuse(name: str) -> bool:
+                return reuse_base if "base_maestra" in name else reuse_sabana
+
+            from etl.config import CHECKPOINT_BASE_MAESTRA, ARCHIVO_ESTUDIO_MERCADO
+            from etl.mercado_pipeline import run_fase1, run_fase2, run_fase3, run_fase4, run_fase5
+            sabana_path = CHECKPOINT_BASE_MAESTRA.parent / "sabana_consolidada.parquet"
+
+            # Fase 1
+            if self.cancel_event.is_set():
+                self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
+                return
+            if not CHECKPOINT_BASE_MAESTRA.exists() or not ask_reuse("base_maestra.parquet"):
+                self.root.after(0, lambda: self._log_message("Ejecutando Fase 1 (base maestra + ML)..."))
+                self.root.after(0, lambda: self._update_progress(0, "Fase 1..."))
+                run_fase1()
+            else:
+                self.root.after(0, lambda: self._log_message("Reusando base_maestra.parquet"))
+            self.root.after(0, lambda: self._update_progress(1, "Fase 1 ✓"))
+
+            # Fase 2
+            if self.cancel_event.is_set():
+                self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
+                return
+            self.root.after(0, lambda: self._log_message("Ejecutando Fase 2 (scrapers)..."))
+            self.root.after(0, lambda: self._update_progress(2, "Fase 2..."))
+            run_fase2()
+            self.root.after(0, lambda: self._update_progress(2, "Fase 2 ✓"))
+
+            # Fase 3
+            if self.cancel_event.is_set():
+                self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
+                return
+            if not sabana_path.exists() or not ask_reuse("sabana_consolidada.parquet"):
+                self.root.after(0, lambda: self._log_message("Ejecutando Fase 3 (consolidación)..."))
+                self.root.after(0, lambda: self._update_progress(3, "Fase 3..."))
+                run_fase3()
+            else:
+                self.root.after(0, lambda: self._log_message("Reusando sabana_consolidada.parquet"))
+            self.root.after(0, lambda: self._update_progress(3, "Fase 3 ✓"))
+
+            # Fase 4
+            if self.cancel_event.is_set():
+                self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
+                return
+            self.root.after(0, lambda: self._log_message("Ejecutando Fase 4 (agregación + scoring)..."))
+            self.root.after(0, lambda: self._update_progress(4, "Fase 4..."))
+            ag = run_fase4()
+            self.root.after(0, lambda: self._update_progress(4, "Fase 4 ✓"))
+
+            # Fase 5
+            if self.cancel_event.is_set():
+                self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
+                return
+            self.root.after(0, lambda: self._log_message("Ejecutando Fase 5 (exportación)..."))
+            self.root.after(0, lambda: self._update_progress(5, "Fase 5..."))
+            run_fase5(ag)
+            self.root.after(0, lambda: self._update_progress(5, "Fase 5 ✓"))
+
+            if self.cancel_event.is_set():
+                self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
+                return
+            self.root.after(0, self._on_mercado_completed)
+        except Exception as e:
+            self.root.after(0, lambda: self._on_mercado_error(str(e)))
+        finally:
+            self.root.after(0, self._release_ui_after_run)
+
+    def _on_mercado_completed(self):
+        self.is_running = False
+        self.btn_execute.config(state=tk.NORMAL)
+        self.btn_cancel.config(state=tk.DISABLED)
+        self.btn_resultado.config(state=tk.NORMAL)
+        self.progress_label.config(text="Progreso: completado", foreground=EAFIT["success"])
+        self._log_message("=" * 50)
+        self._log_message("✓ Pipeline de estudio de mercado completado")
+        from etl.config import ARCHIVO_ESTUDIO_MERCADO
+        messagebox.showinfo(
+            "Éxito",
+            f"Exportación guardada en:\n{ARCHIVO_ESTUDIO_MERCADO}",
+            parent=self.root,
+        )
+
+    def _on_mercado_error(self, error_msg: str):
+        self.is_running = False
+        self.btn_execute.config(state=tk.NORMAL)
+        self.btn_cancel.config(state=tk.DISABLED)
+        if "Cancelado" in error_msg or self.cancel_event.is_set():
+            self.progress_label.config(text="Progreso: cancelado", foreground=EAFIT["warning"])
+            self._log_message("✗ Ejecución cancelada por el usuario")
+            messagebox.showinfo("Cancelado", "La ejecución fue cancelada.", parent=self.root)
+        else:
+            self.progress_label.config(text="Progreso: error", foreground=EAFIT["danger"])
+            self._log_message(f"✗ ERROR: {error_msg}")
+            messagebox.showerror("Error", f"Error durante la ejecución:\n\n{error_msg}", parent=self.root)
+
+
+class EstudioMercadoResultsPage(ttk.Frame):
+    """Página dedicada para ver y editar el resultado del estudio de mercado (Estudio_Mercado_Colombia.xlsx)."""
+
+    def __init__(self, parent: tk.Misc, on_back=None):
+        super().__init__(parent)
+        self.on_back = on_back
+        self.root = parent.winfo_toplevel()
+        from etl.config import ARCHIVO_ESTUDIO_MERCADO
+        self.file_path = ARCHIVO_ESTUDIO_MERCADO
+        self.active_sheet = "programas_detalle"
+        self.df_total = None
+        self.df_detalle = None
+        self._filtered_df = None
+        self.page_size = 200
+        self.page_index = 0
+        self.pending_updates = {}
+        self.editable_columns = {
+            "CATEGORIA_FINAL",
+            "FUENTE_CATEGORIA",
+            "calificacion_final",
+        }
+        self._setup_ui()
+        self._load()
+
+    def _setup_ui(self):
+        main_frame = ttk.Frame(self, padding=20, style="Page.TFrame")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Header
+        header = ttk.Frame(main_frame, style="Page.TFrame")
+        header.pack(fill=tk.X, pady=(0, 12))
+        header_left = ttk.Frame(header, style="Page.TFrame")
+        header_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ttk.Label(header_left, text="📊 Resultados — Estudio de Mercado Colombia", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(header_left, text="Vista y edición controlada del resultado generado.", style="Muted.TLabel").pack(anchor="w", pady=(4, 0), fill=tk.X)
+        if self.on_back:
+            ttk.Button(header, text="← Volver", command=self._on_back_clicked, style="Back.TButton").pack(side=tk.RIGHT)
+
+        # Fila 1: botones
+        row1 = ttk.Frame(main_frame, style="Card.TFrame")
+        row1.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(row1, text="🔄 Recargar", command=self._load).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row1, text="📂 Abrir en Excel", command=self._open_excel).pack(side=tk.LEFT, padx=6)
+        self.btn_save = ttk.Button(row1, text="💾 Guardar cambios", command=self._save, state=tk.DISABLED)
+        self.btn_save.pack(side=tk.LEFT, padx=6)
+        ttk.Button(row1, text="↩️ Descartar todo", command=self._discard_all).pack(side=tk.LEFT, padx=6)
+
+        # Fila 2: pestañas de hoja (por defecto programas_detalle activa → Primary)
+        row2 = ttk.Frame(main_frame, style="Card.TFrame")
+        row2.pack(fill=tk.X, pady=(0, 8))
+        self.btn_sheet_total = ttk.Button(row2, text="📋 Resumen (total)", command=lambda: self._switch_sheet("total"), style="Secondary.TButton")
+        self.btn_sheet_total.pack(side=tk.LEFT, padx=(0, 6))
+        self.btn_sheet_detalle = ttk.Button(row2, text="📄 Programas detalle", command=lambda: self._switch_sheet("programas_detalle"), style="Primary.TButton")
+        self.btn_sheet_detalle.pack(side=tk.LEFT, padx=6)
+
+        # Fila 3: filtros
+        row3 = ttk.Frame(main_frame, style="Card.TFrame")
+        row3.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(row3, text="Buscar:").pack(side=tk.LEFT, padx=(0, 6))
+        self.search_var = tk.StringVar(value="")
+        ttk.Entry(row3, textvariable=self.search_var, width=30).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row3, text="Buscar", command=self._apply_filter).pack(side=tk.LEFT, padx=6)
+        self.calif_label = ttk.Label(row3, text="Calificación:")
+        self.calif_label.pack(side=tk.LEFT, padx=(14, 6))
+        self.filter_calif_var = tk.StringVar(value="TODAS")
+        self.filter_calif = ttk.Combobox(
+            row3, textvariable=self.filter_calif_var, state="readonly",
+            values=["TODAS", "Verde (≥4)", "Amarillo (≥3)", "Rojo (<3)"], width=14,
+        )
+        self.filter_calif.pack(side=tk.LEFT, padx=2)
+        self.filter_calif.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
+        ttk.Button(row3, text="Limpiar filtros", command=self._clear_filters).pack(side=tk.LEFT, padx=6)
+
+        # Paginador
+        pager = ttk.Frame(main_frame, style="Card.TFrame")
+        pager.pack(fill=tk.X, pady=(0, 6))
+        self.page_label = ttk.Label(pager, text="Página: -", foreground=EAFIT["text_muted"])
+        self.page_label.pack(side=tk.LEFT)
+        self.pending_label = ttk.Label(pager, text="Cambios pendientes: 0", foreground=EAFIT["text_muted"])
+        self.pending_label.pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(pager, text="Anterior", command=self._prev_page).pack(side=tk.RIGHT)
+        ttk.Button(pager, text="Siguiente", command=self._next_page).pack(side=tk.RIGHT, padx=6)
+
+        # Banner solo lectura (oculto por defecto)
+        self.readonly_banner = ttk.Label(self, text="", foreground=EAFIT["danger"], font=("Segoe UI", 9, "bold"))
+        self.readonly_banner.pack(fill=tk.X, padx=10, pady=(0, 6))
+
+        # Área de mensajes
+        self.msg = tk.Text(self, height=4, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 9), bg=EAFIT["card_bg"], fg=EAFIT["text"])
+        self.msg.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        # Placeholder para tabla (se reconstruye en _switch_sheet)
+        self.table_frame = ttk.Frame(main_frame, style="Card.TFrame")
+        self.table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.table = None
+
+    def _on_back_clicked(self):
+        if self.pending_updates:
+            if not messagebox.askyesno("Cambios pendientes", "¿Descartar cambios sin guardar?", parent=self.root):
+                return
+        if self.on_back:
+            self.on_back()
+
+    def _log(self, message: str):
+        self.msg.config(state=tk.NORMAL)
+        ts = time.strftime("%H:%M:%S")
+        self.msg.insert(tk.END, f"[{ts}] {message}\n")
+        self.msg.see(tk.END)
+        self.msg.config(state=tk.DISABLED)
+
+    def _load(self):
+        if not self.file_path.exists():
+            self._log("⚠️ No existe el archivo. Ejecuta el pipeline primero.")
+            return
+        try:
+            from etl.exceptions_helpers import leer_excel_con_reintentos
+            df_try = leer_excel_con_reintentos(self.file_path, sheet_name="total", header=0)
+            if len(df_try.columns) > 0 and str(df_try.columns[0]).strip() == "CATEGORIA_FINAL":
+                self.df_total = df_try
+            else:
+                self.df_total = leer_excel_con_reintentos(self.file_path, sheet_name="total", header=1)
+            self.df_detalle = leer_excel_con_reintentos(self.file_path, sheet_name="programas_detalle")
+        except Exception as e:
+            self._log(f"✗ Error al leer: {e}")
+            return
+        self.pending_updates.clear()
+        self._switch_sheet(self.active_sheet)
+        n_total = len(self.df_total) if self.df_total is not None else 0
+        n_detalle = len(self.df_detalle) if self.df_detalle is not None else 0
+        self._log(f"✓ Archivo cargado: {n_total} categorías, {n_detalle} programas")
+
+    def _switch_sheet(self, sheet_name: str):
+        self.active_sheet = sheet_name
+        self.page_index = 0
+        if sheet_name == "total":
+            display_cols = [
+                "CATEGORIA_FINAL", "FUENTE_CATEGORIA", "calificacion_final",
+                "suma_matricula_2024", "AAGR_suma", "participacion_2024",
+                "salario_promedio", "pct_no_matriculados_2024",
+                "num_programas_2024", "costo_promedio",
+            ]
+            editable = self.editable_columns
+            self.readonly_banner.config(text="")
+            self.btn_sheet_total.config(style="Primary.TButton")
+            self.btn_sheet_detalle.config(style="Secondary.TButton")
+            self.calif_label.pack(side=tk.LEFT, padx=(14, 6))
+            self.filter_calif.pack(side=tk.LEFT, padx=2)
+        else:
+            display_cols = [
+                "CÓDIGO_SNIES_DEL_PROGRAMA", "NOMBRE_DEL_PROGRAMA", "NOMBRE_INSTITUCIÓN", "NIVEL_DE_FORMACIÓN",
+                "CATEGORIA_FINAL", "FUENTE_CATEGORIA", "calificacion_final", "ESTADO_PROGRAMA",
+            ]
+            editable = self.editable_columns
+            self.readonly_banner.config(text="")
+            self.btn_sheet_total.config(style="Secondary.TButton")
+            self.btn_sheet_detalle.config(style="Primary.TButton")
+            self.calif_label.pack_forget()
+            self.filter_calif.pack_forget()
+
+        for w in self.table_frame.winfo_children():
+            w.destroy()
+        df = self.df_total if sheet_name == "total" else self.df_detalle
+        if df is not None:
+            display_cols = [c for c in display_cols if c in df.columns]
+        if not display_cols:
+            display_cols = list(df.columns)[:10] if df is not None and len(df.columns) else []
+        self.table = EditableTable(
+            self.table_frame,
+            columns=display_cols,
+            height=18,
+            editable_columns=editable,
+            on_change=self._on_cell_change,
+            dropdown_values=None,
+        )
+        self.table.pack(fill=tk.BOTH, expand=True)
+        self._apply_filter()
+
+    def _apply_filter(self):
+        df = self.df_total if self.active_sheet == "total" else self.df_detalle
+        if df is None:
+            self._filtered_df = None
+            self._render_page()
+            return
+        df = df.copy()
+        search = (self.search_var.get() or "").strip()
+        if search:
+            search_lower = search.lower()
+            mask = pd.Series(False, index=df.index)
+            for col in df.select_dtypes(include=["object", "string"]).columns:
+                mask |= df[col].astype(str).str.lower().str.contains(search_lower, na=False)
+            df = df.loc[mask]
+        if self.active_sheet == "total" and "calificacion_final" in df.columns:
+            calif = self.filter_calif_var.get()
+            if calif == "Verde (≥4)":
+                df = df[df["calificacion_final"].astype(float) >= 4.0]
+            elif calif == "Amarillo (≥3)":
+                df = df[(df["calificacion_final"].astype(float) >= 3.0) & (df["calificacion_final"].astype(float) < 4.0)]
+            elif calif == "Rojo (<3)":
+                df = df[df["calificacion_final"].astype(float) < 3.0]
+        self._filtered_df = df
+        self.page_index = 0
+        self._render_page()
+
+    def _clear_filters(self):
+        self.search_var.set("")
+        self.filter_calif_var.set("TODAS")
+        self._apply_filter()
+
+    def _render_page(self):
+        if self._filtered_df is None:
+            if self.table:
+                self.table.set_rows([])
+            self.page_label.config(text="Página: -")
+            self.pending_label.config(text=f"Cambios pendientes: {len(self.pending_updates)}")
+            return
+        total = len(self._filtered_df)
+        if total == 0:
+            if self.table:
+                self.table.set_rows([])
+            self.page_label.config(text="Página: 0/0  (0 filas totales)")
+            self.pending_label.config(text=f"Cambios pendientes: {len(self.pending_updates)}")
+            return
+        max_pages = max(1, (total + self.page_size - 1) // self.page_size)
+        self.page_index = max(0, min(self.page_index, max_pages - 1))
+        start = self.page_index * self.page_size
+        end = min(total, start + self.page_size)
+        df_page = self._filtered_df.iloc[start:end].copy()
+        if self.pending_updates:
+            for i in range(len(df_page)):
+                if self.active_sheet == "total":
+                    cat = df_page.iloc[i].get("CATEGORIA_FINAL")
+                    key = str(cat).strip() if cat is not None else None
+                else:
+                    snies = df_page.iloc[i].get("CÓDIGO_SNIES_DEL_PROGRAMA")
+                    key = str(snies).strip() if snies is not None else None
+                if key and key in self.pending_updates:
+                    for k, v in self.pending_updates[key].items():
+                        if k in df_page.columns:
+                            df_page.at[df_page.index[i], k] = v
+        rows = df_page.to_dict(orient="records")
+        if self.table:
+            self.table.set_rows(rows)
+        self.page_label.config(text=f"Página: {self.page_index + 1} de {max_pages}  ({total} filas totales)")
+        self.pending_label.config(text=f"Cambios pendientes: {len(self.pending_updates)}")
+        if self.pending_updates and self.btn_save:
+            self.btn_save.config(state=tk.NORMAL)
+
+    def _on_cell_change(self, idx: int, column: str, new_value: str):
+        rows = self.table.get_rows() if self.table else []
+        if idx < 0 or idx >= len(rows):
+            return
+        row = rows[idx]
+
+        if column == "calificacion_final":
+            try:
+                v = float(new_value)
+            except (ValueError, TypeError):
+                self._revert_cell(idx, column)
+                self._log("⚠️ calificacion_final debe ser un número entre 1.0 y 5.0")
+                return
+            if v < 1.0 or v > 5.0:
+                self._revert_cell(idx, column)
+                self._log("⚠️ calificacion_final debe ser un número entre 1.0 y 5.0")
+                return
+
+        if self.active_sheet == "total":
+            categoria_final = row.get("CATEGORIA_FINAL")
+            if categoria_final is None:
+                return
+            key = str(categoria_final).strip()
+        else:
+            snies = row.get("CÓDIGO_SNIES_DEL_PROGRAMA")
+            if snies is None:
+                return
+            key = str(snies).strip()
+
+        if key not in self.pending_updates:
+            self.pending_updates[key] = {}
+        self.pending_updates[key][column] = new_value
+        if column == "CATEGORIA_FINAL" or column == "calificacion_final":
+            self.pending_updates[key]["FUENTE_CATEGORIA"] = "MANUAL"
+        self.pending_label.config(text=f"Cambios pendientes: {len(self.pending_updates)}")
+        self.btn_save.config(state=tk.NORMAL)
+
+    def _revert_cell(self, idx: int, column: str):
+        """Restaura el valor de una celda desde _filtered_df (valor mostrado antes del cambio rechazado)."""
+        if self.table is None or self._filtered_df is None:
+            return
+        start = self.page_index * self.page_size
+        if start + idx >= len(self._filtered_df):
+            return
+        orig_val = self._filtered_df.iloc[start + idx].get(column)
+        self.table.set_cell_value(idx, column, str(orig_val) if orig_val is not None and not (isinstance(orig_val, float) and pd.isna(orig_val)) else "")
+
+    def _save(self):
+        if not self.pending_updates:
+            return
+        if self.active_sheet == "total":
+            keys_applied = (
+                set(self.df_total["CATEGORIA_FINAL"].astype(str).str.strip()) & set(self.pending_updates.keys())
+                if self.df_total is not None
+                else set()
+            )
+        else:
+            keys_applied = (
+                set(self.df_detalle["CÓDIGO_SNIES_DEL_PROGRAMA"].astype(str).str.strip()) & set(self.pending_updates.keys())
+                if self.df_detalle is not None
+                else set()
+            )
+        n = len(keys_applied)
+        if n == 0:
+            return
+        if not messagebox.askyesno(
+            "Guardar cambios",
+            f"¿Guardar {n} cambios en la hoja '{self.active_sheet}'?\n\nLa otra hoja no se modifica.",
+            parent=self.root,
+        ):
+            return
+
+        if self.active_sheet == "total":
+            # CASO A — Guardado solo de la hoja total (sin recálculo)
+            try:
+                with pd.ExcelWriter(self.file_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+                    if self.df_total is not None:
+                        for key in keys_applied:
+                            changes = self.pending_updates[key]
+                            mask = self.df_total["CATEGORIA_FINAL"].astype(str).str.strip() == str(key).strip()
+                            for col, val in changes.items():
+                                if col in self.df_total.columns:
+                                    self.df_total.loc[mask, col] = val
+                        self.df_total.to_excel(writer, sheet_name="total", index=False)
+            except Exception as e:
+                if "Permission denied" in str(e) or "being used" in str(e).lower():
+                    safe_messagebox_error("Error", explain_file_in_use(), parent=self.root)
+                else:
+                    safe_messagebox_error("Error", str(e), parent=self.root)
+                return
+            for k in keys_applied:
+                del self.pending_updates[k]
+            self.pending_label.config(text=f"Cambios pendientes: {len(self.pending_updates)}")
+            if not self.pending_updates:
+                self.btn_save.config(state=tk.DISABLED)
+            self._log(f"✓ {n} cambios guardados en {self.file_path.name}")
+        else:
+            # CASO B — Guardado en programas_detalle con recálculo de la hoja total en segundo plano
+            if self.df_detalle is None:
+                return
+            # 1. Aplicar pending_updates sobre df_detalle en memoria
+            for key in keys_applied:
+                changes = self.pending_updates.get(key, {})
+                if not changes:
+                    continue
+                mask = self.df_detalle["CÓDIGO_SNIES_DEL_PROGRAMA"].astype(str).str.strip() == str(key).strip()
+                for col, val in changes.items():
+                    if col in self.df_detalle.columns:
+                        self.df_detalle.loc[mask, col] = val
+
+            # 1b. Human-in-the-Loop: guardar correcciones de categoría en ref/feedback_manual.csv (aditivo)
+            try:
+                from etl.config import REF_DIR
+                feedback_path = REF_DIR / "feedback_manual.csv"
+                filas_feedback = []
+                for key in keys_applied:
+                    changes = self.pending_updates.get(key, {})
+                    if "CATEGORIA_FINAL" not in changes:
+                        continue
+                    snies = str(key).strip()
+                    cat_final = str(changes["CATEGORIA_FINAL"]).strip()
+                    if snies and cat_final:
+                        filas_feedback.append({"SNIES": snies, "CATEGORIA_FINAL": cat_final})
+                if filas_feedback:
+                    REF_DIR.mkdir(parents=True, exist_ok=True)
+                    df_fb = pd.DataFrame(filas_feedback)
+                    write_header = not feedback_path.exists()
+                    df_fb.to_csv(
+                        feedback_path,
+                        mode="a",
+                        index=False,
+                        header=write_header,
+                        encoding="utf-8-sig",
+                    )
+                    self._log(f"✓ {len(filas_feedback)} corrección(es) añadidas a feedback_manual.csv para retroalimentación del modelo.")
+            except Exception as e:
+                self._log(f"⚠️ No se pudo escribir feedback_manual.csv: {e}")
+
+            # 2. Capturar overrides manuales existentes en la hoja total
+            manual_overrides: dict[str, dict] = {}
+            if self.df_total is not None and "CATEGORIA_FINAL" in self.df_total.columns and "FUENTE_CATEGORIA" in self.df_total.columns:
+                mask_manual = (
+                    self.df_total["FUENTE_CATEGORIA"].astype(str).str.strip().str.upper() == "MANUAL"
+                )
+                df_manual = self.df_total[mask_manual]
+                for _, row in df_manual.iterrows():
+                    cat = str(row["CATEGORIA_FINAL"]).strip()
+                    if not cat:
+                        continue
+                    overrides: dict[str, object] = {}
+                    for col in self.editable_columns:
+                        if col in self.df_total.columns:
+                            overrides[col] = row[col]
+                    if overrides:
+                        manual_overrides[cat] = overrides
+
+            # 3. Lanzar recálculo en hilo separado
+            self.btn_save.config(state=tk.DISABLED)
+            for k in keys_applied:
+                # limpiar solo las claves aplicadas de esta hoja
+                if k in self.pending_updates:
+                    del self.pending_updates[k]
+            self.pending_label.config(text=f"Cambios pendientes: {len(self.pending_updates)}")
+            self._log("⏳ Recalculando indicadores de la hoja total...")
+            self._recalculate_total_from_detalle(keys_applied, manual_overrides)
+
+    def _recalculate_total_from_detalle(
+        self,
+        keys_applied: set[str],
+        manual_overrides: dict[str, dict],
+    ) -> None:
+        """Recalcula la hoja 'total' a partir de df_detalle usando run_fase4_desde_sabana en un hilo."""
+
+        def _worker():
+            try:
+                from etl.mercado_pipeline import run_fase4_desde_sabana
+                from etl.pipeline_logger import log_info
+
+                df_sabana = self.df_detalle.copy()
+                log_info("Recalculando agregación y scoring de la hoja total desde EstudioMercadoResultsPage.")
+                df_total_new = run_fase4_desde_sabana(df_sabana)
+
+                # 5. Reaplicar overrides manuales sobre el df_total recalculado
+                if "CATEGORIA_FINAL" in df_total_new.columns:
+                    for cat, changes in manual_overrides.items():
+                        mask = df_total_new["CATEGORIA_FINAL"].astype(str).str.strip() == str(cat).strip()
+                        if not mask.any():
+                            continue
+                        for col, val in changes.items():
+                            if col in df_total_new.columns:
+                                df_total_new.loc[mask, col] = val
+                        if "FUENTE_CATEGORIA" in df_total_new.columns:
+                            df_total_new.loc[mask, "FUENTE_CATEGORIA"] = "MANUAL"
+
+                # 6. Escribir Excel completo con ambas hojas actualizadas
+                try:
+                    with pd.ExcelWriter(self.file_path, engine="openpyxl", mode="w") as writer:
+                        df_total_new.to_excel(writer, sheet_name="total", index=False)
+                        if self.df_detalle is not None:
+                            self.df_detalle.to_excel(writer, sheet_name="programas_detalle", index=False)
+                except Exception as e:
+                    def _on_err():
+                        if "Permission denied" in str(e) or "being used" in str(e).lower():
+                            safe_messagebox_error("Error", explain_file_in_use(), parent=self.root)
+                        else:
+                            safe_messagebox_error("Error", str(e), parent=self.root)
+                        # Rehabilitar botón de guardado si aún hay cambios
+                        self.btn_save.config(state=tk.NORMAL if self.pending_updates else tk.DISABLED)
+
+                    self.root.after(0, _on_err)
+                    return
+
+                # 7. Actualizar UI en el hilo principal
+                def _on_ok():
+                    self.df_total = df_total_new
+                    if self.active_sheet == "total":
+                        self._apply_filter()
+                    messagebox.showinfo(
+                        "Guardado",
+                        "Cambios guardados y hoja Total recalculada.\n"
+                        f"Correcciones manuales previas conservadas: {len(manual_overrides)} categorías.",
+                        parent=self.root,
+                    )
+                    self._log(
+                        f"✓ {len(keys_applied)} cambios guardados en {self.file_path.name} "
+                        f"(detalle) y hoja total recalculada"
+                    )
+                    self.btn_save.config(state=tk.DISABLED if not self.pending_updates else tk.NORMAL)
+
+                self.root.after(0, _on_ok)
+            except Exception as e:
+                def _on_unexpected():
+                    safe_messagebox_error(
+                        "Error",
+                        f"Error al recalcular la hoja total: {e}",
+                        parent=self.root,
+                    )
+                    self.btn_save.config(state=tk.NORMAL if self.pending_updates else tk.DISABLED)
+
+                self.root.after(0, _on_unexpected)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _discard_all(self):
+        if not self.pending_updates:
+            return
+        if not messagebox.askyesno("Descartar", "¿Descartar todos los cambios pendientes?", parent=self.root):
+            return
+        self.pending_updates.clear()
+        self._load()
+
+    def _open_excel(self):
+        try:
+            _open_in_excel(self.file_path)
+        except Exception as exc:
+            safe_messagebox_error("Error", str(exc), parent=self.root)
+
+    def _prev_page(self):
+        if self._filtered_df is None:
+            return
+        if self.page_index > 0:
+            self.page_index -= 1
+            self._render_page()
+
+    def _next_page(self):
+        if self._filtered_df is None:
+            return
+        total = len(self._filtered_df)
+        max_pages = max(1, (total + self.page_size - 1) // self.page_size)
+        if self.page_index < max_pages - 1:
+            self.page_index += 1
+            self._render_page()
 
 
 def run_pipeline(
