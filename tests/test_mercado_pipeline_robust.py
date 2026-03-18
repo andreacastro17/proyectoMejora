@@ -187,19 +187,16 @@ def test_fase1_aplica_feedback_manual(tmp_path: Path):
 
 
 @pytest.mark.slow
-def test_fase2_snies_split_por_semestre_sin_red(tmp_path: Path, monkeypatch):
+def test_fase2_snies_split_por_semestre_sin_red(tmp_path: Path):
     """
-    Prueba que el scraper de matrículas:
-    - descarta API
-    - usa portal HTML
-    - descarga un excel anual simulado
-    - detecta columnas flexibles
-    - guarda ambos CSVs (sem1 y sem2)
+    Prueba que el scraper de matrículas lee desde ref/backup/matriculas/:
+    - busca un archivo cuyo nombre contenga el año (ej. 2019)
+    - lee con header=None y detecta la fila de encabezados (contiene 'snies') en las primeras 20 filas
+    - divide por semestre y guarda matriculados_{year}_1.csv y _2.csv en raw
     """
     pytest.importorskip("pyarrow")
     from etl import config
 
-    # Evitar ruido de config: pre-crear stubs antes de update_paths_for_base_dir
     ref_backup = tmp_path / "ref" / "backup"
     ref_backup.mkdir(parents=True, exist_ok=True)
     for nombre in ("referentesUnificados.xlsx", "catalogoOfertasEAFIT.xlsx", "Referente_Categorias.xlsx"):
@@ -212,7 +209,11 @@ def test_fase2_snies_split_por_semestre_sin_red(tmp_path: Path, monkeypatch):
     from etl.config import RAW_HISTORIC_DIR
     from etl.scraper_matriculas import SNIESMatriculasScraper
 
-    # Excel anual simulado con columnas variantes
+    # Carpeta de lectura local: ref/backup/matriculas/
+    matriculas_dir = tmp_path / "ref" / "backup" / "matriculas"
+    matriculas_dir.mkdir(parents=True, exist_ok=True)
+
+    # Excel anual con encabezado en primera fila (al leer con header=None, la fila 0 contiene 'snies')
     df_excel = pd.DataFrame(
         {
             "CÓDIGO SNIES DEL PROGRAMA": ["1", "2", "3", "1"],
@@ -220,42 +221,8 @@ def test_fase2_snies_split_por_semestre_sin_red(tmp_path: Path, monkeypatch):
             "MATRICULADOS": [100, 200, 300, 150],
         }
     )
-    excel_bytes = _make_excel_bytes(df_excel, sheet_name="1.")
-
-    class _Resp:
-        def __init__(self, status_code: int, text: str = "", content: bytes = b""):
-            self.status_code = status_code
-            self.text = text
-            self.content = content
-
-        def raise_for_status(self):
-            if self.status_code >= 400:
-                raise RuntimeError(f"HTTP {self.status_code}")
-
-        def json(self):
-            return {}
-
-    # API POST falla => fallback a portal HTML
-    def fake_post(url, json=None, timeout=None):
-        return _Resp(404)
-
-    portal_html = """
-    <html><body>
-    <a href="articles-401908_recurso.xlsx">Estudiantes matriculados 2019</a>
-    </body></html>
-    """
-
-    def fake_get(url, headers=None, timeout=None):
-        if url.endswith("/portal/ESTADISTICAS/Bases-consolidadas/") or url.endswith("/portal/ESTADISTICAS/Bases-consolidadas"):
-            return _Resp(200, text=portal_html)
-        if url.endswith("articles-401908_recurso.xlsx"):
-            return _Resp(200, content=excel_bytes)
-        return _Resp(404)
-
-    import requests
-
-    monkeypatch.setattr(requests, "post", fake_post)
-    monkeypatch.setattr(requests, "get", fake_get)
+    excel_path = matriculas_dir / "matriculados_2019.xlsx"
+    df_excel.to_excel(excel_path, sheet_name=0, index=False)
 
     s = SNIESMatriculasScraper(raw_dir=RAW_HISTORIC_DIR)
     df_sem1 = s.download_matriculados(2019, 1)

@@ -4445,7 +4445,7 @@ class MercadoPipelinePage(ttk.Frame):
         ttk.Button(entry_row, text="Actualizar", command=self._update_smlmv, style="Secondary.TButton").pack(side=tk.LEFT)
         ttk.Label(
             smlmv_card,
-            text="El valor se usa en la Fase 4 para calcular salarios en SMLMV. Se resetea al cerrar la app.",
+            text="El valor se usa en la Fase 4 para calcular salarios en SMLMV. Se guarda en config.json y persiste entre sesiones.",
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(4, 0))
 
@@ -4569,7 +4569,16 @@ class MercadoPipelinePage(ttk.Frame):
         ):
             return
         self.cancel_event.set()
-        self._log_message("[CANCELADO] Cancelación solicitada por el usuario...")
+        # Feedback inmediato en la UI: la cancelación se aplica al finalizar la fase actual
+        self.btn_cancel.config(state=tk.DISABLED)
+        try:
+            self.progress_label.config(
+                text="Progreso: cancelando (se detendrá al final de la fase actual)",
+                foreground=EAFIT["warning"],
+            )
+        except Exception:
+            pass
+        self._log_message("[CANCELADO] Cancelación solicitada por el usuario. La ejecución se detendrá al finalizar la fase en curso.")
 
     def _open_resultado(self):
         if not ensure_base_dir(self.root, prompt_if_missing=False):
@@ -4587,6 +4596,15 @@ class MercadoPipelinePage(ttk.Frame):
             root._main_menu_gui._show_page("mercado_results", EstudioMercadoResultsPage)
 
     def _execute_pipeline(self):
+        # Persistir el SMLMV actual antes de lanzar el pipeline
+        try:
+            raw = (self.smlmv_var.get() or "").strip()
+            if raw.isdigit():
+                set_smlmv_sesion(float(raw))
+        except Exception:
+            # No bloquear la ejecución si falla la persistencia; se usará el último valor válido
+            pass
+
         self.is_running = True
         self.cancel_event.clear()
         self.btn_execute.config(state=tk.DISABLED)
@@ -4686,7 +4704,9 @@ class MercadoPipelinePage(ttk.Frame):
                 return
             self.root.after(0, self._on_mercado_completed)
         except Exception as e:
-            self.root.after(0, lambda: self._on_mercado_error(str(e)))
+            # Capturar el mensaje en una variable local para evitar problemas de alcance con lambdas diferidas
+            msg = str(e)
+            self.root.after(0, lambda msg=msg: self._on_mercado_error(msg))
         finally:
             self.root.after(0, self._release_ui_after_run)
 

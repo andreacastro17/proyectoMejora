@@ -228,9 +228,6 @@ SMLMV_POR_ANO: dict[int, int] = {
     2025: 1_423_500,
 }
 
-_smlmv_sesion: int | None = None
-
-
 def obtener_smlmv_vigente() -> int:
     """
     Retorna el SMLMV vigente según el año actual.
@@ -241,26 +238,36 @@ def obtener_smlmv_vigente() -> int:
     return SMLMV_POR_ANO.get(year, SMLMV)
 
 
-def set_smlmv_sesion(valor: int) -> None:
+def set_smlmv_sesion(valor: float) -> bool:
     """
-    Sobrescribe el SMLMV a usar durante esta sesión de la aplicación.
+    Persiste el SMLMV efectivo en config.json (clave 'SMLMV').
 
-    No persiste en disco ni modifica constantes; solo afecta llamadas a get_smlmv_sesion().
+    Returns:
+        True si se guardó correctamente, False en caso contrario.
     """
-    global _smlmv_sesion
-    _smlmv_sesion = int(valor)
+    try:
+        c = _load_config()
+        c["SMLMV"] = float(valor)
+        return _save_config(c)
+    except Exception as e:
+        print(f"[ERROR] No se pudo guardar SMLMV en config.json: {e}")
+        return False
 
 
-def get_smlmv_sesion() -> int:
+def get_smlmv_sesion() -> float:
     """
-    Obtiene el SMLMV efectivo para la sesión actual.
+    Obtiene el SMLMV efectivo desde config.json (clave 'SMLMV').
 
-    - Si set_smlmv_sesion() fue llamado, retorna ese valor.
-    - En caso contrario, retorna obtener_smlmv_vigente().
+    Si no existe la clave o el archivo, retorna 1_300_000.0 como valor por defecto.
     """
-    if _smlmv_sesion is not None:
-        return _smlmv_sesion
-    return obtener_smlmv_vigente()
+    try:
+        c = _load_config()
+        val = c.get("SMLMV")
+        if isinstance(val, (int, float)):
+            return float(val)
+    except Exception:
+        pass
+    return 1_300_000.0
 
 # Fase 5: exportación estudio de mercado
 ARCHIVO_ESTUDIO_MERCADO = OUTPUTS_DIR / "Estudio_Mercado_Colombia.xlsx"
