@@ -223,7 +223,11 @@ def merge_incremental(
     # 4. Primera ejecución ─────────────────────────────────────────────────────
     if existente.empty:
         log_info("[Merge] Primera ejecución — inicializando columnas de control.")
-        nuevo["FECHA_PRIMERA_VEZ"] = hoy
+        nuevo["FECHA_PRIMERA_VEZ"] = (
+            pd.to_datetime(nuevo["FECHA_DE_REGISTRO_EN_SNIES"], errors="coerce")
+            if "FECHA_DE_REGISTRO_EN_SNIES" in nuevo.columns
+            else pd.Series(hoy, index=nuevo.index)
+        ).fillna(hoy)
         nuevo["FECHA_ULTIMO_ACTIVO"] = hoy
         nuevo["ACTIVO_PIPELINE"] = _calcular_activo_pipeline(nuevo)
         nuevo["ES_PROGRAMA_NUEVO"] = _calcular_es_nuevo(nuevo["FECHA_PRIMERA_VEZ"])
@@ -322,7 +326,11 @@ def merge_incremental(
     # 9. Nuevos → agregar ──────────────────────────────────────────────────────
     if nuevos_ids:
         df_nuevos = nuevo[nuevo[ID_COL].isin(nuevos_ids)].copy()
-        df_nuevos["FECHA_PRIMERA_VEZ"] = hoy
+        df_nuevos["FECHA_PRIMERA_VEZ"] = (
+            pd.to_datetime(df_nuevos["FECHA_DE_REGISTRO_EN_SNIES"], errors="coerce")
+            if "FECHA_DE_REGISTRO_EN_SNIES" in df_nuevos.columns
+            else pd.Series(hoy, index=df_nuevos.index)
+        ).fillna(hoy)
         df_nuevos["FECHA_ULTIMO_ACTIVO"] = hoy
         df_nuevos["ACTIVO_PIPELINE"] = _calcular_activo_pipeline(df_nuevos)
         df_nuevos["ES_PROGRAMA_NUEVO"] = True
