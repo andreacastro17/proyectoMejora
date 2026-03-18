@@ -228,7 +228,6 @@ def run_fase1() -> pd.DataFrame:
                         max_iter=1000,
                         C=1.5,
                         solver="lbfgs",
-                        multi_class="multinomial",
                         n_jobs=-1,
                         random_state=42,
                     ),
@@ -291,8 +290,9 @@ def run_fase1() -> pd.DataFrame:
         )
 
         UMBRAL_REVISION = 0.70
+        prob_num = pd.to_numeric(df_base["PROBABILIDAD"], errors="coerce")
         df_base.loc[
-            mask_prediccion & (df_base["PROBABILIDAD"].astype(float) < UMBRAL_REVISION),
+            mask_prediccion & (prob_num < UMBRAL_REVISION),
             "REQUIERE_REVISION",
         ] = True
 
@@ -752,11 +752,13 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
     ag["AAGR_suma"] = ag[var_suma_cols].mean(axis=1) if var_suma_cols else np.nan
     ag["AAGR_prom"] = ag[var_prom_cols].mean(axis=1) if var_prom_cols else np.nan
 
-    suma_2019 = ag.get("suma_matricula_2019", pd.Series(0))
-    suma_2024 = ag.get("suma_matricula_2024", pd.Series(0))
-    mask_cagr = (suma_2019 > 0) & (suma_2024 > 0)
+    # CAGR_suma requiere suma_matricula_2019 y suma_matricula_2024
     ag["CAGR_suma"] = np.nan
-    ag.loc[mask_cagr, "CAGR_suma"] = (ag.loc[mask_cagr, "suma_matricula_2024"] / ag.loc[mask_cagr, "suma_matricula_2019"]) ** (1 / 5) - 1
+    if "suma_matricula_2019" in ag.columns and "suma_matricula_2024" in ag.columns:
+        suma_2019 = ag["suma_matricula_2019"]
+        suma_2024 = ag["suma_matricula_2024"]
+        mask_cagr = (suma_2019 > 0) & (suma_2024 > 0)
+        ag.loc[mask_cagr, "CAGR_suma"] = (suma_2024[mask_cagr] / suma_2019[mask_cagr]) ** (1 / 5) - 1
 
     # Bloque B: pct_no_matriculados y var_inscritos
     if "inscritos_2023_suma" in ag.columns and "suma_matricula_2023" in ag.columns:
@@ -785,7 +787,7 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         ag["pct_con_matricula"] = ag["num_programas_2024"] / ag["programas_activos"].replace(0, np.nan)
     else:
         ag["pct_con_matricula"] = np.nan
-    if "num_programas_2024" in ag.columns:
+    if "num_programas_2024" in ag.columns and "suma_matricula_2024" in ag.columns:
         ag["prom_matricula_por_programa_2024"] = ag["suma_matricula_2024"] / ag["num_programas_2024"].replace(0, np.nan)
     else:
         ag["prom_matricula_por_programa_2024"] = np.nan
@@ -796,12 +798,14 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
     else:
         ag["distancia_costo_pct"] = np.nan
 
-    # salario_promedio_smlmv para scoring (usar SMLMV efectivo de la sesión)
+    # salario_promedio ya viene expresado en SMLMV (ej. 3.5). No dividir por SMLMV en pesos.
     if "salario_promedio" in ag.columns:
+        ag["salario_promedio_smlmv"] = ag["salario_promedio"]
         smlmv = float(get_smlmv_sesion())
-        ag["salario_promedio_smlmv"] = ag["salario_promedio"] / smlmv if smlmv else np.nan
+        ag["salario_proyectado_pesos_hoy"] = ag["salario_promedio"] * smlmv if smlmv else np.nan
     else:
         ag["salario_promedio_smlmv"] = np.nan
+        ag["salario_proyectado_pesos_hoy"] = np.nan
 
     # Reemplazar inf por nan
     ag = ag.replace([np.inf, -np.inf], np.nan)
@@ -855,7 +859,7 @@ _BLOQUES_TOTAL = [
         "participacion_2019", "participacion_2024", "AAGR_suma", "CAGR_suma", "AAGR_prom",
     ]),
     ("OLE", [
-        "salario_promedio", "inscritos_2023_suma", "inscritos_2024_suma", "inscritos_2023_prom", "inscritos_2024_prom",
+        "salario_promedio", "salario_proyectado_pesos_hoy", "inscritos_2023_suma", "inscritos_2024_suma", "inscritos_2023_prom", "inscritos_2024_prom",
         "pct_no_matriculados_2023", "pct_no_matriculados_2024", "var_inscritos",
     ]),
     ("OFERTA", [
