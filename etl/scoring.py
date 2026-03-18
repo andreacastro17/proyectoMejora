@@ -18,14 +18,16 @@ SCORING_CONFIG = [
         "col": "suma_matricula_2024",
         "out": "score_matricula",
         "peso": 0.30,
-        "thresholds": [(0, 1), (20, 2), (50, 3), (200, 4)],
+        # Escala macro (aprox: p25=221, p50=1292, p75=6725, p90=41623)
+        "thresholds": [(0, 1), (500, 2), (3000, 3), (20000, 4)],
         "inverse": False,
     },
     {
         "col": "participacion_2024",
         "out": "score_participacion",
         "peso": 0.15,
-        "thresholds": [(0, 1), (0.002, 2), (0.005, 3), (0.01, 4)],
+        # Escala macro (aprox: p25=0.000044, p50=0.000257, p75=0.001338)
+        "thresholds": [(0, 1), (0.0002, 2), (0.001, 3), (0.005, 4)],
         "inverse": False,
     },
     {
@@ -53,14 +55,16 @@ SCORING_CONFIG = [
         "col": "num_programas_2024",
         "out": "score_num_programas",
         "peso": 0.05,
-        "thresholds": [(3, 5), (10, 4), (30, 3), (50, 2)],
+        # Escala macro (media ~48 programas por categoría)
+        "thresholds": [(10, 5), (30, 4), (80, 3), (150, 2)],
         "inverse": True,
     },
     {
         "col": "distancia_costo_pct",
         "out": "score_costo",
         "peso": 0.05,
-        "thresholds": [(-20, 1), (0, 2), (10, 3), (25, 4)],
+        # Escala macro (distancia media ~ -16.9%)
+        "thresholds": [(-50, 1), (-20, 2), (0, 3), (20, 4)],
         "inverse": False,
     },
 ]
@@ -97,6 +101,12 @@ def apply_scoring(df: pd.DataFrame) -> pd.DataFrame:
     total_peso = sum(c["peso"] for c in SCORING_CONFIG)
     if abs(total_peso - 1.0) > 1e-9:
         raise ValueError(f"Los pesos en SCORING_CONFIG deben sumar 1.0, suman {total_peso}")
+
+    # Neutralizar NaN de pct_no_matriculados_2024 (categorías sin datos OLE comparables)
+    # para evitar que se vayan al peor score por ausencia de dato.
+    PCT_NAN_FILL = 0.20
+    if "pct_no_matriculados_2024" in out.columns:
+        out["pct_no_matriculados_2024"] = out["pct_no_matriculados_2024"].fillna(PCT_NAN_FILL)
 
     for cfg in SCORING_CONFIG:
         col = cfg["col"]

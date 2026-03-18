@@ -198,13 +198,56 @@ def run_fase1() -> pd.DataFrame:
     X_text = df_entrenar["_texto_ml_norm"].astype(str)
     y = df_entrenar["CATEGORIA_FINAL"].astype(str)
 
+    # Stratified split solo es posible si todas las clases tienen al menos 2 ejemplos.
+    y_counts = y.value_counts()
+    rare_classes = y_counts[y_counts < 2]
+    if not rare_classes.empty:
+        log_warning(
+            "Se desactiva stratify en train_test_split porque hay categorías con menos de 2 ejemplos: "
+            + ", ".join(f"{c}({n})" for c, n in rare_classes.items())
+        )
+        stratify = None
+    else:
+        stratify = y
+
     X_train_t, X_test_t, y_train, y_test = train_test_split(
         X_text,
         y,
         test_size=0.2,
         random_state=42,
-        stratify=y,
+        stratify=stratify,
     )
+
+    # Determinar cv efectivo para CalibratedClassifierCV según tamaño mínimo de clase en y_train
+    y_train_counts = y_train.value_counts()
+    min_count = int(y_train_counts.min()) if not y_train_counts.empty else 0
+    use_calibration = True
+    calib_cv = 5
+    if min_count < 2:
+        log_warning(
+            "Se omite CalibratedClassifierCV porque hay categorías con menos de 2 ejemplos en entrenamiento: "
+            + ", ".join(f"{c}({n})" for c, n in y_train_counts.items())
+        )
+        use_calibration = False
+    elif min_count < 5:
+        calib_cv = min_count
+        log_warning(
+            f"Se ajusta CalibratedClassifierCV a cv={calib_cv} porque hay categorías escasas "
+            f"(mínimo por clase en y_train: {min_count})."
+        )
+
+    base_clf = LogisticRegression(
+        class_weight="balanced",
+        max_iter=1000,
+        C=1.5,
+        solver="lbfgs",
+        n_jobs=-1,
+        random_state=42,
+    )
+    if use_calibration:
+        final_clf = CalibratedClassifierCV(base_clf, cv=calib_cv, method="sigmoid")
+    else:
+        final_clf = base_clf
 
     pipeline_ml = Pipeline(
         [
@@ -220,21 +263,7 @@ def run_fase1() -> pd.DataFrame:
                     token_pattern=r"(?u)\b[a-záéíóúüñA-ZÁÉÍÓÚÜÑ]{2,}\b",
                 ),
             ),
-            (
-                "clf",
-                CalibratedClassifierCV(
-                    LogisticRegression(
-                        class_weight="balanced",
-                        max_iter=1000,
-                        C=1.5,
-                        solver="lbfgs",
-                        n_jobs=-1,
-                        random_state=42,
-                    ),
-                    cv=5,
-                    method="sigmoid",
-                ),
-            ),
+            ("clf", final_clf),
         ]
     )
     pipeline_ml.fit(X_train_t, y_train)
@@ -406,7 +435,11 @@ def _cargar_csv_raw(raw_dir: Path, nombre: str) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     try:
-        df = pd.read_csv(path, encoding="utf-8-sig")
+        df = pd.read_csv(
+            path,
+            dtype={"CÓDIGO_SNIES_DEL_PROGRAMA": str, "CODIGO_SNIES_DEL_PROGRAMA": str},
+            encoding="utf-8-sig",
+        )
         return df if df is not None and len(df) > 0 else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
@@ -499,41 +532,108 @@ def run_fase3() -> None:
     base = pd.read_parquet(CHECKPOINT_BASE_MAESTRA)
     codigo_col = "CÓDIGO_SNIES_DEL_PROGRAMA"
 
+    # Guard idempotencia: eliminar columnas previas que serán recalculadas (evita mezclar ejecuciones)
+    cols_to_refresh = (
+        [f"matricula_{y}" for y in range(2019, 2025)]
+        + [f"matricula_{y}_1" for y in range(2019, 2025)]
+        + [f"matricula_{y}_2" for y in range(2019, 2025)]
+        + [f"inscritos_{y}" for y in range(2019, 2025)]
+    )
+    cols_existentes = [c for c in cols_to_refresh if c in base.columns]
+    if cols_existentes:
+        base = base.drop(columns=cols_existentes)
+        log_info(
+            f"[Fase 3] Idempotencia: eliminadas {len(cols_existentes)} columnas previas de matrículas/inscritos para recalcular."
+        )
+
     # Normalizar código para joins
     base["_codigo_norm"] = _normalizar_codigo_snies(base[codigo_col])
 
     # 3.1 Matrículas e inscritos históricos (2019-2024, semestre 1+2)
     matricula_cols = [f"matricula_{y}" for y in range(2019, 2025)]
+    sem_cols = [f"matricula_{y}_{s}" for y in range(2019, 2025) for s in (1, 2)]
     inscritos_cols = [f"inscritos_{y}" for y in range(2019, 2025)]
-    for col in matricula_cols + inscritos_cols:
-        if col not in base.columns:
-            base[col] = pd.NA
 
     for year in range(2019, 2025):
-        # Matriculados: sem1 + sem2 (archivo inexistente o vacío → 0)
         m1 = _cargar_csv_raw(raw_dir, f"matriculados_{year}_1.csv")
         m2 = _cargar_csv_raw(raw_dir, f"matriculados_{year}_2.csv")
+        if codigo_col in m1.columns:
+            m1[codigo_col] = _normalizar_codigo_snies(m1[codigo_col])
+        if codigo_col in m2.columns:
+            m2[codigo_col] = _normalizar_codigo_snies(m2[codigo_col])
+
+        # Columnas semestrales individuales (matricula_{year}_1, matricula_{year}_2)
+        col_sem1 = f"matricula_{year}_1"
+        col_sem2 = f"matricula_{year}_2"
+        if len(m1) > 0 and "MATRICULADOS" in m1.columns:
+            val_m1_sem = m1.groupby(codigo_col, as_index=False)["MATRICULADOS"].sum()
+            val_m1_sem = val_m1_sem.rename(columns={"MATRICULADOS": col_sem1})
+            val_m1_sem["_codigo_norm"] = _normalizar_codigo_snies(val_m1_sem[codigo_col])
+            if col_sem1 in base.columns:
+                base = base.drop(columns=[col_sem1])
+            base = base.merge(
+                val_m1_sem[["_codigo_norm", col_sem1]],
+                on="_codigo_norm",
+                how="left",
+            )
+        else:
+            base[col_sem1] = 0
+        if len(m2) > 0 and "MATRICULADOS" in m2.columns:
+            val_m2_sem = m2.groupby(codigo_col, as_index=False)["MATRICULADOS"].sum()
+            val_m2_sem = val_m2_sem.rename(columns={"MATRICULADOS": col_sem2})
+            val_m2_sem["_codigo_norm"] = _normalizar_codigo_snies(val_m2_sem[codigo_col])
+            if col_sem2 in base.columns:
+                base = base.drop(columns=[col_sem2])
+            base = base.merge(
+                val_m2_sem[["_codigo_norm", col_sem2]],
+                on="_codigo_norm",
+                how="left",
+            )
+        else:
+            base[col_sem2] = 0
+
+        # Suma anual (matricula_{year} = sem1 + sem2)
         val_m1 = m1.groupby(codigo_col, as_index=False)["MATRICULADOS"].sum() if len(m1) > 0 and "MATRICULADOS" in m1.columns else pd.DataFrame(columns=[codigo_col, "MATRICULADOS"])
         val_m2 = m2.groupby(codigo_col, as_index=False)["MATRICULADOS"].sum() if len(m2) > 0 and "MATRICULADOS" in m2.columns else pd.DataFrame(columns=[codigo_col, "MATRICULADOS"])
         merge_m = val_m1.merge(val_m2, on=codigo_col, how="outer", suffixes=("", "_2"))
         merge_m["matricula"] = merge_m["MATRICULADOS"].fillna(0) + (merge_m["MATRICULADOS_2"].fillna(0) if "MATRICULADOS_2" in merge_m.columns else 0)
         merge_m["_codigo_norm"] = _normalizar_codigo_snies(merge_m[codigo_col])
-        base = base.merge(merge_m[["_codigo_norm", "matricula"]].rename(columns={"matricula": f"matricula_{year}"}), on="_codigo_norm", how="left")
+        col_name_mat = f"matricula_{year}"
+        if col_name_mat in base.columns:
+            base = base.drop(columns=[col_name_mat])
+        base = base.merge(merge_m[["_codigo_norm", "matricula"]].rename(columns={"matricula": col_name_mat}), on="_codigo_norm", how="left")
 
         # Inscritos: sem1 + sem2
         i1 = _cargar_csv_raw(raw_dir, f"inscritos_{year}_1.csv")
         i2 = _cargar_csv_raw(raw_dir, f"inscritos_{year}_2.csv")
+        if codigo_col in i1.columns:
+            i1[codigo_col] = _normalizar_codigo_snies(i1[codigo_col])
+        if codigo_col in i2.columns:
+            i2[codigo_col] = _normalizar_codigo_snies(i2[codigo_col])
         val_i1 = i1.groupby(codigo_col, as_index=False)["INSCRITOS"].sum() if len(i1) > 0 and "INSCRITOS" in i1.columns else pd.DataFrame(columns=[codigo_col, "INSCRITOS"])
         val_i2 = i2.groupby(codigo_col, as_index=False)["INSCRITOS"].sum() if len(i2) > 0 and "INSCRITOS" in i2.columns else pd.DataFrame(columns=[codigo_col, "INSCRITOS"])
         merge_i = val_i1.merge(val_i2, on=codigo_col, how="outer", suffixes=("", "_2"))
         merge_i["inscritos"] = merge_i["INSCRITOS"].fillna(0) + (merge_i["INSCRITOS_2"].fillna(0) if "INSCRITOS_2" in merge_i.columns else 0)
         merge_i["_codigo_norm"] = _normalizar_codigo_snies(merge_i[codigo_col])
+        col_name_ins = f"inscritos_{year}"
+        if col_name_ins in base.columns:
+            base = base.drop(columns=[col_name_ins])
         base = base.merge(merge_i[["_codigo_norm", "inscritos"]].rename(columns={"inscritos": f"inscritos_{year}"}), on="_codigo_norm", how="left")
 
-    # Rellenar nulos de matrícula/inscritos con 0
-    for col in matricula_cols + inscritos_cols:
+    # Rellenar nulos de matrícula (anual + semestral) e inscritos con 0
+    for col in matricula_cols + sem_cols + inscritos_cols:
         if col in base.columns:
             base[col] = base[col].fillna(0)
+
+    # Fallback: si inscritos del scraper están en 0 pero el referente trae INSCRITOS_2023/2024, usar esos valores
+    for year in (2023, 2024):
+        col_ins = f"inscritos_{year}"
+        col_ref = f"INSCRITOS_{year}"
+        if col_ins not in base.columns:
+            continue
+        if base[col_ins].sum() == 0 and col_ref in base.columns:
+            base[col_ins] = base[col_ref].fillna(0)
+            log_info(f"[Fase 3] Fallback: {col_ins} rellenado desde referente ({col_ref})")
 
     # 3.2 OLE en cascada: REFERENTE → SCRAPER → IMPUTADO (mediana por CATEGORIA_FINAL)
     if "FUENTE_OLE" not in base.columns:
@@ -645,20 +745,70 @@ def run_fase3() -> None:
                         )
 
     # 3.4 Columnas derivadas
-    base["es_activo"] = base.get("ESTADO_PROGRAMA", pd.Series()).astype(str).str.strip().str.lower() == "activo"
+    # Regla de negocio: ACTIVO = (matricula_último_año > 0) OR (ESTADO_PROGRAMA == 'activo')
+    # Corrige programas marcados "inactivo" pero con matrícula real.
+    ultimo_y = next((y for y in range(2025, 2018, -1) if f"matricula_{y}" in base.columns), None)
+    mat_ultimo = base.get(f"matricula_{ultimo_y}", pd.Series(0, index=base.index)).fillna(0) if ultimo_y else pd.Series(0, index=base.index)
+    estado_activo = (
+        base["ESTADO_PROGRAMA"].astype(str).str.strip().str.lower() == "activo"
+        if "ESTADO_PROGRAMA" in base.columns
+        else pd.Series(False, index=base.index)
+    )
+    base["es_activo"] = ((mat_ultimo > 0) | estado_activo).astype(bool)
+    try:
+        log_info(
+            f"[Fase 3] es_activo: {int(base['es_activo'].sum()):,} activos | "
+            f"{int((mat_ultimo > 0).sum()):,} por matrícula ({ultimo_y}) | "
+            f"{int(estado_activo.sum()):,} por ESTADO_PROGRAMA"
+        )
+    except Exception:
+        pass
     try:
         fechas = pd.to_datetime(base.get("FECHA_DE_REGISTRO_EN_SNIES", pd.Series()), errors="coerce")
         base["es_programa_nuevo"] = fechas >= pd.Timestamp("2022-01-01")
     except Exception:
         base["es_programa_nuevo"] = False
     base["es_programa_nuevo"] = base["es_programa_nuevo"].fillna(False)
-    mat_2024 = base.get("matricula_2024", pd.Series(0)).fillna(0)
+    mat_2024 = base.get("matricula_2024", pd.Series(0, index=base.index)).fillna(0)
     base["tiene_matricula_2024"] = (mat_2024 > 0).astype(bool)
 
     base = base.drop(columns=["_codigo_norm"], errors="ignore")
 
+    # Validación post-merge: matrículas anuales y semestrales
+    n_total = len(base)
+    log_info("[Fase 3] === VALIDACIÓN DE MATRÍCULAS ===")
+    for year in range(2019, 2025):
+        col = f"matricula_{year}"
+        if col in base.columns:
+            nonzero = int((base[col].fillna(0) > 0).sum())
+            pct = (nonzero / n_total * 100) if n_total else 0
+            flag = "✓" if pct > 5 else "⚠ ALERTA"
+            log_info(
+                f"[Fase 3] {flag} {col}: {nonzero:,} programas con matrícula > 0 ({pct:.1f}%)"
+            )
+        col_s1 = f"matricula_{year}_1"
+        col_s2 = f"matricula_{year}_2"
+        if col_s1 in base.columns and col_s2 in base.columns:
+            nz1 = int((base[col_s1].fillna(0) > 0).sum())
+            nz2 = int((base[col_s2].fillna(0) > 0).sum())
+            log_info(f"[Fase 3]   sem1={nz1:,}  sem2={nz2:,}")
+
+    # Alerta: si la mayoría de programas tiene matrícula en 0 (falla masiva)
+    for col in ["matricula_2022", "matricula_2023", "matricula_2024"]:
+        if col not in base.columns or n_total == 0:
+            continue
+        con_dato = (base[col].fillna(0) > 0).sum()
+        pct = con_dato / n_total
+        if pct < 0.05:
+            log_warning(
+                f"[Fase 3] ALERTA: Falla masiva de datos en {col} "
+                f"({pct * 100:.1f}% programas con valor > 0). Coloca los archivos en ref/backup/matriculas/."
+            )
+
     # 3.5 Guardar sábana y log
     sabana_path = CHECKPOINT_BASE_MAESTRA.parent / "sabana_consolidada.parquet"
+    SCHEMA_VERSION = "v3"
+    base["schema_version"] = SCHEMA_VERSION
     base.to_parquet(sabana_path, index=False)
     n = len(base)
     pct_mat24 = (base["tiene_matricula_2024"].sum() / n * 100) if n else 0
@@ -683,6 +833,13 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
     if "CATEGORIA_FINAL" not in df.columns:
         raise ValueError("La sábana no tiene columna CATEGORIA_FINAL.")
 
+    dup_cols = [c for c in df.columns if str(c).endswith("_x") or str(c).endswith("_y")]
+    if dup_cols:
+        raise ValueError(
+            f"La sábana tiene columnas duplicadas (_x/_y) como {dup_cols[:5]}. "
+            "Elimine el archivo 'outputs/temp/sabana_consolidada.parquet' y vuelva a ejecutar la Fase 3 para limpiar los datos."
+        )
+
     years = list(range(2019, 2025))
     grouped = df.groupby("CATEGORIA_FINAL", as_index=True)
 
@@ -695,6 +852,11 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         if c in df.columns:
             simple_agg[f"suma_matricula_{y}"] = pd.NamedAgg(column=c, aggfunc="sum")
             simple_agg[f"prom_matricula_{y}"] = pd.NamedAgg(column=c, aggfunc="mean")
+    for y in years:
+        for s in (1, 2):
+            c_sem = f"matricula_{y}_{s}"
+            if c_sem in df.columns:
+                simple_agg[f"suma_matricula_{y}_{s}"] = pd.NamedAgg(column=c_sem, aggfunc="sum")
     for y in [2023, 2024]:
         c = f"inscritos_{y}"
         if c in df.columns:
@@ -763,12 +925,17 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
     # Bloque B: pct_no_matriculados y var_inscritos
     if "inscritos_2023_suma" in ag.columns and "suma_matricula_2023" in ag.columns:
         den = ag["inscritos_2023_suma"].replace(0, np.nan)
-        ag["pct_no_matriculados_2023"] = (ag["inscritos_2023_suma"] - ag["suma_matricula_2023"]) / den
+        pct_raw = (ag["inscritos_2023_suma"] - ag["suma_matricula_2023"]) / den
+        # Clip a [0, 1]: cuando inscritos < matrícula (datos de distinta escala),
+        # el valor negativo es un artefacto — se trata como "todos matriculados" (pct=0).
+        # Cuando inscritos = 0 (sin datos), se deja NaN para que scoring use fill neutral.
+        ag["pct_no_matriculados_2023"] = pct_raw.clip(lower=0, upper=1)
     else:
         ag["pct_no_matriculados_2023"] = np.nan
     if "inscritos_2024_suma" in ag.columns and "suma_matricula_2024" in ag.columns:
         den4 = ag["inscritos_2024_suma"].replace(0, np.nan)
-        ag["pct_no_matriculados_2024"] = (ag["inscritos_2024_suma"] - ag["suma_matricula_2024"]) / den4
+        pct_raw = (ag["inscritos_2024_suma"] - ag["suma_matricula_2024"]) / den4
+        ag["pct_no_matriculados_2024"] = pct_raw.clip(lower=0, upper=1)
     else:
         ag["pct_no_matriculados_2024"] = np.nan
     if "inscritos_2023_suma" in ag.columns and "inscritos_2024_suma" in ag.columns:
@@ -830,6 +997,19 @@ def run_fase4() -> pd.DataFrame | None:
         log_error("No existe sábana consolidada. Ejecutar Fase 3 antes.")
         return None
     df = pd.read_parquet(sabana_path)
+    SCHEMA_VERSION = "v3"
+    if "schema_version" in df.columns:
+        sv = str(df["schema_version"].iloc[0]) if len(df) else ""
+        if sv and sv != SCHEMA_VERSION:
+            log_warning(
+                f"[Fase 4] ALERTA: sabana_consolidada.parquet tiene schema_version='{sv}' "
+                f"pero se esperaba '{SCHEMA_VERSION}'. Elimine 'sabana_consolidada.parquet' y re-ejecute Fase 3."
+            )
+    else:
+        log_warning(
+            f"[Fase 4] ALERTA: sabana_consolidada.parquet no tiene schema_version. "
+            "Si ve columnas mezcladas, elimine el parquet y re-ejecute Fase 3."
+        )
     if "CATEGORIA_FINAL" not in df.columns:
         log_error("Sábana sin columna CATEGORIA_FINAL.")
         return None
@@ -851,6 +1031,14 @@ def run_fase4() -> pd.DataFrame | None:
 
 # Bloques para hoja "total" (encabezado fila 1)
 _BLOQUES_TOTAL = [
+    ("MATRÍCULAS SEMESTRAL", [
+        "suma_matricula_2019_1", "suma_matricula_2019_2",
+        "suma_matricula_2020_1", "suma_matricula_2020_2",
+        "suma_matricula_2021_1", "suma_matricula_2021_2",
+        "suma_matricula_2022_1", "suma_matricula_2022_2",
+        "suma_matricula_2023_1", "suma_matricula_2023_2",
+        "suma_matricula_2024_1", "suma_matricula_2024_2",
+    ]),
     ("MATRÍCULAS", [
         "suma_matricula_2019", "suma_matricula_2020", "suma_matricula_2021", "suma_matricula_2022", "suma_matricula_2023", "suma_matricula_2024",
         "prom_matricula_2019", "prom_matricula_2020", "prom_matricula_2021", "prom_matricula_2022", "prom_matricula_2023", "prom_matricula_2024",
@@ -907,23 +1095,40 @@ def run_fase5(agregado_df: pd.DataFrame | None) -> None:
 
     while True:
         try:
+            # Merge incremental: mantiene histórico, respeta manuales y guarda snapshot antes de modificar
+            try:
+                from etl.merge_incremental import ESTUDIO_PATH, merge_incremental
+
+                merged = merge_incremental(nuevo=sabana, nuevo_total=agregado_df)
+                sabana_final = merged.get("programas_detalle") if isinstance(merged, dict) else sabana
+                total_final = merged.get("total") if isinstance(merged, dict) else agregado_df
+                if sabana_final is None or len(sabana_final) == 0:
+                    sabana_final = sabana
+                if total_final is None or len(total_final) == 0:
+                    total_final = agregado_df
+                out_path = ESTUDIO_PATH
+            except Exception as e:
+                log_warning(f"[Fase 5] Merge incremental falló ({e}). Exportando modo clásico (sobrescritura).")
+                sabana_final = sabana
+                total_final = agregado_df
+
             with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-                sabana.to_excel(writer, sheet_name="programas_detalle", index=False)
-                col_order = _escribir_hoja_total(writer, agregado_df)
+                sabana_final.to_excel(writer, sheet_name="programas_detalle", index=False)
+                col_order = _escribir_hoja_total(writer, total_final)
                 wb = writer.book
                 ws_detalle = wb["programas_detalle"]
                 ws_detalle.freeze_panes = "A2"
                 ws_detalle.auto_filter.ref = ws_detalle.dimensions
                 from openpyxl.utils import get_column_letter
                 for col_name, width in COL_ANCHOS_PROGRAMAS.items():
-                    if col_name in sabana.columns:
-                        idx = list(sabana.columns).index(col_name) + 1
+                    if col_name in sabana_final.columns:
+                        idx = list(sabana_final.columns).index(col_name) + 1
                         ws_detalle.column_dimensions[get_column_letter(idx)].width = width
                 _aplicar_formato_total(wb["total"], col_order)
 
                 # Hoja informativa: programas con baja confianza del ML (REQUIERE_REVISION == True)
-                if "REQUIERE_REVISION" in sabana.columns:
-                    df_revision = sabana[sabana["REQUIERE_REVISION"] == True].copy()  # noqa: E712
+                if "REQUIERE_REVISION" in sabana_final.columns:
+                    df_revision = sabana_final[sabana_final["REQUIERE_REVISION"] == True].copy()  # noqa: E712
                 else:
                     df_revision = pd.DataFrame()
 

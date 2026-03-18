@@ -1,21 +1,19 @@
 """
-Scraper de matrículas e inscritos históricos SNIES (Fase 2 pipeline mercado).
+Scraper de matrículas SNIES (Fase 2 pipeline mercado).
 
-Reemplaza scraping web por consumo directo de API REST oficial del MEN.
+Lectura local desde ref/backup/matriculas/. El usuario descarga manualmente
+los Excels de matriculados y los coloca en esa carpeta. Inscritos no se procesan
+desde Excel; la Fase 3 imputa desde el referente (INSCRITOS_2023, INSCRITOS_2024).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+import unicodedata
 
 import pandas as pd
-import requests
-from io import BytesIO
-import unicodedata
-import re
-from urllib.parse import urljoin
 
-from etl.config import RAW_HISTORIC_DIR
+from etl.config import RAW_HISTORIC_DIR, REF_DIR
 from etl.pipeline_logger import log_info, log_warning
 
 
@@ -29,35 +27,19 @@ def _empty_inscritos() -> pd.DataFrame:
 
 class SNIESMatriculasScraper:
     """
-    Descarga matrículas e inscritos desde API REST de Bases Consolidadas del MEN.
-
-    Endpoints:
-      - Lista:     POST https://snies.mineducacion.gov.co/api/BasesConsolidadas/ListaArchivos con json={}
-      - Descarga:  POST https://snies.mineducacion.gov.co/api/BasesConsolidadas/DescargarArchivo con json={"idDirectorio": "<id>"}
-
-    Nota: Los archivos descargados son Excel anuales. Este scraper:
-      - Descarga el Excel anual 1 sola vez por tipo (matriculados / inscritos) y año
-      - Divide por SEMESTRE en memoria
-      - Guarda inmediatamente matriculados_{year}_1.csv y matriculados_{year}_2.csv (o inscritos_*)
+    Lee Excels de matrículas desde ref/backup/matriculas/ (descarga manual del usuario).
+    Detecta dinámicamente la fila de encabezados (palabra 'snies' en las primeras 20 filas),
+    divide por semestre y guarda CSVs en raw (outputs/historico/raw/).
+    Inscritos no se leen desde Excel; download_inscritos retorna DataFrame vacío.
     """
-
-    LISTA_URL = "https://snies.mineducacion.gov.co/api/BasesConsolidadas/ListaArchivos"
-    DESCARGA_URL = "https://snies.mineducacion.gov.co/api/BasesConsolidadas/DescargarArchivo"
-    PORTAL_LISTADO_URL = "https://snies.mineducacion.gov.co/portal/ESTADISTICAS/Bases-consolidadas/"
-    TIMEOUT_SEC = 180
 
     def __init__(self, raw_dir: Path | None = None) -> None:
         self.raw_dir = raw_dir or RAW_HISTORIC_DIR
         self.raw_dir.mkdir(parents=True, exist_ok=True)
+        self.manual_dir = REF_DIR / "backup" / "matriculas"
 
     @staticmethod
     def _norm_col_name(name: str) -> str:
-        """
-        Normaliza nombres de columna para comparación:
-        - upper
-        - sin tildes/diacríticos
-        - colapsa espacios
-        """
         s = str(name).replace("\n", " ").replace("\r", " ").strip()
         s = unicodedata.normalize("NFKD", s)
         s = "".join(ch for ch in s if not unicodedata.combining(ch))
@@ -66,10 +48,6 @@ class SNIESMatriculasScraper:
 
     @classmethod
     def _normalize_cached_columns(cls, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Acepta variaciones de encabezados (ej. CODIGO vs CÓDIGO o caracteres dañados por encoding)
-        y fuerza el nombre estándar: CÓDIGO_SNIES_DEL_PROGRAMA.
-        """
         if df is None or len(df.columns) == 0:
             return df
         rename_map = {}
@@ -87,80 +65,94 @@ class SNIESMatriculasScraper:
         try:
             df = pd.read_csv(path, dtype={"CÓDIGO_SNIES_DEL_PROGRAMA": str}, encoding="utf-8-sig")
             df = self._normalize_cached_columns(df)
-            # required_cols puede incluir CÓDIGO_SNIES_DEL_PROGRAMA; tolerar que venga como CODIGO... y ya haya sido normalizado.
             if required_cols.issubset(set(df.columns)):
                 return df
         except Exception as e:
-            log_warning(f"[Fase 2] Error leyendo {path.name}: {e}. Se intentará reconstruir desde API.")
+            log_warning(f"[Fase 2] Error leyendo {path.name}: {e}.")
         return None
 
-    @staticmethod
-    def _find_first_id(obj) -> str | None:
-        """
-        Busca recursivamente un identificador en JSON inestable.
-        Prueba llaves comunes: idDirectorio, idArchivo, id, Id.
-        """
-        if isinstance(obj, dict):
-            for k in ("idDirectorio", "idArchivo", "id", "Id"):
-                v = obj.get(k)
-                if v is not None and str(v).strip():
-                    return str(v).strip()
-            for v in obj.values():
-                found = SNIESMatriculasScraper._find_first_id(v)
-                if found:
-                    return found
-        elif isinstance(obj, list):
-            for it in obj:
-                found = SNIESMatriculasScraper._find_first_id(it)
-                if found:
-                    return found
-        return None
-
-    @staticmethod
-    def _find_best_match_in_listing(listing_json, year: int, name_contains: list[str]) -> str | None:
-        """
-        Recorre el JSON de ListaArchivos buscando items cuyo nombre contenga alguno de name_contains y el año.
-        Devuelve el id encontrado (idDirectorio/idArchivo/id/Id).
-        """
+    def _find_manual_excel_for_year(self, year: int) -> Path | None:
+        """Busca en self.manual_dir un archivo cuyo nombre contenga el año (ej. 2019)."""
+        if not self.manual_dir.exists():
+            return None
         year_str = str(year)
-
-        def _iter_items(o):
-            if isinstance(o, dict):
-                yield o
-                for v in o.values():
-                    yield from _iter_items(v)
-            elif isinstance(o, list):
-                for it in o:
-                    yield from _iter_items(it)
-
-        for item in _iter_items(listing_json):
-            if not isinstance(item, dict):
-                continue
-            # Nombre puede venir con varias llaves
-            name = None
-            for nk in ("nombre", "Nombre", "name", "Name", "archivo", "Archivo", "nombreArchivo", "NombreArchivo"):
-                if nk in item and item[nk] is not None:
-                    name = str(item[nk])
-                    break
-            if not name:
-                continue
-            name_norm = name.strip().lower()
-            if year_str not in name_norm:
-                continue
-            if not any(tok.lower() in name_norm for tok in name_contains):
-                continue
-            return SNIESMatriculasScraper._find_first_id(item)
-
+        for ext in ("*.xlsx", "*.xls"):
+            for f in self.manual_dir.glob(ext):
+                if year_str in f.name:
+                    return f
         return None
+
+    def _read_excel_local_dynamic_header(self, filepath: Path) -> pd.DataFrame:
+        """
+        Lee Excel SNIES con detección robusta de hoja y fila de encabezado.
+
+        Estrategia hoja:
+          - Intenta primero la hoja '1.' (presente en 2023 y 2024)
+          - Si no existe, usa la última hoja (robustez para formatos futuros)
+          - Si falla todo, usa sheet[0]
+
+        Estrategia header:
+          - Busca una CELDA INDIVIDUAL cuyo valor normalizado contenga
+            'snies' Y 'programa' y sea corto (< 80 chars), para evitar
+            falsos positivos en filas de notas/texto libre.
+        """
+        xl = pd.ExcelFile(filepath)
+        sheet_names = xl.sheet_names
+
+        candidates = []
+        if "1." in sheet_names:
+            candidates.append("1.")
+        for s in reversed(sheet_names):
+            if s not in candidates:
+                candidates.append(s)
+
+        last_error = None
+        for sheet in candidates:
+            try:
+                df = pd.read_excel(filepath, sheet_name=sheet, header=None)
+            except Exception as e:
+                last_error = e
+                continue
+
+            if df is None or len(df) < 5:
+                continue
+
+            header_idx = None
+            for idx in range(min(25, len(df))):
+                row = df.iloc[idx]
+                for cell_val in row:
+                    if pd.isna(cell_val):
+                        continue
+                    cell_str = (
+                        str(cell_val)
+                        .replace("\n", " ")
+                        .strip()
+                        .lower()
+                    )
+                    if "snies" in cell_str and "program" in cell_str and len(cell_str) < 80:
+                        header_idx = idx
+                        break
+                if header_idx is not None:
+                    break
+
+            if header_idx is None:
+                continue
+
+            df.columns = df.iloc[header_idx]
+            df = df.iloc[header_idx + 1 :].reset_index(drop=True)
+            log_info(
+                f"[Fase 2] {filepath.name}: hoja='{sheet}', "
+                f"header en fila {header_idx}, {len(df):,} filas de datos"
+            )
+            return df
+
+        raise ValueError(
+            f"No se encontró hoja con datos SNIES en {filepath.name}. "
+            f"Hojas disponibles: {sheet_names}. Último error: {last_error}"
+        )
 
     @staticmethod
     def _normalize_cols(df: pd.DataFrame) -> tuple[pd.DataFrame, str, str]:
-        """
-        Encuentra columnas de SNIES y SEMESTRE de forma flexible y renombra:
-          - CÓDIGO_SNIES_DEL_PROGRAMA
-          - SEMESTRE
-        Retorna (df, col_snies, col_semestre)
-        """
         cols = [str(c) for c in df.columns]
         cols_norm = {c: str(c).strip().replace("\n", " ").replace("\r", " ").lower() for c in cols}
 
@@ -180,109 +172,34 @@ class SNIESMatriculasScraper:
                 col_sem = c
                 break
 
-        if not col_snies or not col_sem:
-            raise ValueError(f"No se pudieron detectar columnas SNIES/SEMESTRE. Columnas: {list(df.columns)[:15]}")
+        if not col_snies:
+            raise ValueError(f"No se pudo detectar columna SNIES. Columnas: {list(df.columns)[:15]}")
+
+        if not col_sem:
+            df["SEMESTRE"] = 1
+            col_sem = "SEMESTRE"
 
         df = df.rename(columns={col_snies: "CÓDIGO_SNIES_DEL_PROGRAMA", col_sem: "SEMESTRE"})
-        df["CÓDIGO_SNIES_DEL_PROGRAMA"] = df["CÓDIGO_SNIES_DEL_PROGRAMA"].astype(str).str.strip()
+        df["CÓDIGO_SNIES_DEL_PROGRAMA"] = (
+            df["CÓDIGO_SNIES_DEL_PROGRAMA"]
+            .astype(str)
+            .str.replace(r"\.0$", "", regex=True)
+            .str.strip()
+        )
         df["SEMESTRE"] = pd.to_numeric(df["SEMESTRE"], errors="coerce").astype("Int64")
+
+        for c in list(df.columns):
+            cn = str(c).strip().replace("\n", " ").replace("\r", " ").lower()
+            if "matriculad" in cn:
+                df = df.rename(columns={c: "MATRICULADOS"})
+                break
+        for c in list(df.columns):
+            cn = str(c).strip().replace("\n", " ").replace("\r", " ").lower()
+            if "inscrit" in cn:
+                df = df.rename(columns={c: "INSCRITOS"})
+                break
+
         return df, "CÓDIGO_SNIES_DEL_PROGRAMA", "SEMESTRE"
-
-    def _descargar_excel_anual(self, year: int, name_contains: list[str]) -> pd.DataFrame:
-        """
-        Descarga el Excel anual desde:
-          1) API REST (si está disponible)
-          2) Fallback: portal público Bases-consolidadas (GET HTML + regex de enlaces)
-        """
-        content: BytesIO | None = None
-
-        # 1) Intento por API REST (puede responder 404 en algunos entornos)
-        try:
-            listing = requests.post(self.LISTA_URL, json={}, timeout=self.TIMEOUT_SEC)
-            listing.raise_for_status()
-            listing_json = listing.json()
-
-            file_id = self._find_best_match_in_listing(listing_json, year=year, name_contains=name_contains)
-            if file_id:
-                resp = requests.post(self.DESCARGA_URL, json={"idDirectorio": file_id}, timeout=self.TIMEOUT_SEC)
-                resp.raise_for_status()
-                content = BytesIO(resp.content)
-        except Exception as e:
-            # No abortar: si la API está caída/404, intentar portal HTML.
-            log_warning(f"[Fase 2] API BasesConsolidadas no disponible para {year} ({name_contains}): {e}. Usando portal HTML.")
-            content = None
-
-        # 2) Fallback: portal HTML con enlaces a articles-*_recurso.xlsx
-        if content is None:
-            url_xlsx = self._find_xlsx_url_from_portal(year=year, name_contains=name_contains)
-            if not url_xlsx:
-                raise RuntimeError(f"No se encontró enlace XLSX en portal para año {year} con tokens {name_contains}.")
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-                "Referer": self.PORTAL_LISTADO_URL,
-            }
-            r = requests.get(url_xlsx, headers=headers, timeout=self.TIMEOUT_SEC)
-            r.raise_for_status()
-            content = BytesIO(r.content)
-
-        # Lectura Excel con skiprows=5 y fallback de hoja
-        try:
-            df = pd.read_excel(content, skiprows=5, sheet_name="1.")
-        except Exception:
-            content.seek(0)
-            df = pd.read_excel(content, skiprows=5, sheet_name=0)
-        if df is None or len(df) == 0:
-            raise RuntimeError(f"Excel anual {year} descargado pero sin datos.")
-        return df
-
-    def _find_xlsx_url_from_portal(self, year: int, name_contains: list[str]) -> str | None:
-        """
-        Extrae del portal público el enlace al archivo Excel anual correspondiente.
-
-        Restricciones:
-        - Sin Selenium
-        - Sin BeautifulSoup
-        - Solo requests + regex sobre HTML
-
-        El portal expone enlaces relativos tipo "articles-401908_recurso.xlsx".
-        """
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        }
-        r = requests.get(self.PORTAL_LISTADO_URL, headers=headers, timeout=self.TIMEOUT_SEC)
-        r.raise_for_status()
-        html = r.text
-
-        year_str = str(year)
-        tokens = [t.lower().strip() for t in name_contains if str(t).strip()]
-
-        # Capturar href + texto visible del link
-        # Ejemplo: <a href="articles-401908_recurso.xlsx" ...>Estudiantes matriculados 2019</a>
-        pat = re.compile(r'<a[^>]+href="(?P<href>[^"]+_recurso\.(?:xlsx|xlsb))"[^>]*>(?P<text>.*?)</a>', re.IGNORECASE | re.DOTALL)
-
-        candidates: list[tuple[str, str]] = []
-        for m in pat.finditer(html):
-            href = (m.group("href") or "").strip()
-            text = (m.group("text") or "").strip()
-            # limpiar texto de tags internos si los hubiera
-            text_clean = re.sub(r"<[^>]+>", " ", text)
-            text_norm = " ".join(text_clean.split()).lower()
-            if year_str not in text_norm:
-                continue
-            if tokens and not any(tok in text_norm for tok in tokens):
-                continue
-            candidates.append((href, text_norm))
-
-        if not candidates:
-            return None
-
-        # Priorizar por tokens en texto (más coincidencias)
-        def _score(t: str) -> int:
-            return sum(1 for tok in tokens if tok in t) + (1 if year_str in t else 0)
-
-        candidates.sort(key=lambda x: _score(x[1]), reverse=True)
-        best_href = candidates[0][0]
-        return urljoin(self.PORTAL_LISTADO_URL, best_href)
 
     def _split_y_cache_por_semestre(
         self,
@@ -291,13 +208,8 @@ class SNIESMatriculasScraper:
         prefix: str,
         value_col_candidates: list[str],
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Normaliza columnas, encuentra la columna de valor (MATRICULADOS/INSCRITOS) y guarda semestre 1 y 2.
-        Retorna (df_sem1, df_sem2) con columnas [CÓDIGO_SNIES_DEL_PROGRAMA, VALUE, SEMESTRE]
-        """
         df, _, _ = self._normalize_cols(df)
 
-        # Encontrar columna de valor por contains (ej. 'MATRICULADOS', 'INSCRITOS', etc.)
         value_col = None
         cols_norm = {c: str(c).strip().replace("\n", " ").replace("\r", " ").lower() for c in df.columns}
         for cand in value_col_candidates:
@@ -309,7 +221,6 @@ class SNIESMatriculasScraper:
             if value_col:
                 break
         if not value_col:
-            # Fallback: tomar primera columna numérica distinta a SEMESTRE
             numeric_cols = [c for c in df.columns if c not in ("CÓDIGO_SNIES_DEL_PROGRAMA", "SEMESTRE")]
             for c in numeric_cols:
                 try:
@@ -339,27 +250,47 @@ class SNIESMatriculasScraper:
 
     def download_matriculados(self, year: int, semestre: int) -> pd.DataFrame:
         """
-        Obtiene matrículas para el año y semestre dados.
-        Si el archivo ya existe en disco, lo carga sin descargar.
-        Si la descarga falla, registra warning y retorna DataFrame vacío con columnas esperadas.
+        Lee matrículas desde ref/backup/matriculas/ (archivo cuyo nombre contenga el año).
+        Si ya existen los CSVs en raw, los carga desde disco.
+        Lectura dinámica: header=None y búsqueda de fila con 'snies' en las primeras 20 filas.
         """
         archivo = self.raw_dir / f"matriculados_{year}_{semestre}.csv"
         cached = self._load_cached(archivo, {"CÓDIGO_SNIES_DEL_PROGRAMA", "MATRICULADOS"})
         if cached is not None:
-            log_info(f"[Fase 2] Matriculados {year}-{semestre}: cargado desde disco ({len(cached):,} filas)")
-            return cached
+            # Si el Excel fuente es más nuevo, invalidar caché y reconstruir ambos semestres
+            try:
+                filepath = self._find_manual_excel_for_year(year)
+                if filepath is not None:
+                    csv_mtime = archivo.stat().st_mtime
+                    xlsx_mtime = filepath.stat().st_mtime
+                    if xlsx_mtime > csv_mtime:
+                        log_info(
+                            f"[Fase 2] Excel {filepath.name} fue modificado después del CSV en caché. "
+                            f"Reconstruyendo CSVs para {year}..."
+                        )
+                        for sem in (1, 2):
+                            old = self.raw_dir / f"matriculados_{year}_{sem}.csv"
+                            if old.exists():
+                                old.unlink()
+                        cached = None
+            except Exception:
+                pass
+            if cached is not None:
+                log_info(f"[Fase 2] Matriculados {year}-{semestre}: cargado desde disco ({len(cached):,} filas)")
+                return cached
 
-        # Si el año ya fue descargado previamente para ambos semestres, usar el otro CSV como fuente
-        other_path = self.raw_dir / f"matriculados_{year}_{1 if semestre == 2 else 2}.csv"
-        other = self._load_cached(other_path, {"CÓDIGO_SNIES_DEL_PROGRAMA", "MATRICULADOS"})
-        if other is not None and "SEMESTRE" in other.columns:
-            # Si ya existe el otro semestre, es probable que ya se haya guardado el Excel anual.
-            # En ese caso intentar cargar directamente el solicitado si aparece luego (evita descargar de nuevo).
-            pass
+        filepath = self._find_manual_excel_for_year(year)
+        if filepath is None:
+            log_warning(
+                f"[Fase 2] Matriculados {year}: no hay archivo en {self.manual_dir} con el año en el nombre. "
+                "Coloque el Excel de matriculados (ej. matriculados_2019.xlsx) en ref/backup/matriculas/."
+            )
+            return _empty_matriculados()
 
         try:
-            # Descargar Excel anual y dividir por semestre; cachear ambos CSVs.
-            df_raw = self._descargar_excel_anual(year, name_contains=["matriculados"])
+            df_raw = self._read_excel_local_dynamic_header(filepath)
+            if df_raw is None or len(df_raw) == 0:
+                return _empty_matriculados()
             df_1, df_2 = self._split_y_cache_por_semestre(
                 df_raw,
                 year=year,
@@ -373,26 +304,7 @@ class SNIESMatriculasScraper:
 
     def download_inscritos(self, year: int, semestre: int) -> pd.DataFrame:
         """
-        Obtiene inscritos para el año y semestre dados.
-        Si el archivo ya existe en disco, lo carga sin descargar.
-        Si la descarga falla, registra warning y retorna DataFrame vacío con columnas esperadas.
+        No se procesan inscritos desde Excels. Retorna DataFrame vacío con columnas esperadas.
+        La Fase 3 imputa inscritos_2023 e inscritos_2024 desde el referente (INSCRITOS_2023, INSCRITOS_2024).
         """
-        archivo = self.raw_dir / f"inscritos_{year}_{semestre}.csv"
-        cached = self._load_cached(archivo, {"CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS"})
-        if cached is not None:
-            log_info(f"[Fase 2] Inscritos {year}-{semestre}: cargado desde disco ({len(cached):,} filas)")
-            return cached
-
-        try:
-            # En ListaArchivos la etiqueta suele ser "Primeros Inscritos" (con variaciones).
-            df_raw = self._descargar_excel_anual(year, name_contains=["primeros inscritos", "inscritos"])
-            df_1, df_2 = self._split_y_cache_por_semestre(
-                df_raw,
-                year=year,
-                prefix="inscritos",
-                value_col_candidates=["INSCRITOS", "PRIMEROS INSCRITOS", "PRIMEROS_INSCRITOS"],
-            )
-            return df_1 if int(semestre) == 1 else df_2
-        except Exception as e:
-            log_warning(f"[Fase 2] Inscritos {year}-{semestre}: {e}. Continuando con vacío.")
-            return _empty_inscritos()
+        return _empty_inscritos()
