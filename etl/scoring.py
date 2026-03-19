@@ -31,7 +31,7 @@ SCORING_CONFIG = [
         "inverse": False,
     },
     {
-        "col": "AAGR_suma",
+        "col": "AAGR_ROBUSTO",
         "out": "score_AAGR",
         "peso": 0.20,
         "thresholds": [(0, 1), (0.04, 2), (0.19, 3), (0.30, 4)],

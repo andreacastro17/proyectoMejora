@@ -4748,9 +4748,10 @@ class EstudioMercadoResultsPage(ttk.Frame):
         self.root = parent.winfo_toplevel()
         from etl.config import ARCHIVO_ESTUDIO_MERCADO
         self.file_path = ARCHIVO_ESTUDIO_MERCADO
-        self.active_sheet = "programas_detalle"
+        self.active_sheet = "total"
         self.df_total = None
         self.df_detalle = None
+        self.df_eafit = None
         self._filtered_df = None
         self.page_size = 200
         self.page_index = 0
@@ -4764,7 +4765,7 @@ class EstudioMercadoResultsPage(ttk.Frame):
         # Inicializar lista de categorías (se rellena cuando se carga el Excel)
         self._lista_categorias: list[str] = []
         self._dropdown_vals: dict[str, list[str]] = {
-            "FUENTE_CATEGORIA": ["CRUCE_SNIES", "MATCH_NOMBRE", "KNN_TFIDF", "MANUAL", "PIPELINE"],
+            "FUENTE_CATEGORIA": ["CRUCE_SNIES", "MATCH_NOMBRE", "MATCH_CATEGORIA", "KNN_TFIDF", "MANUAL", "PIPELINE"],
             "REQUIERE_REVISION": ["True", "False"],
             "CATEGORIA_FINAL": [],
         }
@@ -4806,8 +4807,22 @@ class EstudioMercadoResultsPage(ttk.Frame):
         row2.pack(fill=tk.X, pady=(0, 8))
         self.btn_sheet_total = ttk.Button(row2, text="📋 Resumen (total)", command=lambda: self._switch_sheet("total"), style="Secondary.TButton")
         self.btn_sheet_total.pack(side=tk.LEFT, padx=(0, 6))
+        self.btn_sheet_datos = ttk.Button(
+            row2,
+            text="📊 Datos completos",
+            command=lambda: self._switch_sheet("total_tabla"),
+            style="Secondary.TButton",
+        )
+        self.btn_sheet_datos.pack(side=tk.LEFT, padx=(0, 6))
         self.btn_sheet_detalle = ttk.Button(row2, text="📄 Programas detalle", command=lambda: self._switch_sheet("programas_detalle"), style="Primary.TButton")
         self.btn_sheet_detalle.pack(side=tk.LEFT, padx=6)
+        self.btn_sheet_eafit = ttk.Button(
+            row2,
+            text="🎓 EAFIT vs Mercado",
+            command=lambda: self._switch_sheet("eafit"),
+            style="Secondary.TButton",
+        )
+        self.btn_sheet_eafit.pack(side=tk.LEFT, padx=(6, 0))
 
         # Fila 3: filtros
         row3 = ttk.Frame(main_frame, style="Card.TFrame")
@@ -4873,9 +4888,24 @@ class EstudioMercadoResultsPage(ttk.Frame):
             df_try = leer_excel_con_reintentos(self.file_path, sheet_name="total", header=0)
             if len(df_try.columns) > 0 and str(df_try.columns[0]).strip() == "CATEGORIA_FINAL":
                 self.df_total = df_try
+                # El Excel de 'total' tiene un sub-encabezado con CATEGORIA_FINAL = NaN.
+                # Filtramos esa fila para que no aparezca "nan" en la GUI.
+                if "CATEGORIA_FINAL" in self.df_total.columns:
+                    self.df_total = (
+                        self.df_total[self.df_total["CATEGORIA_FINAL"].notna()]
+                        .reset_index(drop=True)
+                    )
             else:
                 self.df_total = leer_excel_con_reintentos(self.file_path, sheet_name="total", header=1)
+                # Con header=1, la primera columna suele venir como "Unnamed: 0".
+                if "Unnamed: 0" in self.df_total.columns and "CATEGORIA_FINAL" not in self.df_total.columns:
+                    self.df_total = self.df_total.rename(columns={"Unnamed: 0": "CATEGORIA_FINAL"})
             self.df_detalle = leer_excel_con_reintentos(self.file_path, sheet_name="programas_detalle")
+            # Hoja opcional (Fase 6): si no existe, no bloquea la UI.
+            try:
+                self.df_eafit = leer_excel_con_reintentos(self.file_path, sheet_name="eafit_vs_mercado")
+            except Exception:
+                self.df_eafit = None
         except Exception as e:
             self._log(f"✗ Error al leer: {e}")
             return
@@ -4907,39 +4937,122 @@ class EstudioMercadoResultsPage(ttk.Frame):
     def _switch_sheet(self, sheet_name: str):
         self.active_sheet = sheet_name
         self.page_index = 0
+        # Reset estado de tabla (si existía)
+        self.table = None
+        self._filtered_df = None
+
+        # Estilos botones
+        if hasattr(self, "btn_sheet_total"):
+            self.btn_sheet_total.config(style="Secondary.TButton")
+        if hasattr(self, "btn_sheet_datos"):
+            self.btn_sheet_datos.config(style="Secondary.TButton")
+        if hasattr(self, "btn_sheet_detalle"):
+            self.btn_sheet_detalle.config(style="Secondary.TButton")
+        if hasattr(self, "btn_sheet_eafit"):
+            self.btn_sheet_eafit.config(style="Secondary.TButton")
+
+        # ── Hoja resumida (panel visual, no editable) ─────────────────────
         if sheet_name == "total":
+            self.btn_sheet_total.config(style="Primary.TButton")
+            self.readonly_banner.config(text="")
+            # Ocultar filtros
+            self.calif_label.pack_forget()
+            self.filter_calif.pack_forget()
+            self._build_resumen_panel()
+            return
+
+        # ── Hoja tabla (total editable) ───────────────────────────────────
+        if sheet_name == "total_tabla":
+            self.btn_sheet_datos.config(style="Primary.TButton")
+            self.readonly_banner.config(text="")
+            self.calif_label.pack(side=tk.LEFT, padx=(14, 6))
+            self.filter_calif.pack(side=tk.LEFT, padx=2)
+
             display_cols = [
                 "CATEGORIA_FINAL", "FUENTE_CATEGORIA", "calificacion_final",
                 "suma_matricula_2024", "AAGR_suma", "participacion_2024",
                 "salario_promedio", "pct_no_matriculados_2024",
                 "num_programas_2024", "costo_promedio",
             ]
+            df = self.df_total
             editable = self.editable_columns
+
+        # ── Hoja programas detalle (editable) ──────────────────────────────
+        elif sheet_name == "programas_detalle":
+            self.btn_sheet_detalle.config(style="Primary.TButton")
             self.readonly_banner.config(text="")
-            self.btn_sheet_total.config(style="Primary.TButton")
-            self.btn_sheet_detalle.config(style="Secondary.TButton")
-            self.calif_label.pack(side=tk.LEFT, padx=(14, 6))
-            self.filter_calif.pack(side=tk.LEFT, padx=2)
-        else:
+            self.calif_label.pack_forget()
+            self.filter_calif.pack_forget()
+
             display_cols = [
                 "CÓDIGO_SNIES_DEL_PROGRAMA", "NOMBRE_DEL_PROGRAMA", "NOMBRE_INSTITUCIÓN", "NIVEL_DE_FORMACIÓN",
                 "CATEGORIA_FINAL", "FUENTE_CATEGORIA", "REQUIERE_REVISION", "calificacion_final", "PROBABILIDAD",
                 "ESTADO_PROGRAMA", "ACTIVO_PIPELINE",
             ]
+            df = self.df_detalle
             editable = self.editable_columns
+
+        # ── Hoja EAFIT vs Mercado (opcional, solo lectura) ───────────────
+        elif sheet_name == "eafit":
+            self.btn_sheet_eafit.config(style="Primary.TButton")
             self.readonly_banner.config(text="")
-            self.btn_sheet_total.config(style="Secondary.TButton")
-            self.btn_sheet_detalle.config(style="Primary.TButton")
             self.calif_label.pack_forget()
             self.filter_calif.pack_forget()
 
+            if self.df_eafit is None:
+                for w in self.table_frame.winfo_children():
+                    w.destroy()
+                tk.Label(
+                    self.table_frame,
+                    text=(
+                        "⚠️ La hoja 'eafit_vs_mercado' no existe aún.\n\n"
+                        "Coloca 'programas_para_valorizacion.xlsx' en:\n"
+                        "ref/backup/\n\n"
+                        "y ejecuta el pipeline para generarla."
+                    ),
+                    font=("Segoe UI", 10),
+                    fg=EAFIT["text_muted"],
+                    bg=EAFIT["bg"],
+                    justify="center",
+                ).pack(expand=True)
+                return
+
+            display_cols = [
+                "PROGRAMA_EAFIT",
+                "NIVEL_FORMACION",
+                "TIENE_ESTUDIO_MERCADO",
+                "CATEGORIA_MERCADO",
+                "SEMAFORO_CALIDAD",
+                "OPORTUNIDAD",
+                "calificacion_final",
+                "AAGR_PCT",
+                "suma_matricula_2024",
+                "salario_promedio",
+                "num_programas_2024",
+                "costo_promedio",
+            ]
+            df = self.df_eafit
+            editable = set()
+
+        else:
+            # Fallback: mostrar detalle
+            self.btn_sheet_detalle.config(style="Primary.TButton")
+            display_cols = [
+                "CÓDIGO_SNIES_DEL_PROGRAMA", "NOMBRE_DEL_PROGRAMA", "NOMBRE_INSTITUCIÓN", "NIVEL_DE_FORMACIÓN",
+                "CATEGORIA_FINAL", "FUENTE_CATEGORIA", "REQUIERE_REVISION", "calificacion_final", "PROBABILIDAD",
+                "ESTADO_PROGRAMA", "ACTIVO_PIPELINE",
+            ]
+            df = self.df_detalle
+            editable = self.editable_columns
+
+        # ── Construcción de tabla (total_tabla, programas_detalle, eafit) ──
         for w in self.table_frame.winfo_children():
             w.destroy()
-        df = self.df_total if sheet_name == "total" else self.df_detalle
         if df is not None:
             display_cols = [c for c in display_cols if c in df.columns]
         if not display_cols:
             display_cols = list(df.columns)[:10] if df is not None and len(df.columns) else []
+
         self.table = EditableTable(
             self.table_frame,
             columns=display_cols,
@@ -4951,8 +5064,252 @@ class EstudioMercadoResultsPage(ttk.Frame):
         self.table.pack(fill=tk.BOTH, expand=True)
         self._apply_filter()
 
+    def _build_resumen_panel(self) -> None:
+        """Crea un panel visual con KPIs/rankings para la vista 'total'."""
+        import numpy as np
+
+        for w in self.table_frame.winfo_children():
+            w.destroy()
+
+        det = self.df_detalle
+        tot = self.df_total
+        if det is None or tot is None:
+            self._resumen_panel = None
+            ttk.Label(self.table_frame, text="Primero carga el archivo.", foreground=EAFIT["text_muted"]).pack(expand=True)
+            return
+
+        # Canvas + scrollbar para contenido desplazable
+        outer = ttk.Frame(self.table_frame)
+        outer.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(outer, bg=EAFIT["card_bg"], highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        inner = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_configure(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            # Mantener ancho del contenido dentro del canvas
+            try:
+                canvas.itemconfig(canvas_window, width=canvas.winfo_width())
+            except Exception:
+                pass
+
+        inner.bind("<Configure>", _on_configure)
+
+        def _on_mousewheel(e):
+            # Windows: e.delta suele ser múltiplo de 120
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+
+        def _safe_sum(df: pd.DataFrame, col: str) -> float:
+            if col not in df.columns:
+                return 0.0
+            return float(pd.to_numeric(df[col], errors="coerce").fillna(0).sum())
+
+        mat19 = _safe_sum(det, "matricula_2019")
+        mat24 = _safe_sum(det, "matricula_2024")
+        crecimiento = ((mat24 - mat19) / mat19) if mat19 else 0.0
+
+        total_programas = int(len(det))
+        total_categorias = int(len(tot))
+
+        # Activos / con matrícula 2024 (si existen columnas)
+        if "es_activo" in det.columns:
+            es_activo_sum = int(det["es_activo"].fillna(0).astype(bool).sum())
+        else:
+            es_activo_sum = 0
+        if "tiene_matricula_2024" in det.columns:
+            tiene_matricula_2024 = int(det["tiene_matricula_2024"].fillna(False).astype(bool).sum())
+        else:
+            tiene_matricula_2024 = int(pd.to_numeric(det.get("matricula_2024", 0), errors="coerce").fillna(0).gt(0).sum())
+
+        # tot["calificacion_final"] debe ser una Series; si la columna no existe,
+        # usamos una Series vacía para evitar errores tipo `len(float)`.
+        if "calificacion_final" in tot.columns:
+            calif = pd.to_numeric(tot["calificacion_final"], errors="coerce")
+        else:
+            calif = pd.Series([], dtype=float)
+        verdes = int((calif >= 4.0).sum()) if len(calif) else 0
+        amarillos = int(((calif >= 3.0) & (calif < 4.0)).sum()) if len(calif) else 0
+        rojos = int((calif < 3.0).sum()) if len(calif) else 0
+        calif_prom = float(calif.mean()) if len(calif) else 0.0
+
+        req_revision = int(det.get("REQUIERE_REVISION", pd.Series([], dtype=bool)).fillna(False).astype(bool).sum())
+
+        # Certeza por fuente (CRUCE_SNIES + MATCH_NOMBRE)
+        fuentes = det.get("FUENTE_CATEGORIA", pd.Series([], dtype=object)).astype(str).str.upper().str.strip()
+        cruce_snies = int(fuentes.eq("CRUCE_SNIES").sum())
+        match_nombre = int(fuentes.eq("MATCH_NOMBRE").sum())
+        certeza_100 = ((cruce_snies + match_nombre) / total_programas * 100.0) if total_programas else 0.0
+
+        # Top 5 rankings desde tot/ag
+        def _top_rows(col: str, n: int, ascending: bool = False):
+            if col not in tot.columns:
+                return []
+            df2 = tot.sort_values(col, ascending=ascending).head(n)
+            cat_col = tot.columns[0] if len(tot.columns) else "CATEGORIA_FINAL"
+            return [(str(r[cat_col]), r.get(col), r.get("calificacion_final", "")) for _, r in df2.iterrows()]
+
+        cat_col_name = tot.columns[0] if len(tot.columns) else "CATEGORIA_FINAL"
+
+        top_mat = []
+        if "suma_matricula_2024" in tot.columns:
+            tmp = tot.sort_values("suma_matricula_2024", ascending=False).head(5)
+            top_mat = [(str(r[cat_col_name]), r.get("suma_matricula_2024"), r.get("calificacion_final", "")) for _, r in tmp.iterrows()]
+
+        top_aagr = []
+        if "AAGR_suma" in tot.columns:
+            tmp = tot.sort_values("AAGR_suma", ascending=False).head(5)
+            top_aagr = [(str(r[cat_col_name]), r.get("AAGR_suma"), r.get("suma_matricula_2024", "")) for _, r in tmp.iterrows()]
+
+        top_salario = []
+        if "salario_promedio" in tot.columns:
+            tmp = tot.sort_values("salario_promedio", ascending=False).head(5)
+            top_salario = [(str(r[cat_col_name]), r.get("salario_promedio"), r.get("salario_proyectado_pesos_hoy", "")) for _, r in tmp.iterrows()]
+
+        worst_aagr = []
+        if "AAGR_suma" in tot.columns:
+            tmp = tot.sort_values("AAGR_suma", ascending=True).head(5)
+            worst_aagr = [(str(r[cat_col_name]), r.get("AAGR_suma"), r.get("suma_matricula_2024", "")) for _, r in tmp.iterrows()]
+
+        # Calidad por fuente
+        fuentes_counts = fuentes.value_counts()
+        total_fuentes = int(len(fuentes)) if len(fuentes) else 0
+        def _pct(count: int) -> str:
+            return f"{(count/total_fuentes*100.0):.1f}%" if total_fuentes else "0.0%"
+
+        quality_rows = [
+            ("CRUCE_SNIES", int(fuentes_counts.get("CRUCE_SNIES", 0)), _pct(int(fuentes_counts.get("CRUCE_SNIES", 0)))),
+            ("MATCH_NOMBRE", int(fuentes_counts.get("MATCH_NOMBRE", 0)), _pct(int(fuentes_counts.get("MATCH_NOMBRE", 0)))),
+            ("KNN_TFIDF", int(fuentes_counts.get("KNN_TFIDF", 0)), _pct(int(fuentes_counts.get("KNN_TFIDF", 0)))),
+            ("Requiere revisión", req_revision, _pct(req_revision)),
+        ]
+
+        # Secciones
+        header = ttk.Frame(inner, padding=(6, 10))
+        header.pack(fill=tk.X)
+        ttk.Label(
+            header,
+            text="ESTUDIO DE MERCADO — COLOMBIA",
+            font=("Segoe UI", 16, "bold"),
+            foreground=EAFIT["azul_zafre"],
+        ).pack(anchor="w")
+
+        subtitle = ttk.Label(header, text="KPIs globales y rankings (vista resumida)", foreground=EAFIT["text_muted"])
+        subtitle.pack(anchor="w", pady=(4, 0))
+
+        # Bloque KPIs (grid)
+        kpi_frame = ttk.Frame(inner, padding=(6, 8))
+        kpi_frame.pack(fill=tk.X)
+        kpis = [
+            ("Total programas analizados", total_programas),
+            ("Total categorías", total_categorias),
+            ("Matrícula total 2024", mat24),
+            ("Matrícula total 2019", mat19),
+            ("Crecimiento global 2019→2024", f"{crecimiento*100:.1f}%"),
+            ("Programas activos", es_activo_sum),
+            ("Programas con matrícula 2024", tiene_matricula_2024),
+            ("Calificación promedio", f"{calif_prom:.2f}"),
+        ]
+        for i, (lab, val) in enumerate(kpis):
+            r = i // 2
+            c = i % 2
+            card = ttk.Frame(kpi_frame, padding=10, style="Card.TFrame")
+            card.grid(row=r, column=c, padx=6, pady=6, sticky="nsew")
+            ttk.Label(card, text=lab, foreground=EAFIT["text_muted"]).pack(anchor="w")
+            ttk.Label(card, text=str(val), font=("Consolas", 12, "bold")).pack(anchor="w", pady=(6, 0))
+
+        # Semáforo de categorías por calidad
+        quality_frame = ttk.Frame(inner, padding=(6, 8))
+        quality_frame.pack(fill=tk.X)
+        ttk.Label(quality_frame, text="Semáforo de calidad (por calificación en total)", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 6))
+        sem = ttk.Frame(quality_frame)
+        sem.pack(fill=tk.X)
+
+        def _color_box(parent, title: str, count: int, color: str):
+            b = tk.Label(parent, text=f"{title}: {count}", bg=color, fg="#000000", font=("Consolas", 10, "bold"), padx=10, pady=8)
+            b.pack(side=tk.LEFT, padx=(0, 8))
+
+        _color_box(sem, "VERDE (>=4.0)", verdes, "#C6EFCE")
+        _color_box(sem, "AMARILLO (3.0-3.9)", amarillos, "#FFEB9C")
+        _color_box(sem, "ROJO (<3.0)", rojos, "#FFC7CE")
+
+        # Certeza y revisión
+        cer_frame = ttk.Frame(inner, padding=(6, 8))
+        cer_frame.pack(fill=tk.X)
+        ttk.Label(cer_frame, text="Certeza de clasificación y revisión manual", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 6))
+        cmsg = f"Certeza 100% (CRUCE_SNIES + MATCH_NOMBRE): {certeza_100:.1f}%"
+        ttk.Label(cer_frame, text=cmsg, font=("Consolas", 10, "bold")).pack(anchor="w")
+        ttk.Label(cer_frame, text=f"Requieren revisión manual: {req_revision:,}", foreground=EAFIT["text_muted"]).pack(anchor="w", pady=(6, 0))
+
+        # Rankings
+        def _section(title: str):
+            sec = ttk.Frame(inner, padding=(6, 10))
+            sec.pack(fill=tk.X, pady=(8, 0))
+            ttk.Label(sec, text=title, font=("Segoe UI", 12, "bold")).pack(anchor="w")
+            return sec
+
+        def _list_rows(parent, rows: list[tuple], headers: list[str]):
+            # Headers
+            head = ttk.Frame(parent)
+            head.pack(fill=tk.X, pady=(6, 0))
+            for i, h in enumerate(headers):
+                tk.Label(head, text=h, bg="#000066", fg="white", font=("Segoe UI", 9, "bold"), padx=6, pady=4).grid(
+                    row=0, column=i, sticky="nsew", padx=(0, 2)
+                )
+            # Rows
+            for r in rows:
+                rowf = ttk.Frame(parent, padding=(0, 4))
+                rowf.pack(fill=tk.X)
+                for i, v in enumerate(r):
+                    ttk.Label(rowf, text=str(v) if v is not None else "", font=("Consolas", 9)).grid(
+                        row=0, column=i, sticky="w", padx=(0, 10)
+                    )
+
+        sec1 = _section("Top 5 — Mayor matrícula 2024")
+        _list_rows(sec1, [(a, f"{b:,.0f}", f"{c}") for a, b, c in top_mat] if top_mat else [("-", "-", "-")], ["Categoría", "Matrícula 2024", "Calificación"])
+
+        sec2 = _section("Top 5 — Mayor crecimiento (AAGR)")
+        _list_rows(sec2, [(a, f"{b:.3f}", c) for a, b, c in top_aagr] if top_aagr else [("-", "-", "-")], ["Categoría", "AAGR", "Matrícula 2024"])
+
+        sec3 = _section("Top 5 — Mejor salario (SMLMV)")
+        if top_salario:
+            _list_rows(
+                sec3,
+                [(a, b, c) for a, b, c in top_salario],
+                ["Categoría", "Salario SMLMV", "Salario pesos hoy"],
+            )
+        else:
+            ttk.Label(sec3, text="Sin datos de salario.", foreground=EAFIT["text_muted"]).pack(anchor="w", pady=(6, 0))
+
+        sec4 = _section("Top 5 — Menor crecimiento (AAGR)")
+        _list_rows(sec4, [(a, f"{b:.3f}", c) for a, b, c in worst_aagr] if worst_aagr else [("-", "-", "-")], ["Categoría", "AAGR", "Matrícula 2024"])
+
+        # Calidad por fuente
+        sec5 = _section("Calidad de clasificación (por fuente)")
+        src_rows = []
+        for name, count, pct in quality_rows:
+            conf = "100% — cruce exacto" if name == "CRUCE_SNIES" else "100% — match exacto" if name == "MATCH_NOMBRE" else "Variable" if name == "KNN_TFIDF" else "—"
+            src_rows.append((name, count, pct, conf))
+        _list_rows(sec5, src_rows if src_rows else [("-", "-", "-", "-")], ["Fuente", "Programas", "% del total", "Confianza"])
+
     def _apply_filter(self):
-        df = self.df_total if self.active_sheet == "total" else self.df_detalle
+        # La vista 'total' es un panel (no usa tabla/paginación)
+        if self.active_sheet == "total":
+            self._filtered_df = None
+            return
+
+        if self.active_sheet == "total_tabla":
+            df = self.df_total
+        elif self.active_sheet == "eafit":
+            df = self.df_eafit
+        else:
+            df = self.df_detalle
         if df is None:
             self._filtered_df = None
             self._render_page()
@@ -4965,7 +5322,7 @@ class EstudioMercadoResultsPage(ttk.Frame):
             for col in df.select_dtypes(include=["object", "string"]).columns:
                 mask |= df[col].astype(str).str.lower().str.contains(search_lower, na=False)
             df = df.loc[mask]
-        if self.active_sheet == "total" and "calificacion_final" in df.columns:
+        if self.active_sheet == "total_tabla" and "calificacion_final" in df.columns:
             calif = self.filter_calif_var.get()
             if calif == "Verde (≥4)":
                 df = df[df["calificacion_final"].astype(float) >= 4.0]
@@ -5003,7 +5360,7 @@ class EstudioMercadoResultsPage(ttk.Frame):
         df_page = self._filtered_df.iloc[start:end].copy()
         if self.pending_updates:
             for i in range(len(df_page)):
-                if self.active_sheet == "total":
+                if self.active_sheet in ("total", "total_tabla"):
                     cat = df_page.iloc[i].get("CATEGORIA_FINAL")
                     key = str(cat).strip() if cat is not None else None
                 else:
@@ -5041,7 +5398,7 @@ class EstudioMercadoResultsPage(ttk.Frame):
                 return
 
         # Clave de identificación según hoja activa
-        if self.active_sheet == "total":
+        if self.active_sheet in ("total", "total_tabla"):
             categoria_final = row.get("CATEGORIA_FINAL")
             if categoria_final is None:
                 return
@@ -5114,7 +5471,7 @@ class EstudioMercadoResultsPage(ttk.Frame):
             ok_msgs.append("✓ Todos los programas tienen CATEGORIA_FINAL")
 
         # 2. FUENTE_CATEGORIA con valores inválidos
-        valores_validos_fuente = {"CRUCE_SNIES", "MATCH_NOMBRE", "KNN_TFIDF", "MANUAL", "PIPELINE"}
+        valores_validos_fuente = {"CRUCE_SNIES", "MATCH_NOMBRE", "MATCH_CATEGORIA", "KNN_TFIDF", "MANUAL", "PIPELINE"}
         if "FUENTE_CATEGORIA" in det.columns:
             invalidos = det[
                 ~det["FUENTE_CATEGORIA"].astype(str).isin(valores_validos_fuente | {"nan", ""})
@@ -5211,7 +5568,15 @@ class EstudioMercadoResultsPage(ttk.Frame):
     def _save(self):
         if not self.pending_updates:
             return
-        if self.active_sheet == "total":
+        if self.active_sheet == "eafit":
+            messagebox.showinfo(
+                "Solo lectura",
+                "La hoja 'EAFIT vs Mercado' es de solo lectura.\n\n"
+                "Para guardar cambios manuales, ve a 'Datos completos' o 'Programas detalle'.",
+                parent=self.root,
+            )
+            return
+        if self.active_sheet in ("total", "total_tabla"):
             keys_applied = (
                 set(self.df_total["CATEGORIA_FINAL"].astype(str).str.strip()) & set(self.pending_updates.keys())
                 if self.df_total is not None
@@ -5233,7 +5598,7 @@ class EstudioMercadoResultsPage(ttk.Frame):
         ):
             return
 
-        if self.active_sheet == "total":
+        if self.active_sheet in ("total", "total_tabla"):
             # CASO A — Guardado solo de la hoja total (sin recálculo)
             try:
                 with pd.ExcelWriter(self.file_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
@@ -5398,7 +5763,7 @@ class EstudioMercadoResultsPage(ttk.Frame):
                 # 7. Actualizar UI en el hilo principal
                 def _on_ok():
                     self.df_total = df_total_new
-                    if self.active_sheet == "total":
+                    if self.active_sheet in ("total", "total_tabla"):
                         self._apply_filter()
                     messagebox.showinfo(
                         "Guardado",
