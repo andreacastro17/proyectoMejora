@@ -292,6 +292,9 @@ ARCHIVO_CATALOGO_EAFIT = _resolve_referencia_path(REF_DIR, "catalogoOfertasEAFIT
 ARCHIVO_NORMALIZACION = DOCS_DIR / "normalizacionFinal.xlsx"
 ARCHIVO_REFERENTE_CATEGORIAS = _resolve_referencia_path(REF_DIR, "Referente_Categorias")
 
+# Fase 6 (opcional): archivo de programas EAFIT en proceso de valorización (EAFIT vs Mercado)
+PROGRAMAS_EAFIT: Path = REF_DIR / "backup" / "programas_para_valorizacion.xlsx"
+
 # ========= CONFIGURACIÓN DE DESCARGA SNIES =========
 SNIES_URL = "https://hecaa.mineducacion.gov.co/consultaspublicas/programas"
 DOWNLOAD_DIR = OUTPUTS_DIR  # Usar el mismo directorio de outputs

@@ -129,6 +129,42 @@ def _normalizar_nombre_programa(nombre: str) -> str:
     return n.upper()
 
 
+# Mapeo verificado: nombre exacto del programa EAFIT → CATEGORIA_FINAL del mercado
+# Programas sin entrada en el mapeo se reportan en log como warnings (Fase 6 no bloqueante).
+MAPEO_PROGRAMAS_EAFIT: dict[str, str] = {
+    "Especialización en Administración de Negocios": "ADMINISTRACION DE EMPRESAS",
+    "Especialización en Agricultura Inteligente": "CIENCIAS AGROPECUARIAS",
+    "Especialización en Agroquímica": "CIENCIAS AGROPECUARIAS",
+    "Especialización en Ciberseguridad": "SEGURIDAD INFORMATICA Y DIGITAL",
+    "Especialización en Ciencia de los Datos y Analítica": "ANALITICA DE DATOS",
+    "Especialización en Derecho Humanos": "DERECHOS HUMANOS",
+    "Especialización en Derecho y Sostenibilidad": "DERECHO AMBIENTAL",
+    "Especialización en Gerencia Integral para Agronegocios": "AGRONEGOCIOS",
+    "Especialización en Gerencia Social": "GERENCIA SOCIAL",
+    "Especialización en Gerencia Tecnológica": "GERENCIA DE TECNOLOGIA",
+    "Especialización en Gestión Tributaria Internacional": "GESTION TRIBUTARIA Y FISCAL",
+    "Especialización en Gestión del Riesgo de Desastres y Cambio Global": "GESTION DEL RIESGO DE EMERGENCIAS Y DESASTRES",
+    "Especialización en Ingeniería de Datos": "ANALITICA DE DATOS",
+    "Especialización en Inteligencia Artificial": "INTELIGENCIA ARTIFICIAL",
+    "Especialización en Marketing Digital": "MERCADEO DIGITAL",
+    "Especialización en Matematicas e Inteligencia Artificial": "INTELIGENCIA ARTIFICIAL",
+    "Especialización en Optimización": "MATEMATICAS",
+    "Especialización en Propiedad Intelectual": "PROPIEDAD INTELECTUAL",
+    "Especialización en Servicio y Experiencia": "DESARROLLO DE NEGOCIOS",
+    "Especialización en Ética Digital": "ETICA",
+    "Maestría en Biotecnología": "BIOTECNOLOGIA",
+    "Maestría en Dirección de Marketing Digital": "MERCADEO DIGITAL",
+    "Maestría en Energía Sostenible": "ENERGIA Y RECURSOS ENERGETICOS",
+    "Maestría en Futuros": "PROSPECTIVA",
+    "Maestría en Gestión del Riesgo de Desastres y Cambio Global": "GESTION DEL RIESGO DE EMERGENCIAS Y DESASTRES",
+    "Maestría en Inteligencia Artificial": "INTELIGENCIA ARTIFICIAL",
+    "Maestría en Liderazgo Educativo": "LIDERAZGO",
+    "Maestría en Marca y Publicidad": "MERCADEO Y PUBLICIDAD",
+    "Pregrado en Ingeniería en Energía": "ENERGIA Y RECURSOS ENERGETICOS",
+    "Pregrado en Inteligencia de Negocios": "INTELIGENCIA DE NEGOCIOS",
+}
+
+
 def run_fase1() -> pd.DataFrame:
     """
     Fase 1: Base maestra con categorías (ML).
@@ -267,6 +303,88 @@ def run_fase1() -> pd.DataFrame:
             df_base.loc[mask_match, "FUENTE_CATEGORIA"] = "MATCH_NOMBRE"
             df_base.loc[mask_match, "PROBABILIDAD"] = 1.0
             df_base.loc[mask_match, "REQUIERE_REVISION"] = False
+
+    # Alias explícitos para casos verificados donde el nombre base incluye sufijos
+    _ALIAS_CATEGORIA: dict[str, str] = {
+        "MEDICINA C": "MEDICINA",
+    }
+
+    # Capa 1.5 — Match directo nombre_base → categoría exacta del referente
+    # Cubre el caso: nombre del programa == nombre de categoría, pero el programa
+    # no está en el referente (ej. pregrados universitarios como "MEDICINA").
+    # La Capa 2 busca en *programas* del referente; esta capa busca en *categorías*.
+    _cats_validas = set(
+        df_referente["CATEGORIA_FINAL"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .unique()
+    )
+    mask_sin_cat_15 = df_base["FUENTE_CATEGORIA"].isna()
+    if mask_sin_cat_15.any():
+        if "_nombre_base" not in df_base.columns:
+            df_base["_nombre_base"] = df_base["NOMBRE_DEL_PROGRAMA"].apply(
+                _normalizar_nombre_programa
+            )
+        # Reutilizar _nombre_base; calcular solo para filas aún faltantes.
+        mask_sin_nombre_base = mask_sin_cat_15 & df_base["_nombre_base"].isna()
+        if mask_sin_nombre_base.any():
+            df_base.loc[mask_sin_nombre_base, "_nombre_base"] = (
+                df_base.loc[mask_sin_nombre_base, "NOMBRE_DEL_PROGRAMA"]
+                .apply(_normalizar_nombre_programa)
+            )
+
+        _nombre_base_15 = (
+            df_base.loc[mask_sin_cat_15, "_nombre_base"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+        _hit_15 = _nombre_base_15.isin(_cats_validas)
+        mask_match_15 = mask_sin_cat_15.copy()
+        mask_match_15.loc[mask_sin_cat_15] = _hit_15.values
+
+        if mask_match_15.any():
+            df_base.loc[mask_match_15, "CATEGORIA_FINAL"] = (
+                _nombre_base_15[_hit_15].values
+            )
+            df_base.loc[mask_match_15, "FUENTE_CATEGORIA"] = "MATCH_CATEGORIA"
+            df_base.loc[mask_match_15, "PROBABILIDAD"] = 1.0
+            df_base.loc[mask_match_15, "REQUIERE_REVISION"] = False
+            log_info(
+                f"Capa 1.5 — MATCH_CATEGORIA: {int(mask_match_15.sum())} programas "
+                f"clasificados por nombre exacto de categoría."
+            )
+
+    # Capa 1.5b — Alias explícitos para nombres con sufijos conocidos
+    mask_sin_cat_15b = df_base["FUENTE_CATEGORIA"].isna()
+    if mask_sin_cat_15b.any():
+        if "_nombre_base" not in df_base.columns:
+            df_base["_nombre_base"] = df_base["NOMBRE_DEL_PROGRAMA"].apply(
+                _normalizar_nombre_programa
+            )
+        _nb_15b = (
+            df_base.loc[mask_sin_cat_15b, "_nombre_base"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+        _hit_alias = _nb_15b.map(_ALIAS_CATEGORIA)
+        mask_alias = mask_sin_cat_15b.copy()
+        mask_alias.loc[mask_sin_cat_15b] = _hit_alias.notna().values
+
+        if mask_alias.any():
+            df_base.loc[mask_alias, "CATEGORIA_FINAL"] = _hit_alias[_hit_alias.notna()].values
+            df_base.loc[mask_alias, "FUENTE_CATEGORIA"] = "MATCH_CATEGORIA"
+            df_base.loc[mask_alias, "PROBABILIDAD"] = 1.0
+            df_base.loc[mask_alias, "REQUIERE_REVISION"] = False
+            log_info(
+                f"Capa 1.5b — alias: {int(mask_alias.sum())} programa(s) "
+                f"corregidos por alias explícito."
+            )
 
     # Capa 3 — KNN con TF-IDF de caracteres (robusta a prefijos/ortografía)
     mask_sin_cat_final = df_base["FUENTE_CATEGORIA"].isna()
@@ -969,6 +1087,43 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         mask_cagr = (suma_2019 > 0) & (suma_2024 > 0)
         ag.loc[mask_cagr, "CAGR_suma"] = (suma_2024[mask_cagr] / suma_2019[mask_cagr]) ** (1 / 5) - 1
 
+    # ── AAGR_ROBUSTO: métrica de crecimiento corregida por calidad de base histórica ──
+    UMBRAL_BASE = 100  # matriculados en 2019 necesarios para confiar en AAGR_suma
+    if "suma_matricula_2019" in ag.columns and "suma_matricula_2024" in ag.columns:
+        m19 = ag["suma_matricula_2019"].fillna(0)
+        m24 = ag["suma_matricula_2024"].fillna(0)
+
+        cond_normal = m19 >= UMBRAL_BASE
+        cond_pequena = (m19 > 0) & (m19 < UMBRAL_BASE)
+        cond_nueva = (m19 == 0) & (m24 > 0)
+        cond_extinta = (m24 == 0) & (m19 > 0)
+        cond_sin_act = (m19 == 0) & (m24 == 0)
+
+        tipo = pd.Series("NORMAL", index=ag.index, dtype="string")
+        tipo[cond_pequena] = "BASE_PEQUENA"
+        tipo[cond_nueva] = "CATEGORIA_NUEVA"
+        tipo[cond_extinta] = "EXTINTA"
+        tipo[cond_sin_act] = "SIN_ACTIVIDAD"
+        ag["TIPO_CRECIMIENTO"] = tipo
+
+        aagr_r = ag["AAGR_suma"].copy()
+        if "CAGR_suma" in ag.columns:
+            mask_cagr_ok = cond_pequena & ag["CAGR_suma"].notna()
+            aagr_r[mask_cagr_ok] = ag.loc[mask_cagr_ok, "CAGR_suma"]
+
+        aagr_r[cond_nueva] = np.nan
+        aagr_r[cond_extinta] = -1.0
+        aagr_r[cond_sin_act] = np.nan
+        ag["AAGR_ROBUSTO"] = aagr_r
+
+        log_info(
+            "AAGR_ROBUSTO calculado. Tipos: "
+            + ", ".join(f"{t}={int((tipo == t).sum())}" for t in tipo.dropna().unique())
+        )
+    else:
+        ag["AAGR_ROBUSTO"] = ag.get("AAGR_suma", pd.Series(np.nan, index=ag.index))
+        ag["TIPO_CRECIMIENTO"] = "SIN_DATOS"
+
     # Bloque B: pct_no_matriculados y var_inscritos
     if "inscritos_2023_suma" in ag.columns and "suma_matricula_2023" in ag.columns:
         den = ag["inscritos_2023_suma"].replace(0, np.nan)
@@ -1092,6 +1247,7 @@ _BLOQUES_TOTAL = [
         "var_suma_2020", "var_suma_2021", "var_suma_2022", "var_suma_2023", "var_suma_2024",
         "var_prom_2020", "var_prom_2021", "var_prom_2022", "var_prom_2023", "var_prom_2024",
         "participacion_2019", "participacion_2024", "AAGR_suma", "CAGR_suma", "AAGR_prom",
+        "AAGR_ROBUSTO", "TIPO_CRECIMIENTO",
     ]),
     ("OLE", [
         "salario_promedio", "salario_proyectado_pesos_hoy", "inscritos_2023_suma", "inscritos_2024_suma", "inscritos_2023_prom", "inscritos_2024_prom",
@@ -1117,6 +1273,341 @@ COL_ANCHOS_PROGRAMAS = {
 VERDE = "C6EFCE"
 AMARILLO = "FFEB9C"
 ROJO = "FFC7CE"
+
+
+def _escribir_resumen_ejecutivo(
+    writer: pd.ExcelWriter, sabana: pd.DataFrame, ag: pd.DataFrame
+) -> None:
+    """
+    Genera hoja "resumen_ejecutivo" (primera) con KPIs globales, rankings y calidad.
+    No debe romper el export: cualquier excepción se captura y se continúa.
+    """
+    try:
+        from openpyxl.styles import Border, Font, PatternFill, Side
+        from openpyxl.styles import Alignment as XLAlignment
+
+        # Estilos (según especificación)
+        AZUL_EAFIT = "000066"
+        VERDE_FILL = "C6EFCE"
+        AMARILLO_FILL = "FFEB9C"
+        ROJO_FILL = "FFC7CE"
+        GRIS_HEADER = "F2F2F2"
+        DATA_ALT = "F9F9F9"
+
+        wb = writer.book
+
+        # Reposicionar la hoja al inicio
+        if "resumen_ejecutivo" in wb.sheetnames:
+            ws_old = wb["resumen_ejecutivo"]
+            wb.remove(ws_old)
+        ws = wb.create_sheet("resumen_ejecutivo", 0)
+
+        # Evitar que la sheet por defecto quede intercalada si está presente
+        if "Sheet" in wb.sheetnames and wb["Sheet"].max_row <= 1 and wb["Sheet"].max_column <= 1:
+            try:
+                wb.remove(wb["Sheet"])
+            except Exception:
+                pass
+
+        ws.freeze_panes = "A3"
+
+        thin = Side(style="thin", color="D9D9D9")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        title_font = Font(size=16, bold=True, color=AZUL_EAFIT)
+        subtitle_font = Font(size=11, color="666666")
+        header_fill = PatternFill(start_color=AZUL_EAFIT, end_color=AZUL_EAFIT, fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+        header_fill_alt = PatternFill(start_color=GRIS_HEADER, end_color=GRIS_HEADER, fill_type="solid")
+        data_fill = PatternFill(start_color=DATA_ALT, end_color=DATA_ALT, fill_type="solid")
+
+        def set_cell(
+            r: int,
+            c: int,
+            value,
+            *,
+            font: Font | None = None,
+            fill: PatternFill | None = None,
+            align: XLAlignment | None = None,
+            number_format: str | None = None,
+            bold: bool | None = None,
+            border_on: bool = False,
+        ) -> None:
+            ws.cell(row=r, column=c, value=value)
+            cell = ws.cell(row=r, column=c)
+            if font is not None:
+                cell.font = font
+            if bold is not None:
+                cell.font = Font(
+                    name=cell.font.name,
+                    size=cell.font.size,
+                    bold=bold,
+                    color=cell.font.color,
+                    italic=cell.font.italic,
+                    vertAlign=cell.font.vertAlign,
+                    underline=cell.font.underline,
+                    strike=cell.font.strike,
+                )
+            if fill is not None:
+                cell.fill = fill
+            if align is not None:
+                cell.alignment = align
+            if number_format is not None:
+                cell.number_format = number_format
+            if border_on:
+                cell.border = border
+
+        def merge_and_set_title(
+            r: int, c1: int, c2: int, value: str, *, fill: PatternFill, font: Font
+        ) -> None:
+            ws.merge_cells(start_row=r, start_column=c1, end_row=r, end_column=c2)
+            set_cell(
+                r,
+                c1,
+                value,
+                fill=fill,
+                font=font,
+                align=XLAlignment(horizontal="left", vertical="center"),
+                border_on=False,
+            )
+
+        # Anchos de columna
+        ws.column_dimensions["A"].width = 40
+        ws.column_dimensions["B"].width = 18
+        ws.column_dimensions["F"].width = 40
+        ws.column_dimensions["G"].width = 15
+        ws.column_dimensions["C"].width = 18
+        ws.column_dimensions["D"].width = 18
+        ws.column_dimensions["H"].width = 15
+        ws.column_dimensions["I"].width = 15
+
+        # Bloque 1 — KPIs globales
+        import datetime
+
+        mat_cols = {
+            "2019": "matricula_2019",
+            "2024": "matricula_2024",
+        }
+        def _sum_col(df: pd.DataFrame, col: str) -> float:
+            if df is None or col not in df.columns:
+                return 0.0
+            return float(pd.to_numeric(df[col], errors="coerce").fillna(0).sum())
+
+        mat19 = _sum_col(sabana, mat_cols["2019"])
+        mat24 = _sum_col(sabana, mat_cols["2024"])
+        crecimiento_global_pct = ((mat24 - mat19) / mat19) if mat19 else 0.0
+
+        total_programas = int(len(sabana)) if sabana is not None else 0
+        total_categorias = int(len(ag)) if ag is not None else 0
+
+        es_activo_sum = int(
+            pd.to_numeric(sabana.get("es_activo", False), errors="coerce").fillna(0).astype(int).sum()
+        ) if isinstance(sabana, pd.DataFrame) else 0
+        # tiene_matricula_2024 suele existir en ag; en caso contrario usamos matricula_2024>0
+        if isinstance(sabana, pd.DataFrame) and "tiene_matricula_2024" in sabana.columns:
+            tiene_matricula_2024_sum = int(sabana["tiene_matricula_2024"].fillna(False).astype(bool).sum())
+        else:
+            tiene_matricula_2024_sum = int(pd.to_numeric(sabana.get("matricula_2024", 0), errors="coerce").fillna(0).gt(0).sum())
+
+        calif = pd.to_numeric(ag.get("calificacion_final", np.nan), errors="coerce") if isinstance(ag, pd.DataFrame) else pd.Series(dtype=float)
+        categorias_verdes = int((calif >= 4.0).sum())
+        categorias_amarillo = int(((calif >= 3.0) & (calif < 4.0)).sum())
+        categorias_rojas = int((calif < 3.0).sum())
+        calif_promedio = float(calif.mean()) if len(calif) else 0.0
+
+        fuente = sabana.get("FUENTE_CATEGORIA", pd.Series([], dtype=object))
+        cruce_snies = int(fuente.astype(str).str.upper().str.strip().eq("CRUCE_SNIES").sum())
+        match_nombre = int(fuente.astype(str).str.upper().str.strip().eq("MATCH_NOMBRE").sum())
+        knn_tfidf = int(fuente.astype(str).str.upper().str.strip().eq("KNN_TFIDF").sum())
+
+        total_confianza_100 = (
+            ((cruce_snies + match_nombre) / total_programas * 100.0) if total_programas else 0.0
+        )
+
+        req_revision = 0
+        if "REQUIERE_REVISION" in sabana.columns:
+            req_revision = int(sabana["REQUIERE_REVISION"].fillna(False).astype(bool).sum())
+
+        ws["A1"].value = "ESTUDIO DE MERCADO — COLOMBIA"
+        ws["A1"].font = title_font
+
+        generado_dt = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+        ws["A2"].value = f"Generado el {generado_dt}"
+        ws["A2"].font = subtitle_font
+
+        kpis = [
+            ("Total programas analizados", total_programas, "#,##0", False),
+            ("Total categorías", total_categorias, "#,##0", False),
+            ("Matrícula total 2024", mat24, "#,##0", False),
+            ("Matrícula total 2019", mat19, "#,##0", False),
+            ("Crecimiento global 2019→2024", crecimiento_global_pct, "0.0%", True),
+            ("Programas activos", es_activo_sum, "#,##0", False),
+            ("Programas con matrícula 2024", tiene_matricula_2024_sum, "#,##0", False),
+            ("Categorías VERDES (calif. ≥ 4.0)", categorias_verdes, "#,##0", False),
+            ("Categorías AMARILLO (3.0-3.9)", categorias_amarillo, "#,##0", False),
+            ("Categorías ROJAS (calif. < 3.0)", categorias_rojas, "#,##0", False),
+            ("Calificación promedio", calif_promedio, "0.00", False),
+            ("Certeza clasificación 100%", total_confianza_100 / 100.0, "0.0%", True),
+            ("Requieren revisión manual", req_revision, "#,##0", False),
+        ]
+
+        start_row_kpi = 4
+        for i, (label, value, fmt, is_percent) in enumerate(kpis):
+            r = start_row_kpi + i
+            set_cell(r, 1, label, font=Font(bold=True), align=XLAlignment(horizontal="left"), border_on=False)
+            set_cell(r, 2, value, number_format=fmt, align=XLAlignment(horizontal="right"), border_on=False)
+
+            # Semáforo en la celda de conteo (opcional, suave)
+            if "VERDES" in label:
+                ws.cell(row=r, column=2).fill = PatternFill(start_color=VERDE_FILL, end_color=VERDE_FILL, fill_type="solid")
+            elif "AMARILLO" in label:
+                ws.cell(row=r, column=2).fill = PatternFill(start_color=AMARILLO_FILL, end_color=AMARILLO_FILL, fill_type="solid")
+            elif "ROJAS" in label:
+                ws.cell(row=r, column=2).fill = PatternFill(start_color=ROJO_FILL, end_color=ROJO_FILL, fill_type="solid")
+
+        # Bloque 2 — Rankings por dimensión
+        start_row = 17
+
+        def write_top_table(
+            df: pd.DataFrame,
+            title: str,
+            start_r: int,
+            start_c: int,
+            cols: list[str],
+            data_cols: list[str],
+            n: int,
+            sort_by: str,
+            ascending: bool = False,
+        ) -> None:
+            # title row (merged)
+            merge_and_set_title(start_r, start_c, start_c + len(cols) - 1, title, fill=header_fill, font=header_font)
+
+            # column headers
+            header_r = start_r + 1
+            for j, h in enumerate(cols):
+                set_cell(
+                    header_r,
+                    start_c + j,
+                    h,
+                    fill=header_fill_alt,
+                    font=Font(bold=True, color="000000"),
+                    align=XLAlignment(horizontal="left", vertical="center"),
+                    border_on=True,
+                )
+
+            top = df.sort_values(sort_by, ascending=ascending).head(n) if sort_by in df.columns else df.head(n)
+            data_start_r = header_r + 1
+            for k, (_, row) in enumerate(top.iterrows()):
+                r = data_start_r + k
+                for j, dc in enumerate(data_cols):
+                    v = row.get(dc, "")
+                    number_fmt = None
+                    if dc in {"suma_matricula_2024"}:
+                        number_fmt = "#,##0"
+                    elif dc in {"AAGR_suma", "AAGR_ROBUSTO"}:
+                        number_fmt = "0.0%"
+                    elif dc in {"calificacion_final"}:
+                        number_fmt = "0.00"
+                    elif dc in {"salario_promedio"}:
+                        number_fmt = "0.00"
+                    elif dc in {"salario_proyectado_pesos_hoy"}:
+                        number_fmt = "#,##0"
+                    set_cell(
+                        r,
+                        start_c + j,
+                        v,
+                        fill=data_fill if k % 2 == 1 else None,
+                        align=XLAlignment(horizontal="left", vertical="center"),
+                        number_format=number_fmt,
+                        border_on=False,
+                    )
+
+        # Table A: Top 5 mayor matrícula 2024 (A-D)
+        write_top_table(
+            ag,
+            "🎓 TOP 5 — MAYOR MATRÍCULA 2024",
+            start_row,
+            1,
+            ["Categoría", "Matrícula 2024", "Calificación", "Crecimiento AAGR"],
+            ["CATEGORIA_FINAL", "suma_matricula_2024", "calificacion_final", "AAGR_ROBUSTO"],
+            5,
+            "suma_matricula_2024",
+            ascending=False,
+        )
+
+        # Table B: Top 5 mayor crecimiento AAGR (F-I)
+        write_top_table(
+            ag,
+            "📈 TOP 5 — MAYOR CRECIMIENTO",
+            start_row,
+            6,
+            ["Categoría", "AAGR", "Matrícula 2024", "Calificación"],
+            ["CATEGORIA_FINAL", "AAGR_ROBUSTO", "suma_matricula_2024", "calificacion_final"],
+            5,
+            "AAGR_ROBUSTO",
+            ascending=False,
+        )
+
+        # Table C: Top 5 mejor salario (A-D, desplazada 9 filas)
+        start_row_c = start_row + 9
+        write_top_table(
+            ag,
+            "💰 TOP 5 — MEJOR SALARIO (SMLMV)",
+            start_row_c,
+            1,
+            ["Categoría", "Salario SMLMV", "Salario pesos hoy", "Calificación"],
+            ["CATEGORIA_FINAL", "salario_promedio", "salario_proyectado_pesos_hoy", "calificacion_final"],
+            5,
+            "salario_promedio",
+            ascending=False,
+        )
+
+        # Table D: Top 5 peor crecimiento (F-I, misma fila que C)
+        write_top_table(
+            ag,
+            "📉 TOP 5 — MENOR CRECIMIENTO",
+            start_row_c,
+            6,
+            ["Categoría", "AAGR", "Matrícula 2024", "Calificación"],
+            ["CATEGORIA_FINAL", "AAGR_ROBUSTO", "suma_matricula_2024", "calificacion_final"],
+            5,
+            "AAGR_ROBUSTO",
+            ascending=True,
+        )
+
+        # Bloque 3 — Calidad de clasificación (al final)
+        row_q = start_row_c + 9
+        merge_and_set_title(row_q, 1, 4, "✅ CALIDAD DE CLASIFICACIÓN", fill=header_fill, font=header_font)
+
+        header_r = row_q + 1
+        q_cols = ["Fuente", "Programas", "% del total", "Confianza"]
+        for j, h in enumerate(q_cols):
+            set_cell(
+                header_r,
+                1 + j,
+                h,
+                fill=header_fill_alt,
+                font=Font(bold=True, color="000000"),
+                align=XLAlignment(horizontal="left", vertical="center"),
+                border_on=True,
+            )
+
+        q_rows = [
+            ("CRUCE_SNIES", cruce_snies, "100% — cruce exacto por código SNIES"),
+            ("MATCH_NOMBRE", match_nombre, "100% — match exacto por nombre"),
+            ("KNN_TFIDF", knn_tfidf, "Variable (mediana 79.3%)"),
+            ("Requieren revisión", req_revision, "—"),
+        ]
+
+        for i, (source, count, confianza) in enumerate(q_rows):
+            r = header_r + 1 + i
+            pct = (count / total_programas) if total_programas else 0.0
+            set_cell(r, 1, source, fill=data_fill if i % 2 else None)
+            set_cell(r, 2, int(count), number_format="#,##0", fill=data_fill if i % 2 else None)
+            set_cell(r, 3, pct, number_format="0.0%", fill=data_fill if i % 2 else None)
+            set_cell(r, 4, confianza, fill=data_fill if i % 2 else None)
+
+    except Exception as e:
+        log_warning(f"[Fase 5] No se pudo generar hoja resumen_ejecutivo: {e}. Se continúa sin esa hoja.")
 
 
 def run_fase5(agregado_df: pd.DataFrame | None) -> None:
@@ -1160,6 +1651,8 @@ def run_fase5(agregado_df: pd.DataFrame | None) -> None:
                 total_final = agregado_df
 
             with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+                # Generar hoja de resumen ejecutivo (primera hoja)
+                _escribir_resumen_ejecutivo(writer, sabana_final, total_final)
                 sabana_final.to_excel(writer, sheet_name="programas_detalle", index=False)
                 col_order = _escribir_hoja_total(writer, total_final)
                 wb = writer.book
@@ -1172,6 +1665,22 @@ def run_fase5(agregado_df: pd.DataFrame | None) -> None:
                         idx = list(sabana_final.columns).index(col_name) + 1
                         ws_detalle.column_dimensions[get_column_letter(idx)].width = width
                 _aplicar_formato_total(wb["total"], col_order)
+
+                # ── Fase 6: EAFIT vs Mercado (opcional, no bloqueante) ──
+                try:
+                    df_eafit_vs_mercado = run_fase6(total_final, log_info)
+                    if df_eafit_vs_mercado is not None and len(df_eafit_vs_mercado) > 0:
+                        df_eafit_vs_mercado.to_excel(
+                            writer,
+                            sheet_name="eafit_vs_mercado",
+                            index=False,
+                        )
+                        _formatear_hoja_eafit(writer, df_eafit_vs_mercado)
+                        log_info("✓ Hoja 'eafit_vs_mercado' añadida al Excel.")
+                    else:
+                        log_warning("⚠ Fase 6 omitida — no se generó 'eafit_vs_mercado'.")
+                except Exception as e:
+                    log_warning(f"[Fase 6] No se pudo generar hoja eafit_vs_mercado: {e}")
 
                 # Hoja informativa: programas con baja confianza del ML (REQUIERE_REVISION == True)
                 if "REQUIERE_REVISION" in sabana_final.columns:
@@ -1247,6 +1756,258 @@ def run_fase5(agregado_df: pd.DataFrame | None) -> None:
 
     log_info(f"Exportado: {out_path}")
     log_etapa_completada("Fase 5: Exportación formateada", str(out_path))
+
+
+def _formatear_hoja_eafit(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
+    """Aplica formato visual a la hoja `eafit_vs_mercado`."""
+    try:
+        from openpyxl.styles import Alignment, Font, PatternFill
+
+        ws = writer.sheets.get("eafit_vs_mercado")
+        if ws is None:
+            return
+
+        # Encabezados
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal="center", wrap_text=True)
+
+        # Índices por nombre de columna
+        headers = {cell.value: cell.column for cell in ws[1]}
+
+        # Colores semáforo
+        COLOR_MAP = {
+            "VERDE": "C6EFCE",
+            "AMARILLO": "FFEB9C",
+            "ROJO": "FFC7CE",
+            "SIN_DATOS": "D9D9D9",
+        }
+        sem_col = headers.get("SEMAFORO_CALIDAD")
+        oport_col = headers.get("OPORTUNIDAD")
+
+        if sem_col:
+            for row in ws.iter_rows(min_row=2, min_col=sem_col, max_col=sem_col):
+                for cell in row:
+                    color = COLOR_MAP.get(str(cell.value), "")
+                    if color:
+                        cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+
+        # Colores oportunidad
+        OPORT_BG = {
+            "ALTA": "C6EFCE",
+            "MEDIA_ALTA": "E2EFDA",
+            "MEDIA": "FFEB9C",
+            "BAJA": "FFC7CE",
+            "INDETERMINADO": "D9D9D9",
+        }
+        OPORT_COLOR = {
+            "ALTA": "1F7A4A",
+            "MEDIA_ALTA": "000000",
+            "MEDIA": "000000",
+            "BAJA": "000000",
+            "INDETERMINADO": "000000",
+        }
+        if oport_col:
+            for row in ws.iter_rows(min_row=2, min_col=oport_col, max_col=oport_col):
+                for cell in row:
+                    bg = OPORT_BG.get(str(cell.value), "")
+                    fg = OPORT_COLOR.get(str(cell.value), "000000")
+                    if bg:
+                        cell.fill = PatternFill(start_color=bg, end_color=bg, fill_type="solid")
+                        cell.font = Font(color=fg, bold=True)
+
+        # Congelar primera fila (encabezado)
+        ws.freeze_panes = "A2"
+
+    except Exception:
+        # No bloquear la export si falla el formateo.
+        return
+
+
+def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
+    """
+    Fase 6 — Análisis EAFIT vs Mercado (opcional, no bloqueante).
+
+    Devuelve un DataFrame listo para escribir como hoja `eafit_vs_mercado`
+    o DataFrame vacío si falta el archivo de referencia.
+    """
+    from etl.config import PROGRAMAS_EAFIT
+
+    log("━━━ Fase 6 — EAFIT vs Mercado ━━━")
+
+    if not PROGRAMAS_EAFIT.exists():
+        log(
+            f"⚠ Archivo no encontrado: {PROGRAMAS_EAFIT}\n"
+            f"  Coloca 'programas_para_valorizacion.xlsx' en ref/backup/ "
+            f"y vuelve a ejecutar el pipeline para generar el análisis EAFIT."
+        )
+        return pd.DataFrame()
+
+    try:
+        df_raw = pd.read_excel(PROGRAMAS_EAFIT)
+    except Exception as exc:
+        log(f"✗ Error leyendo {PROGRAMAS_EAFIT.name}: {exc}")
+        return pd.DataFrame()
+
+    if df_raw is None or len(df_raw) == 0:
+        log("⚠ Fase 6: el archivo EAFIT viene vacío. Se omite hoja.")
+        return pd.DataFrame()
+
+    # Normalizar columnas (tolerante a espacios extra)
+    rename_map: dict[str, str] = {}
+    for col in df_raw.columns:
+        col_strip = str(col).strip()
+        if "Programas" in col_strip or "programa" in col_strip.lower():
+            rename_map[col] = "PROGRAMA_EAFIT"
+        elif "estudio" in col_strip.lower() or "mercado" in col_strip.lower():
+            rename_map[col] = "TIENE_ESTUDIO_MERCADO"
+    df_raw = df_raw.rename(columns=rename_map)
+
+    if "PROGRAMA_EAFIT" not in df_raw.columns:
+        log("✗ No se encontró la columna de nombres de programa en el archivo.")
+        return pd.DataFrame()
+
+    # Deduplicar (un programa puede repetirse por grupos/sedes)
+    keep_cols = ["PROGRAMA_EAFIT"]
+    if "TIENE_ESTUDIO_MERCADO" in df_raw.columns:
+        keep_cols.append("TIENE_ESTUDIO_MERCADO")
+    df_eafit = (
+        df_raw[keep_cols]
+        .dropna(subset=["PROGRAMA_EAFIT"])
+        .drop_duplicates(subset=["PROGRAMA_EAFIT"])
+        .reset_index(drop=True)
+    )
+
+    # Asegurar columna TIENE_ESTUDIO_MERCADO si no existía
+    if "TIENE_ESTUDIO_MERCADO" not in df_eafit.columns:
+        df_eafit["TIENE_ESTUDIO_MERCADO"] = False
+
+    # Asignar categoría de mercado por mapeo exacto
+    df_eafit["CATEGORIA_MERCADO"] = df_eafit["PROGRAMA_EAFIT"].map(MAPEO_PROGRAMAS_EAFIT)
+
+    sin_mapeo = df_eafit[df_eafit["CATEGORIA_MERCADO"].isna()]
+    if not sin_mapeo.empty:
+        muestras = sin_mapeo["PROGRAMA_EAFIT"].astype(str).tolist()[:30]
+        log(
+            f"⚠ {len(sin_mapeo)} programa(s) sin categoría asignada "
+            f"(agregar en MAPEO_PROGRAMAS_EAFIT si son nuevos). Primeros 30:\n"
+            + "\n".join(f"    - {p}" for p in muestras)
+        )
+
+    # Extraer nivel de formación (heurística por keywords)
+    def _nivel(nombre: str) -> str:
+        n = str(nombre).lower()
+        if any(k in n for k in ("maestría", "maestria", "master", "msc")):
+            return "Maestría"
+        if any(k in n for k in ("pregrado", "ingeniería de", "ingenieria de", "licenciatura")):
+            return "Pregrado"
+        return "Especialización"
+
+    df_eafit["NIVEL_FORMACION"] = df_eafit["PROGRAMA_EAFIT"].apply(_nivel)
+
+    if ag is None or len(ag) == 0:
+        log("⚠ Fase 6: DataFrame 'ag' (hoja total) vacío. Se omite hoja.")
+        return pd.DataFrame()
+
+    # Columnas que queremos traer de ag (hoja total)
+    COLS_MERCADO = [
+        "CATEGORIA_FINAL",
+        "calificacion_final",
+        "suma_matricula_2024",
+        "AAGR_ROBUSTO",
+        "AAGR_suma",
+        "salario_promedio",
+        "num_programas_2024",
+        "programas_nuevos_3a",
+        "pct_no_matriculados_2024",
+        "costo_promedio",
+        "score_matricula",
+        "score_AAGR",
+        "score_salario",
+    ]
+    cols_ok = [c for c in COLS_MERCADO if c in ag.columns]
+    if "CATEGORIA_FINAL" in cols_ok:
+        df_merc = ag[cols_ok].copy().rename(columns={"CATEGORIA_FINAL": "CATEGORIA_MERCADO"})
+    else:
+        # Si por alguna razón la hoja 'total' no tiene el nombre de columna esperado, no se puede continuar.
+        log("✗ La hoja 'total' no contiene 'CATEGORIA_FINAL'. Se omite hoja eafit_vs_mercado.")
+        return pd.DataFrame()
+
+    df_result = df_eafit.merge(df_merc, on="CATEGORIA_MERCADO", how="left")
+
+    # Tipos numéricos para cálculos seguros
+    for c in ["calificacion_final", "AAGR_suma", "AAGR_ROBUSTO"]:
+        if c in df_result.columns:
+            df_result[c] = pd.to_numeric(df_result[c], errors="coerce")
+    if "suma_matricula_2024" in df_result.columns:
+        df_result["suma_matricula_2024"] = pd.to_numeric(df_result["suma_matricula_2024"], errors="coerce")
+    if "salario_promedio" in df_result.columns:
+        df_result["salario_promedio"] = pd.to_numeric(df_result["salario_promedio"], errors="coerce")
+    if "costo_promedio" in df_result.columns:
+        df_result["costo_promedio"] = pd.to_numeric(df_result["costo_promedio"], errors="coerce")
+
+    # Columnas derivadas
+    def _semaforo(c) -> str:
+        if pd.isna(c):
+            return "SIN_DATOS"
+        if c >= 4.0:
+            return "VERDE"
+        if c >= 3.0:
+            return "AMARILLO"
+        return "ROJO"
+
+    df_result["SEMAFORO_CALIDAD"] = df_result.get("calificacion_final", pd.Series(index=df_result.index)).apply(_semaforo)
+
+    _aagr_col = "AAGR_ROBUSTO" if "AAGR_ROBUSTO" in df_result.columns else "AAGR_suma"
+    if _aagr_col in df_result.columns:
+        df_result["AAGR_PCT"] = (df_result[_aagr_col] * 100).round(2)
+    else:
+        df_result["AAGR_PCT"] = np.nan
+
+    def _oportunidad(row) -> str:
+        c = row.get("calificacion_final")
+        a = row.get("AAGR_PCT")
+        if pd.isna(c) or pd.isna(a):
+            return "INDETERMINADO"
+        if c >= 4.0 and a > 15:
+            return "ALTA"
+        if c >= 3.5 or a > 20:
+            return "MEDIA_ALTA"
+        if c >= 3.0 and a > 0:
+            return "MEDIA"
+        if a < 0:
+            return "BAJA"
+        return "MEDIA"
+
+    df_result["OPORTUNIDAD"] = df_result.apply(_oportunidad, axis=1)
+
+    # Orden de salida
+    COLS_SALIDA = [
+        "PROGRAMA_EAFIT",
+        "NIVEL_FORMACION",
+        "TIENE_ESTUDIO_MERCADO",
+        "CATEGORIA_MERCADO",
+        "SEMAFORO_CALIDAD",
+        "OPORTUNIDAD",
+        "calificacion_final",
+        "AAGR_PCT",
+        "suma_matricula_2024",
+        "salario_promedio",
+        "num_programas_2024",
+        "costo_promedio",
+    ]
+    cols_final = [c for c in COLS_SALIDA if c in df_result.columns]
+    df_result = df_result[cols_final].copy()
+
+    # Log de resumen
+    v = int((df_result["SEMAFORO_CALIDAD"] == "VERDE").sum()) if "SEMAFORO_CALIDAD" in df_result.columns else 0
+    a = int((df_result["SEMAFORO_CALIDAD"] == "AMARILLO").sum()) if "SEMAFORO_CALIDAD" in df_result.columns else 0
+    r = int((df_result["SEMAFORO_CALIDAD"] == "ROJO").sum()) if "SEMAFORO_CALIDAD" in df_result.columns else 0
+    log(
+        f"✓ Fase 6 completada: {len(df_result)} programas analizados  | "
+        f"🟢 Verde: {v}  🟡 Amarillo: {a}  🔴 Rojo: {r}"
+    )
+    return df_result
 
 
 def _escribir_hoja_total(writer: pd.ExcelWriter, ag: pd.DataFrame) -> list[str]:
