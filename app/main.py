@@ -4759,6 +4759,14 @@ class EstudioMercadoResultsPage(ttk.Frame):
             "CATEGORIA_FINAL",
             "FUENTE_CATEGORIA",
             "calificacion_final",
+            "REQUIERE_REVISION",
+        }
+        # Inicializar lista de categorías (se rellena cuando se carga el Excel)
+        self._lista_categorias: list[str] = []
+        self._dropdown_vals: dict[str, list[str]] = {
+            "FUENTE_CATEGORIA": ["CRUCE_SNIES", "MATCH_NOMBRE", "KNN_TFIDF", "MANUAL", "PIPELINE"],
+            "REQUIERE_REVISION": ["True", "False"],
+            "CATEGORIA_FINAL": [],
         }
         self._setup_ui()
         self._load()
@@ -4782,6 +4790,13 @@ class EstudioMercadoResultsPage(ttk.Frame):
         row1.pack(fill=tk.X, pady=(0, 8))
         ttk.Button(row1, text="🔄 Recargar", command=self._load).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(row1, text="📂 Abrir en Excel", command=self._open_excel).pack(side=tk.LEFT, padx=6)
+        self.btn_integridad = ttk.Button(
+            row1,
+            text="🔍 Verificar integridad",
+            command=self._verificar_integridad,
+            style="Secondary.TButton",
+        )
+        self.btn_integridad.pack(side=tk.LEFT, padx=6)
         self.btn_save = ttk.Button(row1, text="💾 Guardar cambios", command=self._save, state=tk.DISABLED)
         self.btn_save.pack(side=tk.LEFT, padx=6)
         ttk.Button(row1, text="↩️ Descartar todo", command=self._discard_all).pack(side=tk.LEFT, padx=6)
@@ -4865,6 +4880,25 @@ class EstudioMercadoResultsPage(ttk.Frame):
             self._log(f"✗ Error al leer: {e}")
             return
         self.pending_updates.clear()
+        # Poblar lista de categorías desde hoja total (para dropdown CATEGORIA_FINAL)
+        try:
+            if self.df_total is not None and getattr(self.df_total, "columns", None) is not None and len(self.df_total.columns) > 0:
+                cat_col_name = str(self.df_total.columns[0])
+                cats = (
+                    self.df_total[cat_col_name]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                )
+                cats = sorted(cats)
+                self._lista_categorias = cats
+                self._dropdown_vals["CATEGORIA_FINAL"] = cats
+                # Propagar al dropdown_values de la tabla actual (si ya existe)
+                if self.table and hasattr(self.table, "dropdown_values"):
+                    self.table.dropdown_values["CATEGORIA_FINAL"] = cats
+        except Exception as e:
+            self._log(f"⚠️ No se pudo poblar dropdown de categorías: {e}")
         self._switch_sheet(self.active_sheet)
         n_total = len(self.df_total) if self.df_total is not None else 0
         n_detalle = len(self.df_detalle) if self.df_detalle is not None else 0
@@ -4889,7 +4923,8 @@ class EstudioMercadoResultsPage(ttk.Frame):
         else:
             display_cols = [
                 "CÓDIGO_SNIES_DEL_PROGRAMA", "NOMBRE_DEL_PROGRAMA", "NOMBRE_INSTITUCIÓN", "NIVEL_DE_FORMACIÓN",
-                "CATEGORIA_FINAL", "FUENTE_CATEGORIA", "calificacion_final", "ESTADO_PROGRAMA",
+                "CATEGORIA_FINAL", "FUENTE_CATEGORIA", "REQUIERE_REVISION", "calificacion_final", "PROBABILIDAD",
+                "ESTADO_PROGRAMA", "ACTIVO_PIPELINE",
             ]
             editable = self.editable_columns
             self.readonly_banner.config(text="")
@@ -4911,7 +4946,7 @@ class EstudioMercadoResultsPage(ttk.Frame):
             height=18,
             editable_columns=editable,
             on_change=self._on_cell_change,
-            dropdown_values=None,
+            dropdown_values=self._dropdown_vals,
         )
         self.table.pack(fill=tk.BOTH, expand=True)
         self._apply_filter()
@@ -4992,6 +5027,7 @@ class EstudioMercadoResultsPage(ttk.Frame):
             return
         row = rows[idx]
 
+        # Validación: calificacion_final debe ser float entre 1.0 y 5.0
         if column == "calificacion_final":
             try:
                 v = float(new_value)
@@ -5001,9 +5037,10 @@ class EstudioMercadoResultsPage(ttk.Frame):
                 return
             if v < 1.0 or v > 5.0:
                 self._revert_cell(idx, column)
-                self._log("⚠️ calificacion_final debe ser un número entre 1.0 y 5.0")
+                self._log("⚠️ calificacion_final debe estar entre 1.0 y 5.0")
                 return
 
+        # Clave de identificación según hoja activa
         if self.active_sheet == "total":
             categoria_final = row.get("CATEGORIA_FINAL")
             if categoria_final is None:
@@ -5015,11 +5052,31 @@ class EstudioMercadoResultsPage(ttk.Frame):
                 return
             key = str(snies).strip()
 
+        if not key:
+            return
+
         if key not in self.pending_updates:
             self.pending_updates[key] = {}
+
         self.pending_updates[key][column] = new_value
-        if column == "CATEGORIA_FINAL" or column == "calificacion_final":
+
+        # Si cambia la categoría, auto-marcar como MANUAL y limpiar REQUIERE_REVISION
+        if column == "CATEGORIA_FINAL":
             self.pending_updates[key]["FUENTE_CATEGORIA"] = "MANUAL"
+            # Independencia de edits: si el usuario ya cambió REQUIERE_REVISION en la sesión,
+            # no lo sobreescribimos silenciosamente.
+            if "REQUIERE_REVISION" not in self.pending_updates[key]:
+                self.pending_updates[key]["REQUIERE_REVISION"] = False
+            self._log(
+                "✓ Categoría cambiada → FUENTE_CATEGORIA=MANUAL "
+                "(REQUIERE_REVISION se conserva si fue editado)"
+            )
+
+        # Si cambia FUENTE_CATEGORIA a MANUAL, también limpiar REQUIERE_REVISION
+        if column == "FUENTE_CATEGORIA" and str(new_value).strip().upper() == "MANUAL":
+            if "REQUIERE_REVISION" not in self.pending_updates[key]:
+                self.pending_updates[key]["REQUIERE_REVISION"] = False
+
         self.pending_label.config(text=f"Cambios pendientes: {len(self.pending_updates)}")
         self.btn_save.config(state=tk.NORMAL)
 
@@ -5032,6 +5089,124 @@ class EstudioMercadoResultsPage(ttk.Frame):
             return
         orig_val = self._filtered_df.iloc[start + idx].get(column)
         self.table.set_cell_value(idx, column, str(orig_val) if orig_val is not None and not (isinstance(orig_val, float) and pd.isna(orig_val)) else "")
+
+    def _verificar_integridad(self):
+        """
+        Verifica la integridad de los datos y muestra un informe.
+        Comprueba: categorías nulas, FUENTE_CATEGORIA inválida, calificacion fuera de rango,
+        SNIES duplicados, ACTIVO_PIPELINE inconsistente, categorías huérfanas,
+        y consistencia semántica de MANUAL con REQUIERE_REVISION.
+        """
+        if self.df_detalle is None or self.df_total is None:
+            messagebox.showwarning("Sin datos", "Primero carga el archivo.", parent=self.root)
+            return
+
+        det = self.df_detalle.copy()
+        tot = self.df_total.copy()
+        problemas: list[str] = []
+        ok_msgs: list[str] = []
+
+        # 1. Programas sin CATEGORIA_FINAL
+        n = det["CATEGORIA_FINAL"].isna().sum() if "CATEGORIA_FINAL" in det.columns else 0
+        if n > 0:
+            problemas.append(f"⚠️ {n:,} programas sin CATEGORIA_FINAL (nulo/vacío)")
+        else:
+            ok_msgs.append("✓ Todos los programas tienen CATEGORIA_FINAL")
+
+        # 2. FUENTE_CATEGORIA con valores inválidos
+        valores_validos_fuente = {"CRUCE_SNIES", "MATCH_NOMBRE", "KNN_TFIDF", "MANUAL", "PIPELINE"}
+        if "FUENTE_CATEGORIA" in det.columns:
+            invalidos = det[
+                ~det["FUENTE_CATEGORIA"].astype(str).isin(valores_validos_fuente | {"nan", ""})
+            ]
+            invalidos = invalidos.dropna(subset=["FUENTE_CATEGORIA"])
+            if len(invalidos) > 0:
+                vals = invalidos["FUENTE_CATEGORIA"].value_counts().to_dict()
+                problemas.append(f"⚠️ {len(invalidos):,} programas con FUENTE_CATEGORIA inválida: {vals}")
+            else:
+                ok_msgs.append("✓ FUENTE_CATEGORIA con valores válidos")
+
+        # 3. calificacion_final fuera de [1, 5] en hoja total
+        if "calificacion_final" in tot.columns:
+            cal = pd.to_numeric(tot["calificacion_final"], errors="coerce")
+            n_out = int(((cal < 1) | (cal > 5)).sum())
+            n_nan = int(cal.isna().sum())
+            if n_out > 0:
+                problemas.append(f"⚠️ {n_out:,} categorías con calificacion_final fuera de [1, 5]")
+            elif n_nan > 0:
+                problemas.append(f"⚠️ {n_nan:,} categorías con calificacion_final nula")
+            else:
+                ok_msgs.append(f"✓ calificacion_final en rango [1, 5] para las {len(tot):,} categorías")
+
+        # 4. SNIES duplicados en programas_detalle
+        if "CÓDIGO_SNIES_DEL_PROGRAMA" in det.columns:
+            dups = int(det["CÓDIGO_SNIES_DEL_PROGRAMA"].astype(str).duplicated().sum())
+            if dups > 0:
+                problemas.append(f"⚠️ {dups:,} códigos SNIES duplicados en programas_detalle")
+            else:
+                ok_msgs.append("✓ Sin códigos SNIES duplicados")
+
+        # 5. ACTIVO_PIPELINE inconsistente
+        if (
+            "ACTIVO_PIPELINE" in det.columns
+            and "matricula_2024" in det.columns
+            and "ESTADO_PROGRAMA" in det.columns
+        ):
+            mat = pd.to_numeric(det["matricula_2024"], errors="coerce").fillna(0)
+            estado_act = det["ESTADO_PROGRAMA"].astype(str).str.lower().str.strip() == "activo"
+            activo_flag = det["ACTIVO_PIPELINE"].astype(str).str.lower().isin(["true", "1", "yes"])
+            inconsistentes = det[activo_flag & (mat == 0) & (~estado_act)]
+            if len(inconsistentes) > 0:
+                problemas.append(
+                    f"⚠️ {len(inconsistentes):,} programas marcados ACTIVO_PIPELINE=True "
+                    "pero sin matrícula 2024 ni estado 'activo'"
+                )
+            else:
+                ok_msgs.append("✓ ACTIVO_PIPELINE coherente con matrícula y estado")
+
+        # 6. Categorías en total sin ningún programa en detalle
+        if "CATEGORIA_FINAL" in det.columns and len(tot.columns) > 0:
+            cat_col_name = str(tot.columns[0])
+            cats_detalle = set(det["CATEGORIA_FINAL"].dropna().astype(str).unique())
+            cats_total = set(tot[cat_col_name].dropna().astype(str).unique())
+            huerfanas = cats_total - cats_detalle
+            if huerfanas:
+                ejemplos = ", ".join(sorted(huerfanas)[:5])
+                problemas.append(
+                    f"⚠️ {len(huerfanas):,} categorías en hoja 'total' sin programas en detalle: "
+                    f"{ejemplos}" + ("..." if len(huerfanas) > 5 else "")
+                )
+            else:
+                ok_msgs.append("✓ Todas las categorías de 'total' tienen programas en detalle")
+
+        # 7. Programas MANUAL con REQUIERE_REVISION=True
+        if "FUENTE_CATEGORIA" in det.columns and "REQUIERE_REVISION" in det.columns:
+            manuales = det[det["FUENTE_CATEGORIA"].astype(str).str.upper().str.strip() == "MANUAL"].copy()
+            if len(manuales) > 0:
+                req = manuales["REQUIERE_REVISION"].astype(str).str.lower().isin(["true", "1", "yes"])
+                manuales_req = manuales[req]
+                if len(manuales_req) > 0:
+                    problemas.append(
+                        f"⚠️ {len(manuales_req):,} programas MANUAL con REQUIERE_REVISION=True "
+                        "(inconsistencia: marca False si ya revisaste)"
+                    )
+                else:
+                    ok_msgs.append("✓ Sin programas MANUAL con revisión pendiente")
+
+        total_ok = len(ok_msgs)
+        total_warn = len(problemas)
+        resumen = f"Integridad: {total_ok} OK / {total_warn} advertencia(s)\n\n"
+        if ok_msgs:
+            resumen += "\n".join(ok_msgs[:10]) + "\n\n"
+        if problemas:
+            resumen += "\n".join(problemas)
+
+        self._log(resumen if resumen else "Sin información de integridad.")
+
+        if total_warn == 0:
+            messagebox.showinfo("✅ Integridad OK", resumen, parent=self.root)
+        else:
+            messagebox.showwarning("⚠️ Advertencias de integridad", resumen, parent=self.root)
 
     def _save(self):
         if not self.pending_updates:
@@ -5068,7 +5243,18 @@ class EstudioMercadoResultsPage(ttk.Frame):
                             mask = self.df_total["CATEGORIA_FINAL"].astype(str).str.strip() == str(key).strip()
                             for col, val in changes.items():
                                 if col in self.df_total.columns:
-                                    self.df_total.loc[mask, col] = val
+                                    if col == "REQUIERE_REVISION":
+                                        # Convertir "True"/"False" a bool
+                                        if isinstance(val, str):
+                                            val_converted = val.strip().lower() in ("true", "1", "yes", "sí", "si")
+                                        else:
+                                            # Evitar el bug de Python: bool("False") == True.
+                                            # Normalizamos igualmente a texto y buscamos el contenido.
+                                            val_str = str(val).strip().lower()
+                                            val_converted = val_str in ("true", "1", "yes", "sí", "si")
+                                        self.df_total.loc[mask, col] = val_converted
+                                    else:
+                                        self.df_total.loc[mask, col] = val
                         self.df_total.to_excel(writer, sheet_name="total", index=False)
             except Exception as e:
                 if "Permission denied" in str(e) or "being used" in str(e).lower():
@@ -5094,7 +5280,18 @@ class EstudioMercadoResultsPage(ttk.Frame):
                 mask = self.df_detalle["CÓDIGO_SNIES_DEL_PROGRAMA"].astype(str).str.strip() == str(key).strip()
                 for col, val in changes.items():
                     if col in self.df_detalle.columns:
-                        self.df_detalle.loc[mask, col] = val
+                        if col == "REQUIERE_REVISION":
+                            # Convertir "True"/"False" a bool
+                            if isinstance(val, str):
+                                val_converted = val.strip().lower() in ("true", "1", "yes", "sí", "si")
+                            else:
+                                    # Evitar el bug de Python: bool("False") == True.
+                                    # Normalizamos igualmente a texto y buscamos el contenido.
+                                    val_str = str(val).strip().lower()
+                                    val_converted = val_str in ("true", "1", "yes", "sí", "si")
+                            self.df_detalle.loc[mask, col] = val_converted
+                        else:
+                            self.df_detalle.loc[mask, col] = val
 
             # 1b. Human-in-the-Loop: guardar correcciones de categoría en ref/feedback_manual.csv (aditivo)
             try:

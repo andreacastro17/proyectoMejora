@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable
+import re
 
 import joblib
 import numpy as np
@@ -17,6 +18,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report, f1_score
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
@@ -77,6 +79,54 @@ def _build_texto_ml(df: pd.DataFrame) -> pd.Series:
         if col in df.columns:
             texto = texto + " " + df[col].fillna("").astype(str)
     return texto.astype(str).str.strip()
+
+
+def _normalizar_nombre_programa(nombre: str) -> str:
+    """
+    Elimina prefijos de nivel académico del nombre para obtener el tema puro.
+    Ejemplos:
+      "ESPECIALIZACIÓN EN DERECHO PENAL" → "DERECHO PENAL"
+      "LICENCIATURA EN MATEMÁTICAS"      → "MATEMÁTICAS"
+      "TECNOLOGÍA EN SISTEMAS"           → "SISTEMAS"
+      "DOCTORADO EN BIOLOGÍA"            → "BIOLOGÍA"
+      "MAESTRÍA EN GERENCIA FINANCIERA"  → "GERENCIA FINANCIERA"
+    """
+    if not nombre or pd.isna(nombre):
+        return ""
+    n = str(nombre).strip()
+
+    PREFIJOS = [
+        r"^ESPECIALIZACI[OÓ]N\s+M[EÉ]DICO[- ]QUIR[ÚU]RGICA\s+EN\s+",
+        r"^ESPECIALIZACI[OÓ]N\s+M[EÉ]DICO[- ]QUIR[ÚU]RGICA\s+",
+        r"^ESPECIALIZACI[ÓO]N\s+EN\s+",
+        r"^ESPECIALIZACION\s+EN\s+",
+        r"^ESPECIALIZACIÓN\s+EN\s+",
+        r"^ESPECIALIZACI[ÓO]N\s+",
+        r"^ESPECIALIZACION\s+",
+        r"^MAESTR[ÍI]A\s+EN\s+",
+        r"^MAESTRIA\s+EN\s+",
+        r"^MAESTR[ÍI]A\s+",
+        r"^DOCTORADO\s+EN\s+",
+        r"^DOCTORADO\s+",
+        r"^LICENCIATURA\s+EN\s+",
+        r"^LICENCIATURA\s+",
+        r"^TECNOLOG[ÍI]A\s+EN\s+",
+        r"^TECNOLOG[ÍI]A\s+",
+        r"^T[ÉE]CNICA\s+PROFESIONAL\s+EN\s+",
+        r"^TECNICO\s+PROFESIONAL\s+EN\s+",
+        r"^T[ÉE]CNICA\s+EN\s+",
+        r"^T[ÉE]CNICO\s+EN\s+",
+        r"^PROGRAMA\s+DE\s+",
+        r"^INGENIER[ÍI]A\s+EN\s+",
+        r"^INGENIER[ÍI]A\s+",
+    ]
+
+    for p in PREFIJOS:
+        n2 = re.sub(p, "", n, flags=re.IGNORECASE).strip()
+        if n2 != n:
+            return n2.upper()
+
+    return n.upper()
 
 
 def run_fase1() -> pd.DataFrame:
@@ -180,165 +230,145 @@ def run_fase1() -> pd.DataFrame:
         if c not in df_base.columns:
             df_base[c] = pd.NA
 
-    # FUENTE_CATEGORIA: CRUCE_SNIES donde sí hubo cruce, resto se llenará con PREDICCION_ML
+    # FUENTE_CATEGORIA: CRUCE_SNIES donde sí hubo cruce, resto se llenará con MATCH_NOMBRE / KNN_TFIDF
     df_base["FUENTE_CATEGORIA"] = pd.NA
     mask_cruce = df_base["CATEGORIA_FINAL"].notna()
     df_base.loc[mask_cruce, "FUENTE_CATEGORIA"] = "CRUCE_SNIES"
     log_info(f"Registros con categoría por cruce SNIES: {mask_cruce.sum()}")
     log_info(f"Registros sin categoría (a predecir): {(~mask_cruce).sum()}")
 
-    # 1.5 Entrenar clasificador TF-IDF + Logistic Regression (calibrado)
-    df_entrenar = df_referente.dropna(subset=["CATEGORIA_FINAL", "_texto_ml_norm"])
-    df_entrenar = df_entrenar[df_entrenar["_texto_ml_norm"].astype(str).str.len() > 0]
-    if len(df_entrenar) < 10:
-        msg = "Insuficientes registros en referente para entrenar (mínimo 10)."
-        log_error(msg)
-        raise ValueError(msg)
-
-    X_text = df_entrenar["_texto_ml_norm"].astype(str)
-    y = df_entrenar["CATEGORIA_FINAL"].astype(str)
-
-    # Stratified split solo es posible si todas las clases tienen al menos 2 ejemplos.
-    y_counts = y.value_counts()
-    rare_classes = y_counts[y_counts < 2]
-    if not rare_classes.empty:
-        log_warning(
-            "Se desactiva stratify en train_test_split porque hay categorías con menos de 2 ejemplos: "
-            + ", ".join(f"{c}({n})" for c, n in rare_classes.items())
-        )
-        stratify = None
-    else:
-        stratify = y
-
-    X_train_t, X_test_t, y_train, y_test = train_test_split(
-        X_text,
-        y,
-        test_size=0.2,
-        random_state=42,
-        stratify=stratify,
-    )
-
-    # Determinar cv efectivo para CalibratedClassifierCV según tamaño mínimo de clase en y_train
-    y_train_counts = y_train.value_counts()
-    min_count = int(y_train_counts.min()) if not y_train_counts.empty else 0
-    use_calibration = True
-    calib_cv = 5
-    if min_count < 2:
-        log_warning(
-            "Se omite CalibratedClassifierCV porque hay categorías con menos de 2 ejemplos en entrenamiento: "
-            + ", ".join(f"{c}({n})" for c, n in y_train_counts.items())
-        )
-        use_calibration = False
-    elif min_count < 5:
-        calib_cv = min_count
-        log_warning(
-            f"Se ajusta CalibratedClassifierCV a cv={calib_cv} porque hay categorías escasas "
-            f"(mínimo por clase en y_train: {min_count})."
-        )
-
-    base_clf = LogisticRegression(
-        class_weight="balanced",
-        max_iter=1000,
-        C=1.5,
-        solver="lbfgs",
-        n_jobs=-1,
-        random_state=42,
-    )
-    if use_calibration:
-        final_clf = CalibratedClassifierCV(base_clf, cv=calib_cv, method="sigmoid")
-    else:
-        final_clf = base_clf
-
-    pipeline_ml = Pipeline(
-        [
-            (
-                "tfidf",
-                TfidfVectorizer(
-                    max_features=30_000,
-                    ngram_range=(1, 3),
-                    sublinear_tf=True,
-                    min_df=2,
-                    analyzer="word",
-                    strip_accents="unicode",
-                    token_pattern=r"(?u)\b[a-záéíóúüñA-ZÁÉÍÓÚÜÑ]{2,}\b",
-                ),
-            ),
-            ("clf", final_clf),
-        ]
-    )
-    pipeline_ml.fit(X_train_t, y_train)
-
-    y_pred = pipeline_ml.predict(X_test_t)
-    accuracy = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred, average="macro", zero_division=0)
-    report = classification_report(y_test, y_pred, zero_division=0)
-
-    log_info(f"Modelo ML — Accuracy (test 20%): {accuracy:.3f}")
-    log_info(f"Modelo ML — F1 macro (test 20%): {f1:.3f}")
-    log_info(f"Classification report (test):\n{report}")
-
-    # Cinco categorías con peor F1
-    report_dict = classification_report(
-        y_test, y_pred, output_dict=True, zero_division=0
-    )
-    f1_by_class = [
-        (k, report_dict[k]["f1-score"])
-        for k in report_dict
-        if k not in ("accuracy", "macro avg", "weighted avg") and isinstance(k, str)
-    ]
-    f1_by_class.sort(key=lambda x: x[1])
-    peores_5 = f1_by_class[:5]
-    log_resultado(
-        "Cinco categorías con peor F1: " + ", ".join(f"{c}({f:.3f})" for c, f in peores_5)
-    )
-
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(pipeline_ml, MODELO_CLASIFICADOR_MERCADO)
-    log_info(f"Modelo guardado en {MODELO_CLASIFICADOR_MERCADO}")
-
-    # 1.6 Predecir CATEGORIA_FINAL para los sin categoría
-    mask_sin_cat = df_base["FUENTE_CATEGORIA"].isna()
-    if mask_sin_cat.any():
-        X_pred_text = df_programas.loc[mask_sin_cat, "_texto_ml_norm"].astype(str)
-        preds = pipeline_ml.predict(X_pred_text)
-        df_base.loc[mask_sin_cat, "CATEGORIA_FINAL"] = preds
-        df_base.loc[mask_sin_cat, "FUENTE_CATEGORIA"] = "PREDICCION_ML"
-
-    # 1.6b Probabilidades calibradas y bandera de revisión
+    # 1.5 Cascada de clasificación: SNIES (ya hecho) → Match nombre → KNN char_wb
     if "PROBABILIDAD" not in df_base.columns:
         df_base["PROBABILIDAD"] = pd.NA
-    df_base["REQUIERE_REVISION"] = False
+    if "REQUIERE_REVISION" not in df_base.columns:
+        df_base["REQUIERE_REVISION"] = False
+    df_base["REQUIERE_REVISION"] = df_base["REQUIERE_REVISION"].fillna(False)
 
-    mask_prediccion = df_base["FUENTE_CATEGORIA"] == "PREDICCION_ML"
-    if mask_prediccion.any():
-        X_pred_text = df_programas.loc[mask_prediccion, "_texto_ml_norm"].astype(str)
-        proba_matrix = pipeline_ml.predict_proba(X_pred_text)
-        max_proba = proba_matrix.max(axis=1)
-        df_base.loc[mask_prediccion, "PROBABILIDAD"] = (
-            pd.Series(max_proba, index=df_base.index[mask_prediccion]).round(4)
+    # Capa 2 — Match exacto por nombre normalizado (100% certeza)
+    df_referente["_nombre_base"] = df_referente["NOMBRE_DEL_PROGRAMA"].apply(_normalizar_nombre_programa)
+    df_nombre_candidates = df_referente.dropna(subset=["_nombre_base", "CATEGORIA_FINAL"])
+    df_nombre_candidates = df_nombre_candidates[
+        df_nombre_candidates["_nombre_base"].astype(str).str.len() > 0
+    ]
+    df_nombre_mode = (
+        df_nombre_candidates.groupby("_nombre_base")["CATEGORIA_FINAL"]
+        .agg(lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0])
+    )
+    _dict_nombre_base = df_nombre_mode.to_dict()
+
+    mask_sin_cat = df_base["FUENTE_CATEGORIA"].isna()
+    if mask_sin_cat.any():
+        df_base.loc[mask_sin_cat, "_nombre_base"] = df_base.loc[mask_sin_cat, "NOMBRE_DEL_PROGRAMA"].apply(_normalizar_nombre_programa)
+        df_base.loc[mask_sin_cat, "_cat_nombre_base"] = df_base.loc[mask_sin_cat, "_nombre_base"].map(_dict_nombre_base)
+
+        mask_match = mask_sin_cat & df_base["_cat_nombre_base"].notna()
+        if mask_match.any():
+            df_base.loc[mask_match, "CATEGORIA_FINAL"] = df_base.loc[mask_match, "_cat_nombre_base"]
+            df_base.loc[mask_match, "FUENTE_CATEGORIA"] = "MATCH_NOMBRE"
+            df_base.loc[mask_match, "PROBABILIDAD"] = 1.0
+            df_base.loc[mask_match, "REQUIERE_REVISION"] = False
+
+    # Capa 3 — KNN con TF-IDF de caracteres (robusta a prefijos/ortografía)
+    mask_sin_cat_final = df_base["FUENTE_CATEGORIA"].isna()
+    if mask_sin_cat_final.any():
+        area_col = "ÁREA_DE_CONOCIMIENTO"
+        if area_col not in df_referente.columns:
+            df_referente[area_col] = ""
+        if area_col not in df_base.columns:
+            df_base[area_col] = ""
+
+        # Entrenar KNN solo con clases válidas.
+        # Si CATEGORIA_FINAL viene como NaN, al hacer astype(str) se convierte en la etiqueta literal "nan"
+        # y contaminaría el entrenamiento.
+        df_referente_knn = df_referente.dropna(subset=["CATEGORIA_FINAL"]).copy()
+        if "_nombre_base" not in df_referente_knn.columns:
+            df_referente_knn["_nombre_base"] = df_referente_knn["NOMBRE_DEL_PROGRAMA"].apply(_normalizar_nombre_programa)
+        df_referente_knn["_nombre_base"] = (
+            df_referente_knn["_nombre_base"].fillna("").astype(str).str.strip()
         )
+        df_referente_knn["CATEGORIA_FINAL"] = (
+            df_referente_knn["CATEGORIA_FINAL"].astype(str).str.strip()
+        )
+        mask_label_ok = (
+            df_referente_knn["CATEGORIA_FINAL"].str.len() > 0
+            & (df_referente_knn["CATEGORIA_FINAL"].str.lower() != "nan")
+        )
+        df_referente_knn = df_referente_knn.loc[mask_label_ok]
+        if df_referente_knn.empty:
+            msg = "[Fase 1] KNN: no hay registros válidos en df_referente para entrenar (CATEGORIA_FINAL vacío/NaN)."
+            log_error(msg)
+            raise ValueError(msg)
 
-        UMBRAL_REVISION = 0.70
-        prob_num = pd.to_numeric(df_base["PROBABILIDAD"], errors="coerce")
-        df_base.loc[
-            mask_prediccion & (prob_num < UMBRAL_REVISION),
-            "REQUIERE_REVISION",
-        ] = True
+        ref_name_base = df_referente_knn["_nombre_base"].fillna("").astype(str).str.strip()
+        ref_area = df_referente_knn[area_col].fillna("").astype(str).str.upper().str.strip()
+        ref_text = (ref_name_base + " " + ref_area).str.strip()
 
-        n_total_pred = int(mask_prediccion.sum())
-        n_revision = int(df_base["REQUIERE_REVISION"].sum())
+        vectorizer_knn = TfidfVectorizer(
+            ngram_range=(1, 3),
+            max_features=50_000,
+            sublinear_tf=True,
+            analyzer="char_wb",
+            min_df=1,
+            strip_accents="unicode",
+        )
+        X_ref_knn = vectorizer_knn.fit_transform(ref_text.astype(str))
+        y_ref_knn = df_referente_knn["CATEGORIA_FINAL"].values
+
+        knn_clf = KNeighborsClassifier(
+            n_neighbors=5,
+            metric="cosine",
+            algorithm="brute",
+            weights="distance",
+        )
+        knn_clf.fit(X_ref_knn, y_ref_knn)
+
+        # Persistir el clasificador para compatibilidad con tests/downstream.
+        # Aunque la predicción en cascada no requiera reutilizar el modelo,
+        # otras partes del sistema esperan que exista el artefacto.
+        try:
+            MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            joblib.dump(
+                {
+                    "vectorizer": vectorizer_knn,
+                    "knn": knn_clf,
+                    "version": "cascada_knn_char_wb_v1",
+                },
+                MODELO_CLASIFICADOR_MERCADO,
+            )
+            log_info(f"Modelo KNN (cascada) guardado en {MODELO_CLASIFICADOR_MERCADO}")
+        except Exception as e:
+            log_warning(f"No se pudo persistir MODELO_CLASIFICADOR_MERCADO: {e}")
+
+        base_subset = df_base.loc[mask_sin_cat_final]
+        base_name_base = base_subset["NOMBRE_DEL_PROGRAMA"].apply(_normalizar_nombre_programa).astype(str).str.strip()
+        base_area = base_subset[area_col].fillna("").astype(str).str.upper().str.strip()
+        base_text = (base_name_base + " " + base_area).str.strip()
+
+        X_pred = vectorizer_knn.transform(base_text.astype(str))
+        proba_matrix = knn_clf.predict_proba(X_pred)
+        preds = knn_clf.predict(X_pred)
+        max_proba = proba_matrix.max(axis=1)
+
+        df_base.loc[mask_sin_cat_final, "CATEGORIA_FINAL"] = preds
+        df_base.loc[mask_sin_cat_final, "FUENTE_CATEGORIA"] = "KNN_TFIDF"
+        df_base.loc[mask_sin_cat_final, "PROBABILIDAD"] = pd.Series(
+            max_proba, index=df_base.index[mask_sin_cat_final]
+        ).round(4)
+        df_base.loc[mask_sin_cat_final, "REQUIERE_REVISION"] = pd.Series(
+            (max_proba < 0.50),
+            index=df_base.index[mask_sin_cat_final],
+        ).astype(bool)
+
+        n_total_pred = int(mask_sin_cat_final.sum())
+        n_revision = int((max_proba < 0.50).sum())
         n_confiables = n_total_pred - n_revision
         pct_revision = (n_revision / n_total_pred * 100) if n_total_pred > 0 else 0
 
-        log_info(f"Predicciones ML: {n_total_pred:,} programas")
-        log_info(f"  Confianza >= 0.70 (OK):               {n_confiables:,} ({100 - pct_revision:.1f}%)")
-        log_info(f"  Confianza < 0.70 (REQUIERE REVISIÓN): {n_revision:,} ({pct_revision:.1f}%)")
-        if pct_revision > 20:
-            log_warning(
-                f"Más del 20% de las predicciones tienen baja confianza ({pct_revision:.1f}%). "
-                f"Considerar revisar manualmente los {n_revision} programas marcados."
-            )
+        log_info(f"KNN_TFIDF: {n_total_pred:,} programas predichos")
+        log_info(f"  Confianza >= 0.50 (OK):               {n_confiables:,} ({100 - pct_revision:.1f}%)")
+        log_info(f"  Confianza < 0.50 (REQUIERE_REVISION): {n_revision:,} ({pct_revision:.1f}%)")
 
+        # Distribución de confianza
         bins = [0, 0.50, 0.60, 0.70, 0.80, 0.90, 1.01]
         labels = ["<0.50", "0.50-0.60", "0.60-0.70", "0.70-0.80", "0.80-0.90", ">=0.90"]
         proba_series = pd.Series(max_proba)
@@ -347,11 +377,19 @@ def run_fase1() -> pd.DataFrame:
             .value_counts()
             .sort_index()
         )
-        log_info("Distribución de confianza en predicciones ML:")
+        log_info("Distribución de confianza en KNN_TFIDF:")
         for rango, count in counts.items():
             pct = (count / len(proba_series) * 100) if len(proba_series) else 0
-            marker = " ← REVISIÓN REQUERIDA" if str(rango) in ["<0.50", "0.50-0.60", "0.60-0.70"] else ""
+            marker = " ← REVISIÓN REQUERIDA" if str(rango) == "<0.50" else ""
             log_info(f"  {rango}: {int(count):,} programas ({pct:.1f}%){marker}")
+    else:
+        # Si no hay programas sin categoría, igual aseguramos la existencia del artefacto.
+        try:
+            MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            joblib.dump({"version": "cascada_knn_char_wb_v1", "note": "no_layer3_needed"}, MODELO_CLASIFICADOR_MERCADO)
+            log_info(f"Modelo stub (capa 3 no necesaria) guardado en {MODELO_CLASIFICADOR_MERCADO}")
+        except Exception as e:
+            log_warning(f"No se pudo persistir MODELO_CLASIFICADOR_MERCADO (stub): {e}")
 
     # Para programas que cruzaron por SNIES: probabilidad = 1.0, no requieren revisión
     mask_cruce_snies = df_base["FUENTE_CATEGORIA"] == "CRUCE_SNIES"
@@ -360,7 +398,16 @@ def run_fase1() -> pd.DataFrame:
         df_base.loc[mask_cruce_snies, "REQUIERE_REVISION"] = False
 
     # Reservar 'MANUAL' para correcciones futuras (no se asigna aquí)
-    df_base = df_base.drop(columns=["_snies_norm", "_nombre_norm", "_texto_ml_norm"], errors="ignore")
+    df_base = df_base.drop(
+        columns=[
+            "_snies_norm",
+            "_nombre_norm",
+            "_texto_ml_norm",
+            "_nombre_base",
+            "_cat_nombre_base",
+        ],
+        errors="ignore",
+    )
 
     # 1.7 Guardar checkpoint parquet
     assert "PROBABILIDAD" in df_base.columns, "Falta columna PROBABILIDAD"
@@ -1176,10 +1223,10 @@ def run_fase5(agregado_df: pd.DataFrame | None) -> None:
 
                     log_info(
                         "Hoja 'revision_requerida' exportada: "
-                        f"{len(df_revision_export):,} programas con confianza ML < 0.70."
+                        f"{len(df_revision_export):,} programas con confianza ML < 0.50."
                     )
                 else:
-                    log_info("No hay programas que requieran revisión (todos >= 0.70 de confianza).")
+                    log_info("No hay programas que requieran revisión (todos >= 0.50 de confianza).")
             break
         except PermissionError:
             try:
