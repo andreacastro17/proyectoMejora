@@ -218,7 +218,19 @@ OLE_URLS = {"url": "", "selectors": {}}
 
 # Fase 4: scoring y comparación de costos
 BENCHMARK_COSTO = 13_400_000
-SMLMV = 1_300_000
+SMLMV = 1_300_000  # O el valor dinámico que tenga
+
+# ── Filtro de niveles de formación ──────────────────────────────────────────
+NIVELES_MERCADO: list[str] = [
+    "ESPECIALIZACIÓN",
+    "MAESTRÍA",
+    "ESPECIALIZACIÓN MÉDICO QUIRÚRGICA",
+    "ESPECIALIZACIÓN TECNOLÓGICA",
+    "ESPECIALIZACIÓN TÉCNICO PROFESIONAL",
+]
+
+# ── Análisis regional ────────────────────────────────────────────────────────
+UMBRAL_REGIONAL_MATRICULA: int = 50
 
 # Valores históricos conocidos del SMLMV por año calendario.
 # El año corriente usará obtener_smlmv_vigente(), salvo que se haga override en sesión.

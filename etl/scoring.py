@@ -18,22 +18,28 @@ SCORING_CONFIG = [
         "col": "suma_matricula_2024",
         "out": "score_matricula",
         "peso": 0.30,
-        # Escala macro (aprox: p25=221, p50=1292, p75=6725, p90=41623)
-        "thresholds": [(0, 1), (500, 2), (3000, 3), (20000, 4)],
+        "thresholds": [(0, 1), (100, 2), (600, 3), (5000, 4)],
         "inverse": False,
     },
     {
         "col": "participacion_2024",
         "out": "score_participacion",
         "peso": 0.15,
-        # Escala macro (aprox: p25=0.000044, p50=0.000257, p75=0.001338)
-        "thresholds": [(0, 1), (0.0002, 2), (0.001, 3), (0.005, 4)],
+        # Umbrales recalibrados para universo Esp+Maestría (total ~398k estudiantes).
+        # p25=0.000365, p50=0.001233, p75=0.003147, p95=0.013190
+        # Con estos umbrales: score5 ≈ 39% | score4 ≈ 31% | score3 ≈ 19% | score1-2 ≈ 11%
+        "thresholds": [(0, 1), (0.0001, 2), (0.0005, 3), (0.002, 4)],
         "inverse": False,
     },
     {
         "col": "AAGR_ROBUSTO",
         "out": "score_AAGR",
         "peso": 0.20,
+        # Usa AAGR_ROBUSTO en lugar de AAGR_suma para que:
+        # - Categorías BASE_PEQUENA usen CAGR (más estable con bases chicas)
+        # - Categorías CATEGORIA_NUEVA reciban NaN → score 1 (sin historia)
+        # - Categorías EXTINTA reciban -1.0 → score 1 (mercado desaparecido)
+        # AAGR_ROBUSTO se calcula en run_fase4_desde_sabana antes del scoring.
         "thresholds": [(0, 1), (0.04, 2), (0.19, 3), (0.30, 4)],
         "inverse": False,
     },
@@ -43,7 +49,7 @@ SCORING_CONFIG = [
         "peso": 0.15,
         "thresholds": [(2, 1), (3, 2), (4, 3), (6, 4)],
         "inverse": False,
-    },  # col se rellena en run_fase4 como salario_promedio / SMLMV
+    },
     {
         "col": "pct_no_matriculados_2024",
         "out": "score_pct_no_matriculados",
@@ -55,15 +61,13 @@ SCORING_CONFIG = [
         "col": "num_programas_2024",
         "out": "score_num_programas",
         "peso": 0.05,
-        # Escala macro (media ~48 programas por categoría)
-        "thresholds": [(10, 5), (30, 4), (80, 3), (150, 2)],
+        "thresholds": [(5, 5), (15, 4), (30, 3), (60, 2)],
         "inverse": True,
     },
     {
         "col": "distancia_costo_pct",
         "out": "score_costo",
         "peso": 0.05,
-        # Escala macro (distancia media ~ -16.9%)
         "thresholds": [(-50, 1), (-20, 2), (0, 3), (20, 4)],
         "inverse": False,
     },
