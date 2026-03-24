@@ -31,8 +31,10 @@ from etl.config import (
     HOJA_REFERENTE_CATEGORIAS,
     MODELO_CLASIFICADOR_MERCADO,
     MODELS_DIR,
+    NIVELES_MERCADO,
     RAW_HISTORIC_DIR,
     REF_DIR,
+    UMBRAL_REGIONAL_MATRICULA,
     get_smlmv_sesion,
 )
 from etl.exceptions_helpers import leer_excel_con_reintentos
@@ -1005,6 +1007,21 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
             "Elimine el archivo 'outputs/temp/sabana_consolidada.parquet' y vuelva a ejecutar la Fase 3 para limpiar los datos."
         )
 
+    # ── Filtro de niveles de formación ────────────────────────────────────────
+    col_nivel = "NIVEL_DE_FORMACIÓN"
+    if col_nivel in df.columns and NIVELES_MERCADO:
+        n_antes = len(df)
+        df = df[df[col_nivel].isin(NIVELES_MERCADO)].copy()
+        n_despues = len(df)
+        log_info(
+            f"[Fase 4] Filtro de niveles: {n_antes:,} → {n_despues:,} programas "
+            f"({n_antes - n_despues:,} excluidos). Niveles activos: {NIVELES_MERCADO}"
+        )
+        if n_despues == 0:
+            raise ValueError("El filtro NIVELES_MERCADO excluyó todos los programas.")
+    else:
+        log_info("[Fase 4] NIVEL_DE_FORMACIÓN no encontrada — procesando todos los niveles.")
+
     years = list(range(2019, 2025))
     grouped = df.groupby("CATEGORIA_FINAL", as_index=True)
 
@@ -1140,6 +1157,13 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         ag["pct_no_matriculados_2024"] = pct_raw.clip(lower=0, upper=1)
     else:
         ag["pct_no_matriculados_2024"] = np.nan
+    # Columna de transparencia: indica si el score_pct_no_matriculados
+    # se basa en datos reales de inscritos o en el valor de relleno (0.20).
+    # True = dato real del SNIES | False = imputado (no hay datos de inscritos).
+    if "inscritos_2024_suma" in ag.columns:
+        ag["tiene_inscritos_reales"] = ag["inscritos_2024_suma"].fillna(0) > 0
+    else:
+        ag["tiene_inscritos_reales"] = False
     if "inscritos_2023_suma" in ag.columns and "inscritos_2024_suma" in ag.columns:
         den_i = ag["inscritos_2023_suma"].replace(0, np.nan)
         ag["var_inscritos"] = (ag["inscritos_2024_suma"] - ag["inscritos_2023_suma"]) / den_i
@@ -1252,6 +1276,7 @@ _BLOQUES_TOTAL = [
     ("OLE", [
         "salario_promedio", "salario_proyectado_pesos_hoy", "inscritos_2023_suma", "inscritos_2024_suma", "inscritos_2023_prom", "inscritos_2024_prom",
         "pct_no_matriculados_2023", "pct_no_matriculados_2024", "var_inscritos",
+        "tiene_inscritos_reales",
     ]),
     ("OFERTA", [
         "num_programas_2019", "num_programas_2024", "programas_activos", "programas_inactivos", "programas_nuevos_3a",
@@ -1610,6 +1635,178 @@ def _escribir_resumen_ejecutivo(
         log_warning(f"[Fase 5] No se pudo generar hoja resumen_ejecutivo: {e}. Se continúa sin esa hoja.")
 
 
+# Agrupación de departamentos en regiones geográficas de Colombia
+_REGION_MAP: dict[str, str] = {
+    "BOGOTÁ D.C.":                    "Bogotá",
+    "ANTIOQUIA":                       "Eje Andino",
+    "CALDAS":                          "Eje Andino",
+    "RISARALDA":                       "Eje Andino",
+    "QUINDÍO":                         "Eje Andino",
+    "VALLE DEL CAUCA":                 "Pacífico",
+    "CAUCA":                           "Pacífico",
+    "NARIÑO":                          "Pacífico",
+    "CHOCÓ":                           "Pacífico",
+    "SANTANDER":                       "Nororiente",
+    "NORTE DE SANTANDER":              "Nororiente",
+    "BOYACÁ":                          "Nororiente",
+    "CUNDINAMARCA":                    "Nororiente",
+    "ATLÁNTICO":                       "Caribe",
+    "BOLÍVAR":                         "Caribe",
+    "MAGDALENA":                       "Caribe",
+    "CESAR":                           "Caribe",
+    "CÓRDOBA":                         "Caribe",
+    "SUCRE":                           "Caribe",
+    "LA GUAJIRA":                      "Caribe",
+    "ARCHIPIÉLAGO DE SAN ANDRÉS, PROVIDENCIA Y SANTA CATALINA": "Caribe",
+    "TOLIMA":                          "Centro-Sur",
+    "HUILA":                           "Centro-Sur",
+    "META":                            "Centro-Sur",
+    "CASANARE":                        "Llanos",
+    "ARAUCA":                          "Llanos",
+    "VICHADA":                         "Llanos",
+    "AMAZONAS":                        "Amazonía",
+    "CAQUETÁ":                         "Amazonía",
+    "PUTUMAYO":                        "Amazonía",
+    "GUAINÍA":                         "Amazonía",
+    "VAUPÉS":                          "Amazonía",
+}
+
+# Orden en que aparecen las regiones en el Excel (de mayor a menor mercado)
+_REGION_ORDEN: list[str] = [
+    "Bogotá", "Eje Andino", "Pacífico", "Nororiente",
+    "Caribe", "Centro-Sur", "Llanos", "Amazonía",
+]
+
+
+def run_analisis_regional(
+    sabana: pd.DataFrame,
+    ag_nacional: pd.DataFrame,
+) -> pd.DataFrame | None:
+    """
+    Análisis regional integrado (Opción B).
+
+    Para cada par (CATEGORIA_FINAL, DEPARTAMENTO_OFERTA_PROGRAMA) calcula las
+    mismas métricas de la Fase 4 restringidas a ese departamento y añade las
+    métricas nacionales como referencia para comparación directa.
+
+    Celdas con menos de UMBRAL_REGIONAL_MATRICULA matriculados en 2024 se
+    incluyen pero con DATOS_INSUFICIENTES=True y sin métricas de crecimiento.
+    Retorna None si la columna de departamento no existe en la sábana.
+    """
+    COL_DEPT = "DEPARTAMENTO_OFERTA_PROGRAMA"
+    if COL_DEPT not in sabana.columns:
+        log_warning("[Regional] Sin columna DEPARTAMENTO_OFERTA_PROGRAMA — hoja regional omitida.")
+        return None
+
+    col_nivel = "NIVEL_DE_FORMACIÓN"
+    if col_nivel in sabana.columns and NIVELES_MERCADO:
+        sabana = sabana[sabana[col_nivel].isin(NIVELES_MERCADO)].copy()
+
+    years = list(range(2019, 2025))
+    registros: list[dict] = []
+
+    for (cat, dept), grupo in sabana.groupby(["CATEGORIA_FINAL", COL_DEPT]):
+        mat_2024 = (
+            pd.to_numeric(grupo.get("matricula_2024", pd.Series(dtype=float)), errors="coerce")
+            .fillna(0)
+            .sum()
+        )
+
+        fila: dict = {
+            "REGION": _REGION_MAP.get(dept, "Otra"),
+            "DEPARTAMENTO": dept,
+            "CATEGORIA_FINAL": cat,
+            "num_programas_regional_2024": int(
+                (pd.to_numeric(grupo.get("matricula_2024", pd.Series(dtype=float)), errors="coerce")
+                 .fillna(0) > 0).sum()
+            ),
+            "suma_matricula_regional_2024": mat_2024,
+            "DATOS_INSUFICIENTES": mat_2024 < UMBRAL_REGIONAL_MATRICULA,
+        }
+
+        if mat_2024 < UMBRAL_REGIONAL_MATRICULA:
+            registros.append(fila)
+            continue
+
+        # Matrículas anuales
+        sumas: dict[int, float] = {}
+        for y in years:
+            col_m = f"matricula_{y}"
+            if col_m in grupo.columns:
+                sumas[y] = pd.to_numeric(grupo[col_m], errors="coerce").fillna(0).sum()
+                fila[f"suma_matricula_regional_{y}"] = sumas[y]
+
+        # Variaciones y AAGR regional
+        vars_suma: list[float] = []
+        for y in range(2020, 2025):
+            if y in sumas and (y - 1) in sumas and sumas[y - 1] > 0:
+                v = (sumas[y] - sumas[y - 1]) / sumas[y - 1]
+                fila[f"var_suma_regional_{y}"] = v
+                vars_suma.append(v)
+            else:
+                fila[f"var_suma_regional_{y}"] = np.nan
+
+        fila["AAGR_regional"] = float(np.mean(vars_suma)) if vars_suma else np.nan
+
+        # CAGR regional
+        m19 = sumas.get(2019, 0)
+        m24 = sumas.get(2024, 0)
+        fila["CAGR_regional"] = float((m24 / m19) ** (1 / 5) - 1) if m19 > 0 and m24 > 0 else np.nan
+
+        # Participación regional sobre el total nacional
+        total_nacional_2024 = (
+            ag_nacional["suma_matricula_2024"].sum()
+            if "suma_matricula_2024" in ag_nacional.columns else 0
+        )
+        fila["participacion_regional_2024"] = (m24 / total_nacional_2024) if total_nacional_2024 > 0 else np.nan
+
+        # Referencia nacional para comparación directa
+        fila_nac = ag_nacional[ag_nacional["CATEGORIA_FINAL"] == cat]
+        if len(fila_nac) == 1:
+            nac = fila_nac.iloc[0]
+            fila["suma_matricula_nacional_2024"] = nac.get("suma_matricula_2024", np.nan)
+            fila["AAGR_nacional"]                = nac.get("AAGR_suma", np.nan)
+            fila["calificacion_nacional"]         = nac.get("calificacion_final", np.nan)
+            mat_nac = nac.get("suma_matricula_2024", 0) or 0
+            fila["pct_mercado_regional"] = (m24 / mat_nac) if mat_nac > 0 else np.nan
+        else:
+            fila["suma_matricula_nacional_2024"] = np.nan
+            fila["AAGR_nacional"]                = np.nan
+            fila["calificacion_nacional"]         = np.nan
+            fila["pct_mercado_regional"]          = np.nan
+
+        # Salario y costo promedios del grupo regional
+        if "SALARIO_OLE" in grupo.columns:
+            sal = pd.to_numeric(grupo["SALARIO_OLE"], errors="coerce")
+            fila["salario_promedio_regional"] = float(sal.mean()) if sal.notna().any() else np.nan
+        if "COSTO_MATRÍCULA_ESTUD_NUEVOS" in grupo.columns:
+            costo = pd.to_numeric(grupo["COSTO_MATRÍCULA_ESTUD_NUEVOS"], errors="coerce")
+            fila["costo_promedio_regional"] = float(costo.mean()) if costo.notna().any() else np.nan
+
+        registros.append(fila)
+
+    if not registros:
+        log_warning("[Regional] No se generaron registros para el análisis regional.")
+        return None
+
+    df_regional = pd.DataFrame(registros)
+
+    # Ordenar: región → departamento → calificación nacional desc
+    region_order = {r: i for i, r in enumerate(_REGION_ORDEN)}
+    df_regional["_region_ord"] = df_regional["REGION"].map(region_order).fillna(99)
+    df_regional = df_regional.sort_values(
+        ["_region_ord", "DATOS_INSUFICIENTES", "DEPARTAMENTO", "calificacion_nacional"],
+        ascending=[True, True, True, False],
+    ).drop(columns=["_region_ord"]).reset_index(drop=True)
+
+    log_info(
+        f"[Regional] {len(df_regional):,} celdas generadas "
+        f"({df_regional['DATOS_INSUFICIENTES'].sum():,} con datos insuficientes, "
+        f"umbral={UMBRAL_REGIONAL_MATRICULA})."
+    )
+    return df_regional
+
+
 def run_fase5(agregado_df: pd.DataFrame | None) -> None:
     """
     Fase 5: Exportación formateada a Estudio_Mercado_Colombia.xlsx.
@@ -1624,6 +1821,19 @@ def run_fase5(agregado_df: pd.DataFrame | None) -> None:
         log_error("No existe sábana consolidada. Ejecutar Fase 3 antes.")
         return
     sabana = pd.read_parquet(sabana_path)
+    # ── Filtro de niveles ────────────────────────────────────────────────────
+    # Garantiza que programas_detalle, resumen_ejecutivo y revision_requerida
+    # sean coherentes con la hoja total: solo aparecen los niveles activos en
+    # NIVELES_MERCADO. Cuando se quieran incluir pregrados u otros niveles,
+    # basta con ampliar esa lista en config.py.
+    col_nivel = "NIVEL_DE_FORMACIÓN"
+    if col_nivel in sabana.columns and NIVELES_MERCADO:
+        n_antes = len(sabana)
+        sabana = sabana[sabana[col_nivel].isin(NIVELES_MERCADO)].copy()
+        log_info(
+            f"[Fase 5] Filtro de niveles: {n_antes:,} → {len(sabana):,} programas "
+            f"exportados a programas_detalle."
+        )
     if agregado_df is None or len(agregado_df) == 0:
         log_error("No hay DataFrame agregado. Ejecutar Fase 4 antes.")
         return
@@ -1681,6 +1891,148 @@ def run_fase5(agregado_df: pd.DataFrame | None) -> None:
                         log_warning("⚠ Fase 6 omitida — no se generó 'eafit_vs_mercado'.")
                 except Exception as e:
                     log_warning(f"[Fase 6] No se pudo generar hoja eafit_vs_mercado: {e}")
+
+                # ── Análisis regional: una hoja por región ───────────────────
+                try:
+                    df_regional = run_analisis_regional(sabana_final, total_final)
+                    if df_regional is not None and len(df_regional) > 0:
+                        from openpyxl.styles import Alignment, Font, PatternFill
+                        from openpyxl.utils import get_column_letter
+
+                        # Columnas a mostrar en cada tabla regional (en este orden)
+                        COLS_REGION = [
+                            "DEPARTAMENTO",
+                            "CATEGORIA_FINAL",
+                            "suma_matricula_regional_2024",
+                            "pct_mercado_regional",
+                            "AAGR_regional",
+                            "AAGR_nacional",
+                            "calificacion_nacional",
+                            "salario_promedio_regional",
+                            "num_programas_regional_2024",
+                        ]
+                        HEADERS = [
+                            "Departamento",
+                            "Categoría de mercado",
+                            "Matrícula regional 2024",
+                            "% del mercado nacional",
+                            "AAGR regional",
+                            "AAGR nacional",
+                            "Calificación nacional",
+                            "Salario promedio (SMLMV)",
+                            "N° programas",
+                        ]
+                        COL_WIDTHS = [22, 38, 24, 22, 16, 16, 22, 24, 14]
+
+                        # Colores de encabezado por región
+                        REGION_COLORS = {
+                            "Bogotá":      "1F4E79",
+                            "Eje Andino":  "2E75B6",
+                            "Pacífico":    "0070C0",
+                            "Nororiente":  "375623",
+                            "Caribe":      "7E6000",
+                            "Centro-Sur":  "843C0C",
+                            "Llanos":      "7030A0",
+                            "Amazonía":    "2F5496",
+                        }
+
+                        df_suf = df_regional[~df_regional["DATOS_INSUFICIENTES"]].copy()
+                        regiones = [r for r in _REGION_ORDEN if r in df_suf["REGION"].values]
+
+                        for region in regiones:
+                            df_r = df_suf[df_suf["REGION"] == region].copy()
+                            # Nombre de hoja: máx 31 chars, sin caracteres especiales
+                            sheet_name = f"Regional_{region}"[:31]
+                            cols_existentes = [c for c in COLS_REGION if c in df_r.columns]
+                            headers_existentes = [HEADERS[COLS_REGION.index(c)] for c in cols_existentes]
+                            widths_existentes  = [COL_WIDTHS[COLS_REGION.index(c)] for c in cols_existentes]
+
+                            df_export = df_r[cols_existentes].copy()
+
+                            # Formatear porcentajes y decimales como números (Excel los formatea)
+                            for c in ["pct_mercado_regional", "AAGR_regional", "AAGR_nacional"]:
+                                if c in df_export.columns:
+                                    df_export[c] = pd.to_numeric(df_export[c], errors="coerce")
+
+                            df_export.to_excel(writer, sheet_name=sheet_name, index=False, startrow=2)
+                            ws = writer.book[sheet_name]
+
+                            # ── Título de región (fila 1) ──────────────────────
+                            color_enc = REGION_COLORS.get(region, "1F4E79")
+                            ws.merge_cells(start_row=1, start_column=1,
+                                           end_row=1, end_column=len(cols_existentes))
+                            titulo_cell = ws.cell(row=1, column=1)
+                            titulo_cell.value = f"Región {region} — Mercado de Especializaciones y Maestrías"
+                            titulo_cell.font = Font(bold=True, size=13, color="FFFFFF")
+                            titulo_cell.fill = PatternFill(start_color=color_enc, end_color=color_enc, fill_type="solid")
+                            titulo_cell.alignment = Alignment(horizontal="left", vertical="center")
+                            ws.row_dimensions[1].height = 22
+
+                            # ── Encabezados de columna (fila 3, sobre los datos) ──
+                            for ci, header in enumerate(headers_existentes, start=1):
+                                cell = ws.cell(row=3, column=ci)
+                                cell.value = header
+                                cell.font = Font(bold=True, size=10, color="FFFFFF")
+                                cell.fill = PatternFill(start_color=color_enc, end_color=color_enc, fill_type="solid")
+                                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                            ws.row_dimensions[3].height = 30
+
+                            # ── Formato de datos ──────────────────────────────
+                            from openpyxl.styles import numbers as xl_numbers
+                            PCT_FMT  = "0.0%"
+                            NUM_FMT  = "#,##0"
+                            DEC_FMT  = "0.00"
+
+                            col_formats = {}
+                            for ci, col in enumerate(cols_existentes, start=1):
+                                if col in ("pct_mercado_regional", "AAGR_regional", "AAGR_nacional"):
+                                    col_formats[ci] = PCT_FMT
+                                elif col in ("suma_matricula_regional_2024", "num_programas_regional_2024",
+                                             "suma_matricula_nacional_2024"):
+                                    col_formats[ci] = NUM_FMT
+                                elif col in ("calificacion_nacional", "salario_promedio_regional"):
+                                    col_formats[ci] = DEC_FMT
+
+                            # Filas alternas + semáforo en calificacion_nacional
+                            cal_col_idx = cols_existentes.index("calificacion_nacional") + 1 if "calificacion_nacional" in cols_existentes else None
+                            VERDE_F  = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                            AMARI_F  = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+                            ROJO_F   = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                            GRIS_F   = PatternFill(start_color="F4F4F4", end_color="F4F4F4", fill_type="solid")
+
+                            for ri in range(4, ws.max_row + 1):  # datos empiezan en fila 4 (startrow=2 + 1 header)
+                                fila_fill = GRIS_F if (ri % 2 == 0) else None
+                                for ci in range(1, len(cols_existentes) + 1):
+                                    cell = ws.cell(row=ri, column=ci)
+                                    if col_formats.get(ci):
+                                        cell.number_format = col_formats[ci]
+                                    if fila_fill:
+                                        cell.fill = fila_fill
+                                # Semáforo en columna calificación_nacional
+                                if cal_col_idx:
+                                    cal_cell = ws.cell(row=ri, column=cal_col_idx)
+                                    try:
+                                        val = float(cal_cell.value) if cal_cell.value is not None else None
+                                        if val is not None:
+                                            cal_cell.fill = VERDE_F if val >= 4.0 else (AMARI_F if val >= 3.0 else ROJO_F)
+                                    except (TypeError, ValueError):
+                                        pass
+
+                            # ── Anchos de columna ─────────────────────────────
+                            for ci, w in enumerate(widths_existentes, start=1):
+                                ws.column_dimensions[get_column_letter(ci)].width = w
+
+                            # ── Freeze y autofiltro ───────────────────────────
+                            ws.freeze_panes = "A4"
+                            ws.auto_filter.ref = f"A3:{get_column_letter(len(cols_existentes))}3"
+
+                            log_info(f"  ✓ Hoja '{sheet_name}': {len(df_export):,} filas.")
+
+                        log_info(f"✓ {len(regiones)} hojas regionales creadas.")
+                    else:
+                        log_warning("⚠ Análisis regional omitido — sin datos.")
+                except Exception as e:
+                    log_warning(f"[Regional] No se pudo generar hojas regionales: {e}")
 
                 # Hoja informativa: programas con baja confianza del ML (REQUIERE_REVISION == True)
                 if "REQUIERE_REVISION" in sabana_final.columns:
