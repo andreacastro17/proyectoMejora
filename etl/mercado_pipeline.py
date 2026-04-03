@@ -2434,6 +2434,286 @@ def _aplicar_formato_total(ws, col_order: list[str]) -> None:
                 cell.number_format = calif_fmt
 
 
+def exportar_base_maestra_excel(ruta_salida: Path | None = None) -> Path:
+    """
+    Exporta un Excel formateado con los resultados de la Fase 1 (base_maestra.parquet).
+
+    Filtra solo Especializaciones y Maestrías (NIVELES_MERCADO).
+    Genera dos hojas:
+      - 'Programas_Categorizados': todos los programas filtrados con sus categorías.
+      - 'Revision_Requerida': solo los que tienen REQUIERE_REVISION=True (confianza KNN < 50%).
+
+    Aplica formato visual:
+      - Verde  : CRUCE_SNIES / MATCH_NOMBRE / MATCH_CATEGORIA  (certeza 100%)
+      - Amarillo: KNN_TFIDF con confianza >= 0.50
+      - Rojo   : KNN_TFIDF con confianza < 0.50 (requiere revisión)
+
+    Retorna la ruta del archivo generado.
+    """
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    if not CHECKPOINT_BASE_MAESTRA.exists():
+        raise FileNotFoundError(
+            "No existe base_maestra.parquet. Ejecuta primero la Fase 1 del pipeline de mercado."
+        )
+
+    log_info("[Exportar F1] Leyendo base_maestra.parquet...")
+    df = pd.read_parquet(CHECKPOINT_BASE_MAESTRA)
+
+    # ── Filtro de niveles ────────────────────────────────────────────────────
+    col_nivel = "NIVEL_DE_FORMACIÓN"
+    n_total = len(df)
+    if col_nivel in df.columns and NIVELES_MERCADO:
+        df = df[df[col_nivel].isin(NIVELES_MERCADO)].copy()
+        log_info(f"[Exportar F1] Filtro niveles: {n_total:,} → {len(df):,} programas (solo Esp+Maestría)")
+    else:
+        log_info("[Exportar F1] No se aplicó filtro de niveles (columna no disponible).")
+
+    if len(df) == 0:
+        raise ValueError("No hay programas de Especialización/Maestría en la base maestra.")
+
+    # ── Columnas a exportar (orden lógico) ───────────────────────────────────
+    COLS_ORDEN = [
+        "CÓDIGO_SNIES_DEL_PROGRAMA",
+        "NOMBRE_DEL_PROGRAMA",
+        "TITULO_OTORGADO",
+        "NIVEL_DE_FORMACIÓN",
+        "MODALIDAD",
+        "NOMBRE_INSTITUCIÓN",
+        "CARÁCTER_ACADÉMICO",
+        "SECTOR",
+        "DEPARTAMENTO_OFERTA_PROGRAMA",
+        "MUNICIPIO_OFERTA_PROGRAMA",
+        "ÁREA_DE_CONOCIMIENTO",
+        "NÚCLEO_BÁSICO_DEL_CONOCIMIENTO",
+        "ESTADO_PROGRAMA",
+        # Resultado de la clasificación
+        "CATEGORIA_FINAL",
+        "FUENTE_CATEGORIA",
+        "PROBABILIDAD",
+        "REQUIERE_REVISION",
+    ]
+    cols_export = [c for c in COLS_ORDEN if c in df.columns]
+    # Agregar columnas que no están en la lista pero sí en el df (al final)
+    extra = [c for c in df.columns if c not in cols_export and not c.startswith("_")]
+    df_export = df[cols_export + extra].copy()
+
+    # Limpiar columnas internas
+    cols_internas = [c for c in df_export.columns if c.startswith("_") or c == "schema_version"]
+    df_export = df_export.drop(columns=cols_internas, errors="ignore")
+
+    # ── Ruta de salida ───────────────────────────────────────────────────────
+    if ruta_salida is None:
+        from etl.config import OUTPUTS_DIR
+
+        ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M")
+        ruta_salida = OUTPUTS_DIR / f"Base_Maestra_F1_{ts}.xlsx"
+    ruta_salida.parent.mkdir(parents=True, exist_ok=True)
+
+    # ── Hoja de revisión requerida ───────────────────────────────────────────
+    col_rev = "REQUIERE_REVISION"
+    if col_rev in df_export.columns:
+        df_revision = df_export[
+            df_export[col_rev].astype(str).str.lower().isin(["true", "1", "yes", "sí"])
+        ].copy()
+    else:
+        df_revision = pd.DataFrame()
+
+    # ── Estilos ──────────────────────────────────────────────────────────────
+    AZUL = "000066"
+    VERDE_F = "C6EFCE"
+    AMARI_F = "FFF2CC"
+    ROJO_F = "FFC7CE"
+    BLANCO = "FFFFFF"
+    GRIS_ALT = "F5F5F5"
+
+    thin = Side(style="thin", color="CCCCCC")
+    borde = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def _estilo_header(cell):
+        cell.font = Font(bold=True, color="FFFFFF", size=9)
+        cell.fill = PatternFill(start_color=AZUL, end_color=AZUL, fill_type="solid")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = borde
+
+    def _color_fila(fuente: str, requiere: bool, _prob: float | None) -> str:
+        fuente_up = str(fuente).upper().strip()
+        if fuente_up in ("CRUCE_SNIES", "MATCH_NOMBRE", "MATCH_CATEGORIA"):
+            return VERDE_F
+        if requiere:
+            return ROJO_F
+        if fuente_up == "KNN_TFIDF":
+            return AMARI_F
+        return BLANCO
+
+    def _escribir_hoja(ws, df_h: pd.DataFrame, titulo: str) -> None:
+        """Escribe un DataFrame en la hoja ws con encabezados y colores."""
+        # Fila 1: título
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(df_h.columns))
+        cell_t = ws.cell(row=1, column=1, value=titulo)
+        cell_t.font = Font(bold=True, color="FFFFFF", size=12)
+        cell_t.fill = PatternFill(start_color=AZUL, end_color=AZUL, fill_type="solid")
+        cell_t.alignment = Alignment(horizontal="left", vertical="center")
+        ws.row_dimensions[1].height = 22
+
+        # Fila 2: encabezados de columna
+        for ci, col in enumerate(df_h.columns, start=1):
+            cell = ws.cell(row=2, column=ci, value=col)
+            _estilo_header(cell)
+        ws.row_dimensions[2].height = 30
+
+        # Anchos de columna
+        ANCHOS = {
+            "CÓDIGO_SNIES_DEL_PROGRAMA": 18,
+            "NOMBRE_DEL_PROGRAMA": 46,
+            "TITULO_OTORGADO": 36,
+            "NIVEL_DE_FORMACIÓN": 24,
+            "MODALIDAD": 14,
+            "NOMBRE_INSTITUCIÓN": 34,
+            "CARÁCTER_ACADÉMICO": 18,
+            "SECTOR": 12,
+            "DEPARTAMENTO_OFERTA_PROGRAMA": 22,
+            "MUNICIPIO_OFERTA_PROGRAMA": 22,
+            "ÁREA_DE_CONOCIMIENTO": 24,
+            "NÚCLEO_BÁSICO_DEL_CONOCIMIENTO": 28,
+            "ESTADO_PROGRAMA": 14,
+            "CATEGORIA_FINAL": 32,
+            "FUENTE_CATEGORIA": 18,
+            "PROBABILIDAD": 14,
+            "REQUIERE_REVISION": 16,
+        }
+        for ci, col in enumerate(df_h.columns, start=1):
+            ws.column_dimensions[get_column_letter(ci)].width = ANCHOS.get(col, 16)
+
+        # Filas de datos
+        col_fuente = list(df_h.columns).index("FUENTE_CATEGORIA") if "FUENTE_CATEGORIA" in df_h.columns else None
+        col_rev_i = list(df_h.columns).index("REQUIERE_REVISION") if "REQUIERE_REVISION" in df_h.columns else None
+        col_prob_i = list(df_h.columns).index("PROBABILIDAD") if "PROBABILIDAD" in df_h.columns else None
+
+        for ri, (_, row) in enumerate(df_h.iterrows(), start=3):
+            fuente = str(row.iloc[col_fuente]) if col_fuente is not None else ""
+            req_val = str(row.iloc[col_rev_i]).lower() in ("true", "1", "yes", "sí") if col_rev_i is not None else False
+            try:
+                prob_f = float(row.iloc[col_prob_i]) if col_prob_i is not None and pd.notna(row.iloc[col_prob_i]) else None
+            except (TypeError, ValueError):
+                prob_f = None
+
+            bg = _color_fila(fuente, req_val, prob_f)
+            fill = (
+                PatternFill(start_color=bg, end_color=bg, fill_type="solid")
+                if bg != BLANCO
+                else (
+                    PatternFill(start_color=GRIS_ALT, end_color=GRIS_ALT, fill_type="solid")
+                    if ri % 2 == 0
+                    else None
+                )
+            )
+
+            for ci, val in enumerate(row, start=1):
+                cell = ws.cell(row=ri, column=ci)
+                # Serializar valores Python nativos
+                try:
+                    import math as _math
+
+                    if val is None or (isinstance(val, float) and (_math.isnan(val) or _math.isinf(val))):
+                        cell.value = ""
+                    elif hasattr(val, "item"):
+                        # numpy scalar → Python nativo
+                        native = val.item()
+                        cell.value = "Sí" if isinstance(native, bool) and native else (
+                            "No" if isinstance(native, bool) else native
+                        )
+                    elif isinstance(val, bool):
+                        cell.value = "Sí" if val else "No"
+                    elif pd.isna(val):
+                        cell.value = ""
+                    else:
+                        cell.value = val
+                except Exception:
+                    cell.value = str(val) if val is not None else ""
+                if fill:
+                    cell.fill = fill
+                cell.border = borde
+                cell.alignment = Alignment(vertical="center", wrap_text=False)
+
+                # Formato número para PROBABILIDAD
+                col_name = df_h.columns[ci - 1]
+                if col_name == "PROBABILIDAD" and isinstance(cell.value, (int, float)):
+                    cell.number_format = "0.0%"
+
+        # Freeze + autofiltro
+        ws.freeze_panes = "A3"
+        ws.auto_filter.ref = f"A2:{get_column_letter(len(df_h.columns))}2"
+
+    # ── Escribir Excel con openpyxl puro (sin ExcelWriter para evitar corrupción) ──
+    import openpyxl as _opxl
+
+    wb = _opxl.Workbook()
+
+    # Hoja principal
+    ws_main = wb.active
+    ws_main.title = "Programas_Categorizados"
+    _escribir_hoja(
+        ws_main,
+        df_export,
+        f"Programas Esp+Maestría con Categorías de Mercado — {len(df_export):,} programas",
+    )
+
+    # Hoja revisión requerida
+    if len(df_revision) > 0:
+        ws_rev = wb.create_sheet("Revision_Requerida")
+        _escribir_hoja(
+            ws_rev,
+            df_revision,
+            f"Programas que Requieren Revisión Manual — {len(df_revision):,} registros (confianza KNN < 50%)",
+        )
+
+    # Hoja leyenda
+    ws_ley = wb.create_sheet("Leyenda")
+    leyenda = [
+        ("Color", "Fuente de categoría", "Significado"),
+        ("🟢 Verde", "CRUCE_SNIES", "Categoría por cruce exacto de código SNIES. Certeza 100%."),
+        ("🟢 Verde", "MATCH_NOMBRE", "Categoría por coincidencia exacta de nombre. Certeza 100%."),
+        ("🟢 Verde", "MATCH_CATEGORIA", "Nombre coincide directamente con una categoría. Certeza 100%."),
+        ("🟡 Amarillo", "KNN_TFIDF (≥50%)", "Categoría por KNN+TF-IDF. Confianza ≥ 50%. Aceptable."),
+        ("🔴 Rojo", "KNN_TFIDF (<50%)", "Categoría por KNN. Confianza < 50%. Requiere revisión manual."),
+    ]
+    bg_map_ley = {"🟢 Verde": "C6EFCE", "🟡 Amarillo": "FFF2CC", "🔴 Rojo": "FFC7CE"}
+    for ri, (col_ley, fuente_ley, sig_ley) in enumerate(leyenda, start=1):
+        for ci_ley, val_ley in enumerate([col_ley, fuente_ley, sig_ley], start=1):
+            cell_ley = ws_ley.cell(row=ri, column=ci_ley, value=val_ley)
+            if ri == 1:
+                cell_ley.font = Font(bold=True, color="FFFFFF")
+                cell_ley.fill = PatternFill(start_color=AZUL, end_color=AZUL, fill_type="solid")
+            else:
+                bg_ley = bg_map_ley.get(col_ley, BLANCO)
+                if bg_ley != BLANCO:
+                    cell_ley.fill = PatternFill(start_color=bg_ley, end_color=bg_ley, fill_type="solid")
+    ws_ley.column_dimensions["A"].width = 16
+    ws_ley.column_dimensions["B"].width = 22
+    ws_ley.column_dimensions["C"].width = 70
+
+    wb.save(str(ruta_salida))
+
+    n_verdes = (
+        int(df_export["FUENTE_CATEGORIA"].astype(str).str.upper().isin(["CRUCE_SNIES", "MATCH_NOMBRE", "MATCH_CATEGORIA"]).sum())
+        if "FUENTE_CATEGORIA" in df_export.columns
+        else 0
+    )
+    n_knn = (
+        int(df_export["FUENTE_CATEGORIA"].astype(str).str.upper().eq("KNN_TFIDF").sum())
+        if "FUENTE_CATEGORIA" in df_export.columns
+        else 0
+    )
+    n_rev = len(df_revision)
+    log_resultado(f"[Exportar F1] Excel generado: {ruta_salida.name}")
+    log_resultado(f"  Programas exportados : {len(df_export):,}")
+    log_resultado(f"  Certeza 100%         : {n_verdes:,}")
+    log_resultado(f"  KNN_TFIDF            : {n_knn:,}  (de los cuales {n_rev:,} requieren revisión)")
+    return ruta_salida
+
+
 def run_pipeline(
     ask_reuse_checkpoint: Callable[[str], bool] | None = None,
 ) -> None:

@@ -217,6 +217,7 @@ SNIES_URLS = {
 OLE_URLS = {"url": "", "selectors": {}}
 
 # Fase 4: scoring y comparación de costos
+# Se inicializa con el valor por defecto; get_benchmark_costo() lo sobreescribe desde config.json
 BENCHMARK_COSTO = 13_400_000
 SMLMV = 1_300_000  # O el valor dinámico que tenga
 
@@ -239,6 +240,14 @@ SMLMV_POR_ANO: dict[int, int] = {
     2024: 1_300_000,
     2025: 1_423_500,
 }
+
+# Sobreescribir BENCHMARK_COSTO con el valor guardado en config.json si existe
+try:
+    _cfg_bench = _load_config().get("BENCHMARK_COSTO")
+    if isinstance(_cfg_bench, (int, float)) and _cfg_bench > 0:
+        BENCHMARK_COSTO = float(_cfg_bench)
+except Exception:
+    pass
 
 def obtener_smlmv_vigente() -> int:
     """
@@ -548,6 +557,42 @@ def set_last_success(iso_timestamp: str, duration_minutes: float) -> bool:
     c["last_success_iso"] = iso_timestamp
     c["last_success_duration_min"] = round(duration_minutes, 2)
     return _save_config(c)
+
+
+def get_benchmark_costo() -> float:
+    """
+    Obtiene el benchmark de costo desde config.json.
+    Si no existe, retorna el valor por defecto (13.400.000).
+    """
+    try:
+        c = _load_config()
+        val = c.get("BENCHMARK_COSTO")
+        if isinstance(val, (int, float)) and val > 0:
+            return float(val)
+    except Exception:
+        pass
+    return 13_400_000.0
+
+
+def set_benchmark_costo(valor: float) -> bool:
+    """
+    Persiste el benchmark de costo en config.json (clave 'BENCHMARK_COSTO').
+    También actualiza la variable global BENCHMARK_COSTO en este módulo.
+
+    Returns:
+        True si se guardó correctamente, False en caso contrario.
+    """
+    global BENCHMARK_COSTO
+    try:
+        c = _load_config()
+        c["BENCHMARK_COSTO"] = float(valor)
+        ok = _save_config(c)
+        if ok:
+            BENCHMARK_COSTO = float(valor)
+        return ok
+    except Exception as e:
+        print(f"[ERROR] No se pudo guardar BENCHMARK_COSTO en config.json: {e}")
+        return False
 
 # ========= INFORMACIÓN DE DEBUG =========
 def print_config_info() -> None:

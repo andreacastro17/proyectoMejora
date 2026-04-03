@@ -37,6 +37,8 @@ from etl.config import (
     MODELS_DIR,
     get_smlmv_sesion,
     set_smlmv_sesion,
+    get_benchmark_costo,
+    set_benchmark_costo,
 )
 # HISTORIC_DIR se importa dentro de run_pipeline después de set_base_dir para asegurar que esté inicializado
 
@@ -832,6 +834,17 @@ class ManualReviewPage(ttk.Frame):
         self.search_entry = ttk.Entry(row3, textvariable=self.search_var, width=22)
         self.search_entry.pack(side=tk.LEFT)
         ttk.Button(row3, text="Buscar", command=self._apply_filter).pack(side=tk.LEFT, padx=6)
+        ttk.Label(row3, text="Nivel:").pack(side=tk.LEFT, padx=(14, 6))
+        self.nivel_filter_var = tk.StringVar(value="TODOS")
+        self.nivel_filter_combo = ttk.Combobox(
+            row3,
+            textvariable=self.nivel_filter_var,
+            state="readonly",
+            values=["TODOS", "ESPECIALIZACIÓN", "MAESTRÍA", "PREGRADO", "TÉCNICO", "TECNOLÓGICO", "DOCTORADO"],
+            width=20,
+        )
+        self.nivel_filter_combo.pack(side=tk.LEFT)
+        self.nivel_filter_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
 
         pager = ttk.Frame(self, padding=(10, 0, 10, 10))
         pager.pack(fill=tk.X)
@@ -1253,6 +1266,13 @@ class ManualReviewPage(ttk.Frame):
 
             self.df_view = df_full[self.all_columns].copy()  # Guardar todas las columnas en df_view
             self._log(f"Cargado: {self.file_path.name} ({len(self.df_view)} filas, {len(self.all_columns)} columnas disponibles).")
+            # Actualizar valores del combobox de nivel con los niveles reales del archivo
+            if "NIVEL_DE_FORMACIÓN" in df_full.columns:
+                niveles_reales = sorted(
+                    df_full["NIVEL_DE_FORMACIÓN"].dropna().astype(str).str.upper().unique().tolist()
+                )
+                if hasattr(self, 'nivel_filter_combo'):
+                    self.nivel_filter_combo['values'] = ["TODOS"] + niveles_reales
             self._apply_filter()
         except Exception as exc:
             messagebox.showerror("Error", f"No se pudo leer el Excel: {exc}", parent=self)
@@ -1365,6 +1385,17 @@ class ManualReviewPage(ttk.Frame):
             else:
                 self._log("⚠️ Advertencia: No se encontró la columna ES_REFERENTE. Mostrando todos los programas.")
         # mode == "TODOS" no filtra nada
+
+        # Aplicar filtro por nivel de formación
+        nivel = getattr(self, 'nivel_filter_var', None)
+        if nivel:
+            nivel_sel = nivel.get().strip()
+            if nivel_sel != "TODOS" and "NIVEL_DE_FORMACIÓN" in df.columns:
+                df = df[
+                    df["NIVEL_DE_FORMACIÓN"].astype(str)
+                    .str.upper()
+                    .str.contains(nivel_sel.upper(), na=False)
+                ]
 
         # Aplicar búsqueda de texto
         q = (self.search_var.get() or "").strip().lower()
@@ -4390,17 +4421,67 @@ class MercadoPipelinePage(ttk.Frame):
         self._check_checkpoints()
 
     def _setup_ui(self):
-        main_frame = ttk.Frame(self, padding=20, style="Page.TFrame")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # ── Contenedor raíz: header fijo arriba + área scrollable abajo ──────
+        root_frame = ttk.Frame(self, style="Page.TFrame")
+        root_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Header
-        header = ttk.Frame(main_frame, style="Page.TFrame")
-        header.pack(fill=tk.X, pady=(0, 20))
+        # Header fijo (NO entra al scroll)
+        header = ttk.Frame(root_frame, padding=(20, 14, 20, 0), style="Page.TFrame")
+        header.pack(fill=tk.X)
         ttk.Label(header, text="📊 Estudio de Mercado Colombia", style="Header.TLabel").pack(side=tk.LEFT)
         if self.on_back:
-            ttk.Button(header, text="← Volver al menú", command=lambda: self.on_back() if self.on_back else None, style="Back.TButton").pack(side=tk.RIGHT)
+            ttk.Button(
+                header, text="← Volver al menú",
+                command=lambda: self.on_back() if self.on_back else None,
+                style="Back.TButton",
+            ).pack(side=tk.RIGHT)
 
-        # Card: Checkpoints
+        # ── Canvas + scrollbar vertical ──────────────────────────────────────
+        canvas_outer = ttk.Frame(root_frame, style="Page.TFrame")
+        canvas_outer.pack(fill=tk.BOTH, expand=True)
+
+        self._scroll_canvas = tk.Canvas(
+            canvas_outer, highlightthickness=0,
+            bg=EAFIT["bg"],
+        )
+        vscroll = ttk.Scrollbar(canvas_outer, orient="vertical", command=self._scroll_canvas.yview)
+        self._scroll_canvas.configure(yscrollcommand=vscroll.set)
+
+        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Frame interno que contiene todos los cards
+        main_frame = ttk.Frame(self._scroll_canvas, padding=(20, 10, 20, 20), style="Page.TFrame")
+        self._canvas_window = self._scroll_canvas.create_window(
+            (0, 0), window=main_frame, anchor="nw"
+        )
+
+        # Ajustar ancho del frame interno al canvas
+        def _on_canvas_configure(event):
+            self._scroll_canvas.itemconfig(self._canvas_window, width=event.width)
+
+        def _on_frame_configure(event):
+            self._scroll_canvas.configure(scrollregion=self._scroll_canvas.bbox("all"))
+            # Mostrar/ocultar scrollbar según necesidad
+            bbox = self._scroll_canvas.bbox("all")
+            if bbox:
+                content_h = bbox[3] - bbox[1]
+                canvas_h  = self._scroll_canvas.winfo_height()
+                if content_h > canvas_h and canvas_h > 1:
+                    vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+                else:
+                    vscroll.pack_forget()
+
+        self._scroll_canvas.bind("<Configure>", _on_canvas_configure)
+        main_frame.bind("<Configure>", _on_frame_configure)
+
+        # Mousewheel
+        def _on_mousewheel(event):
+            self._scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        self._scroll_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # ── Card: Checkpoints ────────────────────────────────────────────────
         cp_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
         cp_card.pack(fill=tk.X, pady=(0, 14))
         ttk.Label(cp_card, text="⚡ Checkpoints disponibles", style="SectionTitle.TLabel").pack(anchor="w")
@@ -4423,22 +4504,18 @@ class MercadoPipelinePage(ttk.Frame):
         self.cb_sabana.pack(anchor="w", pady=(0, 0))
         ttk.Label(cp_card, text="Actívalo si ya ejecutaste la fase anteriormente y no hay cambios.", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
 
-        # Card: SMLMV vigente
+        # ── Card: SMLMV vigente ──────────────────────────────────────────────
         smlmv_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
         smlmv_card.pack(fill=tk.X, pady=(0, 14))
         ttk.Label(smlmv_card, text="💰 SMLMV vigente", style="SectionTitle.TLabel").pack(anchor="w")
         current_smlmv = get_smlmv_sesion()
         formatted_smlmv = f"{current_smlmv:,.0f}".replace(",", ".")
-        self.smlmv_label = ttk.Label(
-            smlmv_card,
-            text=f"Valor actual: ${formatted_smlmv}",
-            style="Muted.TLabel",
-        )
+        self.smlmv_label = ttk.Label(smlmv_card, text=f"Valor actual: ${formatted_smlmv}", style="Muted.TLabel")
         self.smlmv_label.pack(anchor="w", pady=(4, 4))
         entry_row = ttk.Frame(smlmv_card, style="Card.TFrame")
         entry_row.pack(fill=tk.X, pady=(0, 0))
         ttk.Label(entry_row, text="Nuevo valor:", style="Muted.TLabel").pack(side=tk.LEFT)
-        self.smlmv_var = tk.StringVar(value=str(current_smlmv))
+        self.smlmv_var = tk.StringVar(value=str(int(current_smlmv)))
         vcmd = (self.register(self._validate_digits), "%P")
         self.smlmv_entry = ttk.Entry(entry_row, textvariable=self.smlmv_var, width=12, validate="key", validatecommand=vcmd)
         self.smlmv_entry.pack(side=tk.LEFT, padx=(6, 6))
@@ -4449,7 +4526,37 @@ class MercadoPipelinePage(ttk.Frame):
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(4, 0))
 
-        # Card: Ejecución
+        # ── Card: Benchmark de costo ─────────────────────────────────────────
+        # (solo se crea si get_benchmark_costo está disponible)
+        try:
+            from etl.config import get_benchmark_costo, set_benchmark_costo as _set_bench
+            _bench_available = True
+        except ImportError:
+            _bench_available = False
+
+        if _bench_available:
+            bench_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
+            bench_card.pack(fill=tk.X, pady=(0, 14))
+            ttk.Label(bench_card, text="🏷️ Benchmark de costo de matrícula", style="SectionTitle.TLabel").pack(anchor="w")
+            current_bench = get_benchmark_costo()
+            formatted_bench = f"{current_bench:,.0f}".replace(",", ".")
+            self.bench_label = ttk.Label(bench_card, text=f"Valor actual: ${formatted_bench}", style="Muted.TLabel")
+            self.bench_label.pack(anchor="w", pady=(4, 4))
+            bench_entry_row = ttk.Frame(bench_card, style="Card.TFrame")
+            bench_entry_row.pack(fill=tk.X, pady=(0, 0))
+            ttk.Label(bench_entry_row, text="Nuevo valor ($):", style="Muted.TLabel").pack(side=tk.LEFT)
+            self.bench_var = tk.StringVar(value=str(int(current_bench)))
+            vcmd_bench = (self.register(self._validate_digits), "%P")
+            self.bench_entry = ttk.Entry(bench_entry_row, textvariable=self.bench_var, width=14, validate="key", validatecommand=vcmd_bench)
+            self.bench_entry.pack(side=tk.LEFT, padx=(6, 6))
+            ttk.Button(bench_entry_row, text="Actualizar", command=self._update_benchmark, style="Secondary.TButton").pack(side=tk.LEFT)
+            ttk.Label(
+                bench_card,
+                text="Precio de referencia para comparar el costo promedio de cada categoría. Se guarda en config.json y persiste entre sesiones.",
+                style="Muted.TLabel",
+            ).pack(anchor="w", pady=(4, 0))
+
+        # ── Card: Ejecución ──────────────────────────────────────────────────
         run_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
         run_card.pack(fill=tk.X, pady=(0, 14))
         ttk.Label(run_card, text="🚀 Ejecutar", style="SectionTitle.TLabel").pack(anchor="w")
@@ -4466,20 +4573,34 @@ class MercadoPipelinePage(ttk.Frame):
         self.btn_cancel.pack(side=tk.LEFT, padx=(10, 0))
         self.btn_resultado = ttk.Button(btn_frame, text="📂 Ver resultado", command=self._open_resultado, state=tk.DISABLED, style="Secondary.TButton")
         self.btn_resultado.pack(side=tk.LEFT, padx=(10, 0))
+        self.btn_ver_programas = ttk.Button(
+            btn_frame,
+            text="📋 Ver Programas con Categorías",
+            command=self._open_programas_categorias,
+            style="Secondary.TButton",
+        )
+        self.btn_ver_programas.pack(side=tk.LEFT, padx=(10, 0))
+        self.btn_exportar_f1 = ttk.Button(
+            btn_frame,
+            text="⬇️ Exportar Fase 1 a Excel",
+            command=self._exportar_fase1_excel,
+            style="Secondary.TButton",
+        )
+        self.btn_exportar_f1.pack(side=tk.LEFT, padx=(10, 0))
         self.progress = ttk.Progressbar(run_card, mode="determinate", maximum=5, value=0)
         self.progress.pack(fill=tk.X, pady=(12, 0))
         self.progress_label = ttk.Label(btn_frame, text="Progreso: listo", style="Status.TLabel")
         self.progress_label.pack(side=tk.LEFT, padx=(16, 0))
 
-        # Card: Logs
+        # ── Card: Logs ───────────────────────────────────────────────────────
         log_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
-        log_card.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        log_card.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(log_card, text="📋 Progreso detallado", style="SectionTitle.TLabel").pack(anchor="w")
         scrollbar = ttk.Scrollbar(log_card)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.messages_text = tk.Text(
             log_card,
-            height=12,
+            height=10,
             wrap=tk.WORD,
             yscrollcommand=scrollbar.set,
             state=tk.DISABLED,
@@ -4489,6 +4610,227 @@ class MercadoPipelinePage(ttk.Frame):
         )
         self.messages_text.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.messages_text.yview)
+
+    def _open_programas_categorias(self):
+        """Abre una ventana con Programas.xlsx mostrando CATEGORIA_FINAL y fuente ML."""
+        from etl.config import ARCHIVO_PROGRAMAS
+        from etl.exceptions_helpers import leer_excel_con_reintentos
+
+        if not ARCHIVO_PROGRAMAS.exists():
+            safe_messagebox_error(
+                "Sin datos",
+                "No existe outputs/Programas.xlsx.\nEjecuta primero el pipeline principal (análisis SNIES).",
+                parent=self.root,
+            )
+            return
+
+        try:
+            df = leer_excel_con_reintentos(ARCHIVO_PROGRAMAS, sheet_name="Programas")
+        except Exception as exc:
+            safe_messagebox_error("Error", f"No se pudo leer Programas.xlsx:\n{exc}", parent=self.root)
+            return
+
+        # Ventana emergente
+        win = tk.Toplevel(self.root)
+        win.title("Programas con Categorías de Mercado")
+        win.geometry("1200x650")
+        win.minsize(800, 400)
+
+        # ── Header ──────────────────────────────────────────────────────────
+        hdr = ttk.Frame(win, padding=(12, 10), style="Page.TFrame")
+        hdr.pack(fill=tk.X)
+        ttk.Label(hdr, text="📋 Programas con Categorías de Mercado", style="Header.TLabel").pack(side=tk.LEFT)
+        ttk.Label(
+            hdr,
+            text=f"{len(df):,} programas  |  {ARCHIVO_PROGRAMAS.name}",
+            foreground=EAFIT["text_muted"],
+            font=("Segoe UI", 10),
+        ).pack(side=tk.LEFT, padx=(16, 0))
+
+        # ── Filtros ──────────────────────────────────────────────────────────
+        flt = ttk.Frame(win, padding=(12, 6), style="Page.TFrame")
+        flt.pack(fill=tk.X)
+
+        ttk.Label(flt, text="Fuente:").pack(side=tk.LEFT, padx=(0, 6))
+        fuente_var = tk.StringVar(value="TODAS")
+        fuentes_disponibles = ["TODAS"]
+        if "FUENTE_CATEGORIA" in df.columns:
+            fuentes_disponibles += sorted(df["FUENTE_CATEGORIA"].dropna().astype(str).unique().tolist())
+        ttk.Combobox(flt, textvariable=fuente_var, values=fuentes_disponibles, state="readonly", width=16).pack(side=tk.LEFT)
+
+        ttk.Label(flt, text="Nivel:", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(12, 6))
+        nivel_var = tk.StringVar(value="TODOS")
+        niveles_disp = ["TODOS"]
+        if "NIVEL_DE_FORMACIÓN" in df.columns:
+            niveles_disp += sorted(df["NIVEL_DE_FORMACIÓN"].dropna().astype(str).unique().tolist())
+        ttk.Combobox(flt, textvariable=nivel_var, values=niveles_disp, state="readonly", width=22).pack(side=tk.LEFT)
+
+        ttk.Label(flt, text="Buscar:", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(12, 6))
+        buscar_var = tk.StringVar()
+        ttk.Entry(flt, textvariable=buscar_var, width=26).pack(side=tk.LEFT)
+
+        page_label = ttk.Label(flt, text="", foreground=EAFIT["text_muted"])
+        page_label.pack(side=tk.RIGHT)
+        ttk.Button(flt, text="Siguiente ›", command=lambda: cambiar_pagina(1)).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(flt, text="‹ Anterior", command=lambda: cambiar_pagina(-1)).pack(side=tk.RIGHT, padx=4)
+
+        # ── Tabla ───────────────────────────────────────────────────────────
+        COLS = [
+            "CÓDIGO_SNIES_DEL_PROGRAMA", "NOMBRE_DEL_PROGRAMA", "NOMBRE_INSTITUCIÓN",
+            "NIVEL_DE_FORMACIÓN", "CATEGORIA_FINAL", "FUENTE_CATEGORIA",
+            "PROBABILIDAD", "REQUIERE_REVISION", "ESTADO_PROGRAMA",
+            "DEPARTAMENTO_OFERTA_PROGRAMA",
+        ]
+        cols_show = [c for c in COLS if c in df.columns]
+
+        tbl_frame = ttk.Frame(win)
+        tbl_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(4, 4))
+        tree = ttk.Treeview(tbl_frame, columns=cols_show, show="headings", height=22)
+        vsb = ttk.Scrollbar(tbl_frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(tbl_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tbl_frame.grid_rowconfigure(0, weight=1)
+        tbl_frame.grid_columnconfigure(0, weight=1)
+
+        anchos = {
+            "CÓDIGO_SNIES_DEL_PROGRAMA": 120, "NOMBRE_DEL_PROGRAMA": 280,
+            "NOMBRE_INSTITUCIÓN": 200, "NIVEL_DE_FORMACIÓN": 160,
+            "CATEGORIA_FINAL": 200, "FUENTE_CATEGORIA": 120,
+            "PROBABILIDAD": 90, "REQUIERE_REVISION": 110,
+            "ESTADO_PROGRAMA": 90, "DEPARTAMENTO_OFERTA_PROGRAMA": 160,
+        }
+        for c in cols_show:
+            tree.heading(c, text=c)
+            tree.column(c, width=anchos.get(c, 130), minwidth=80, anchor="w")
+
+        # Colores por fuente
+        tree.tag_configure("CRUCE_SNIES",  background="#C6EFCE")
+        tree.tag_configure("MATCH_NOMBRE", background="#E2EFDA")
+        tree.tag_configure("KNN_TFIDF",    background="#FFEB9C")
+        tree.tag_configure("REQUIERE_REV", background="#FFC7CE")
+
+        PAGE_SIZE = 200
+        state = {"page": 0, "df": df}
+
+        def _renderizar(df_filtrado):
+            for item in tree.get_children():
+                tree.delete(item)
+            total = len(df_filtrado)
+            max_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+            p = max(0, min(state["page"], max_pages - 1))
+            state["page"] = p
+            start = p * PAGE_SIZE
+            end = min(total, start + PAGE_SIZE)
+            page_label.config(text=f"Página {p+1}/{max_pages}  ({total:,} filas)")
+            for _, row in df_filtrado.iloc[start:end].iterrows():
+                vals = [str(row.get(c, "") or "") for c in cols_show]
+                fuente = str(row.get("FUENTE_CATEGORIA", "")).upper().strip()
+                req = str(row.get("REQUIERE_REVISION", "")).lower() in ("true", "1", "yes", "sí")
+                tag = "REQUIERE_REV" if req else fuente if fuente in ("CRUCE_SNIES", "MATCH_NOMBRE", "KNN_TFIDF") else ""
+                tree.insert("", "end", values=vals, tags=(tag,) if tag else ())
+
+        def aplicar():
+            df_f = df.copy()
+            fuente_sel = fuente_var.get()
+            if fuente_sel != "TODAS" and "FUENTE_CATEGORIA" in df_f.columns:
+                df_f = df_f[df_f["FUENTE_CATEGORIA"].astype(str).str.upper().str.strip() == fuente_sel.upper()]
+            nivel_sel = nivel_var.get()
+            if nivel_sel != "TODOS" and "NIVEL_DE_FORMACIÓN" in df_f.columns:
+                df_f = df_f[df_f["NIVEL_DE_FORMACIÓN"].astype(str).str.upper().str.strip() == nivel_sel.upper()]
+            q = buscar_var.get().strip().lower()
+            if q:
+                mask = pd.Series(False, index=df_f.index)
+                for col in ("NOMBRE_DEL_PROGRAMA", "CATEGORIA_FINAL", "NOMBRE_INSTITUCIÓN"):
+                    if col in df_f.columns:
+                        mask |= df_f[col].astype(str).str.lower().str.contains(q, na=False)
+                df_f = df_f[mask]
+            state["df"] = df_f
+            state["page"] = 0
+            _renderizar(df_f)
+
+        def cambiar_pagina(delta):
+            state["page"] += delta
+            _renderizar(state["df"])
+
+        # Bindear filtros
+        fuente_var.trace_add("write", lambda *_: aplicar())
+        nivel_var.trace_add("write", lambda *_: aplicar())
+        buscar_var.trace_add("write", lambda *_: aplicar())
+
+        # Renderizado inicial
+        aplicar()
+        win.grab_set()
+
+    def _exportar_fase1_excel(self):
+        """Exporta la base maestra de Fase 1 (Esp+Maestría con categorías) a Excel."""
+        from etl.config import CHECKPOINT_BASE_MAESTRA, OUTPUTS_DIR
+
+        if not CHECKPOINT_BASE_MAESTRA.exists():
+            safe_messagebox_error(
+                "Fase 1 no ejecutada",
+                "No existe base_maestra.parquet.\n\n"
+                "Ejecuta primero el pipeline de Estudio de Mercado (al menos la Fase 1) "
+                "para generar el archivo de base maestra.",
+                parent=self.root,
+            )
+            return
+
+        # Preguntar ruta de guardado
+        import tkinter.filedialog as fd
+        import datetime
+
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+        nombre_sugerido = f"Base_Maestra_F1_{ts}.xlsx"
+        ruta = fd.asksaveasfilename(
+            title="Guardar Excel de Fase 1",
+            initialdir=str(OUTPUTS_DIR),
+            initialfile=nombre_sugerido,
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            parent=self.root,
+        )
+        if not ruta:
+            return  # usuario canceló
+
+        self._log_message(f"Generando Excel de Fase 1 → {ruta} ...")
+        self.btn_exportar_f1.config(state=tk.DISABLED)
+
+        def _worker():
+            try:
+                from etl.mercado_pipeline import exportar_base_maestra_excel
+                from pathlib import Path
+
+                resultado = exportar_base_maestra_excel(ruta_salida=Path(ruta))
+
+                def _ok():
+                    self._log_message(f"✓ Excel generado: {resultado.name}")
+                    abrir = messagebox.askyesno(
+                        "Excel generado",
+                        f"El archivo se guardó correctamente:\n{resultado}\n\n¿Deseas abrirlo ahora?",
+                        parent=self.root,
+                    )
+                    if abrir:
+                        try:
+                            import os
+
+                            os.startfile(str(resultado))
+                        except Exception as exc:
+                            safe_messagebox_error("Error", f"No se pudo abrir el archivo:\n{exc}", parent=self.root)
+
+                self.root.after(0, _ok)
+            except Exception as exc:
+                msg = str(exc)
+                self.root.after(0, lambda: safe_messagebox_error("Error", f"No se pudo generar el Excel:\n\n{msg}", parent=self.root))
+                self.root.after(0, lambda: self._log_message(f"✗ Error: {msg}"))
+            finally:
+                self.root.after(0, lambda: self.btn_exportar_f1.config(state=tk.NORMAL))
+
+        import threading
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _check_checkpoints(self):
         from etl.config import CHECKPOINT_BASE_MAESTRA
@@ -4532,6 +4874,27 @@ class MercadoPipelinePage(ttk.Frame):
         formatted = f"{valor:,.0f}".replace(",", ".")
         self.smlmv_label.config(text=f"Valor actual: ${formatted}")
         self._log_message(f"SMLMV de sesión actualizado a ${formatted}")
+
+    def _update_benchmark(self):
+        """Actualiza el benchmark de costo desde el Entry y refresca la etiqueta."""
+        raw = (self.bench_var.get() or "").strip()
+        if not raw.isdigit():
+            safe_messagebox_error("Valor inválido", "Ingresa un número entero para el benchmark de costo.", parent=self.root)
+            return
+        try:
+            valor = int(raw)
+            if valor <= 0:
+                raise ValueError("El benchmark debe ser positivo.")
+        except Exception as e:
+            safe_messagebox_error("Valor inválido", str(e), parent=self.root)
+            return
+        ok = set_benchmark_costo(float(valor))
+        if ok:
+            formatted = f"{valor:,.0f}".replace(",", ".")
+            self.bench_label.config(text=f"Valor actual: ${formatted}")
+            self._log_message(f"Benchmark de costo actualizado a ${formatted}")
+        else:
+            safe_messagebox_error("Error", "No se pudo guardar el benchmark en config.json.", parent=self.root)
 
     def _log_message(self, message: str):
         """Agrega un mensaje al área de texto (thread-safe vía root.after si se llama desde otro hilo)."""
