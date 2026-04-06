@@ -37,7 +37,6 @@ from etl.config import (
     MODELS_DIR,
     get_smlmv_sesion,
     set_smlmv_sesion,
-    get_benchmark_costo,
     set_benchmark_costo,
 )
 # HISTORIC_DIR se importa dentro de run_pipeline después de set_base_dir para asegurar que esté inicializado
@@ -1925,21 +1924,28 @@ class RetrainPage(ttk.Frame):
                     preparar_features_entrenamiento,
                     _get_sentence_transformer
                 )
-                
-                # Cargar datos actuales
-                df_actual = self._leer(self.file_path)
-                
-                # Validar
+
+                # Cargar datos usando cargar_referentes() que aplica
+                # la normalización que necesita preparar_features_entrenamiento
+                df_actual = cargar_referentes(self.file_path)
+
+                if df_actual is None or len(df_actual) == 0:
+                    self.after(0, lambda: safe_messagebox_error(
+                        "Error", "cargar_referentes() no devolvió datos válidos.", parent=self
+                    ))
+                    return
+
+                # Validar mínimos sobre el DataFrame ya normalizado
                 ok, msg = self._validate_referentes(df_actual.copy())
                 if not ok:
                     self.after(0, lambda: safe_messagebox_error("Error", f"No se puede simular: {msg}", parent=self))
                     return
-                
+
                 # Cargar modelo de embeddings
                 SentenceTransformer = _get_sentence_transformer()
                 modelo_embeddings = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
-                
-                # Preparar features
+
+                # Preparar features (df_actual ya tiene las columnas _norm necesarias)
                 features, labels, encoder = preparar_features_entrenamiento(df_actual, modelo_embeddings)
                 
                 # Entrenar modelo temporal
@@ -2057,33 +2063,68 @@ class RetrainPage(ttk.Frame):
         return True, f"OK (label=1: {n_pos})"
 
     def _save(self):
-        import pandas as pd  # Lazy import
-        
         rows = self.table.get_rows()
         if not rows:
             messagebox.showwarning("Atención", "No hay filas para guardar.", parent=self)
             return
-        df_out = pd.DataFrame(rows)
-        ok, msg = self._validate_referentes(df_out)
+
+        import pandas as pd
+        df_gui = pd.DataFrame(rows)
+
+        # Validar antes de tocar el disco
+        ok, msg = self._validate_referentes(df_gui.copy())
         if not ok:
             safe_messagebox_error("Error", msg, parent=self)
             return
         self._log(f"Validación de referentes: {msg}")
-        # backup
+
+        # Leer el archivo COMPLETO para preservar todas las columnas
         try:
+            df_completo = self._leer(self.file_path)
+        except Exception as exc:
+            safe_messagebox_error("Error", f"No se pudo leer el archivo para actualizar: {exc}", parent=self)
+            return
+
+        # Backup antes de guardar
+        try:
+            import shutil, time
             backup = self.file_path.parent / f"{self.file_path.stem}__backup_{time.strftime('%Y%m%d_%H%M%S')}{self.file_path.suffix}"
             shutil.copy2(self.file_path, backup)
             self._log(f"Backup creado: {backup.name}")
         except Exception:
             pass
 
+        # Actualizar columnas editables en el archivo completo usando las filas de la GUI
+        # Clave de match: NOMBRE_DEL_PROGRAMA + NombrePrograma EAFIT
+        cols_editables = [c for c in self.table.columns if c in df_completo.columns]
+        df_completo = df_completo.reset_index(drop=True)
+        df_gui = df_gui.reset_index(drop=True)
+
+        # Si tienen el mismo número de filas y mismo orden, actualizar directamente
+        if len(df_gui) == len(df_completo):
+            for col in cols_editables:
+                if col in df_gui.columns:
+                    df_completo[col] = df_gui[col].values
+        else:
+            # Si difieren (el usuario agregó o borró filas en la GUI), hacer merge por clave
+            key_cols = ['NOMBRE_DEL_PROGRAMA', 'NombrePrograma EAFIT']
+            if all(c in df_completo.columns and c in df_gui.columns for c in key_cols):
+                df_completo = df_completo.set_index(key_cols)
+                df_gui_indexed = df_gui[key_cols + [c for c in cols_editables if c in df_gui.columns]].set_index(key_cols)
+                df_completo.update(df_gui_indexed)
+                df_completo = df_completo.reset_index()
+            else:
+                # Fallback: sobrescribir con lo que tiene la GUI pero advertir
+                self._log("⚠️ No se encontró clave de match. Guardando solo columnas de la tabla.")
+                df_completo = df_gui
+
         try:
             if self.file_path.suffix.lower() == ".csv":
-                df_out.to_csv(self.file_path, index=False, encoding="utf-8")
+                df_completo.to_csv(self.file_path, index=False, encoding="utf-8")
             else:
                 with pd.ExcelWriter(self.file_path, mode="w", engine="openpyxl") as writer:
-                    df_out.to_excel(writer, index=False)
-            self._log("Cambios guardados en archivo de referentes.")
+                    df_completo.to_excel(writer, index=False)
+            self._log("Cambios guardados preservando todas las columnas del archivo.")
             messagebox.showinfo("OK", "Cambios guardados.", parent=self)
         except PermissionError:
             safe_messagebox_error("Error", explain_file_in_use(), parent=self)
@@ -2140,8 +2181,8 @@ class RetrainPage(ttk.Frame):
             "Sincronizar Ajustes Manuales",
             "Esta función sincronizará los ajustes manuales de Programas.xlsx con referentesUnificados.csv.\n\n"
             "Acciones que se realizarán:\n"
-            "1. Programas marcados como ES_REFERENTE='No' con AJUSTE_MANUAL=True → cambiarán label=1 a label=0 en referentes\n"
-            "2. Programas marcados como ES_REFERENTE='Sí' con AJUSTE_MANUAL=True → se agregarán como label=1 si no existen\n\n"
+            "1. Programas marcados como ES_REFERENTE='No' con AJUSTE_MANUAL=True → se eliminarán del archivo de referentes (falsos positivos)\n"
+            "2. Programas marcados como ES_REFERENTE='Sí' con AJUSTE_MANUAL=True → se agregarán como referentes si no existen\n\n"
             "¿Deseas continuar?",
             parent=self
         ):
@@ -2207,65 +2248,62 @@ class RetrainPage(ttk.Frame):
             
             # Normalizar label
             df_referentes["label"] = pd.to_numeric(df_referentes["label"], errors="coerce").fillna(0).astype(int)
-            
-            cambios_realizados = 0
-            nuevos_referentes = 0
-            
-            # 3. Procesar cada ajuste manual
+
+            # Separar ajustes: los que desmarcan (falsos positivos) y los que confirman
+            codigos_falsos_positivos = set()
+            codigos_nuevos_referentes = []
+
             for idx, row_ajuste in df_ajustes.iterrows():
                 codigo = row_ajuste["_CODIGO_NORM"]
-                es_referente = str(row_ajuste.get("ES_REFERENTE", "")).strip().upper() in ("SÍ", "SI", "YES", "1", "TRUE")
-                
                 if not codigo:
                     continue
-                
-                # Buscar en referentes por código SNIES
-                mask_codigo = df_referentes["_CODIGO_NORM"] == codigo
-                
-                if mask_codigo.any():
-                    # Existe en referentes (puede haber múltiples filas con el mismo código)
-                    # Obtener el primer índice que coincide
-                    idx_match = df_referentes[mask_codigo].index[0]
-                    label_actual = df_referentes.loc[idx_match, "label"]
-                    
-                    if es_referente:
-                        # Marcar como referente (label=1)
-                        if label_actual != 1:
-                            df_referentes.loc[mask_codigo, "label"] = 1
-                            cambios_realizados += 1
-                            self._log(f"  ✓ {codigo}: Actualizado a label=1 (referente confirmado)")
-                    else:
-                        # Marcar como NO referente (label=0) - FALSO POSITIVO CORREGIDO
-                        if label_actual != 0:
-                            df_referentes.loc[mask_codigo, "label"] = 0
-                            cambios_realizados += 1
-                            self._log(f"  ✗ {codigo}: Cambiado a label=0 (falso positivo corregido)")
+                es_referente = str(row_ajuste.get("ES_REFERENTE", "")).strip().upper() in (
+                    "SÍ", "SI", "YES", "1", "TRUE"
+                )
+                if es_referente:
+                    codigos_nuevos_referentes.append(row_ajuste)
                 else:
-                    # No existe en referentes - solo agregar si es referente confirmado
-                    if es_referente:
-                        # Agregar nuevo referente
-                        nuevo_referente = {
-                            "CÓDIGO_SNIES_DEL_PROGRAMA": codigo,
-                            "NOMBRE_DEL_PROGRAMA": str(row_ajuste.get("NOMBRE_DEL_PROGRAMA", "")),
-                            "NombrePrograma EAFIT": str(row_ajuste.get("PROGRAMA_EAFIT_NOMBRE", "")),
-                            "CAMPO_AMPLIO": str(row_ajuste.get("CINE_F_2013_AC_CAMPO_AMPLIO", "")),
-                            "CAMPO_AMPLIO_EAFIT": "",
-                            "NIVEL_DE_FORMACIÓN": str(row_ajuste.get("NIVEL_DE_FORMACIÓN", "")),
-                            "NIVEL_DE_FORMACIÓN EAFIT": "",
-                            "label": 1,
-                            "_CODIGO_NORM": codigo
-                        }
-                        # Agregar otras columnas si existen en referentes
-                        for col in df_referentes.columns:
-                            if col not in nuevo_referente:
-                                nuevo_referente[col] = ""
-                        
-                        df_referentes = pd.concat([df_referentes, pd.DataFrame([nuevo_referente])], ignore_index=True)
-                        nuevos_referentes += 1
-                        self._log(f"  + {codigo}: Agregado como nuevo referente (label=1)")
-            
+                    codigos_falsos_positivos.add(codigo)
+
+            registros_actualizados = 0
+
+            # Eliminar falsos positivos del referente (en vez de poner label=0 que no tiene efecto)
+            if codigos_falsos_positivos:
+                mask_eliminar = df_referentes["_CODIGO_NORM"].isin(codigos_falsos_positivos)
+                n_antes = len(df_referentes)
+                df_referentes = df_referentes[~mask_eliminar].copy()
+                eliminados = n_antes - len(df_referentes)
+                if eliminados > 0:
+                    registros_actualizados += eliminados
+                    self._log(f"Eliminados {eliminados} falsos positivos del referente de entrenamiento")
+
+            # Agregar nuevos referentes confirmados si no existen ya
+            for row_ajuste in codigos_nuevos_referentes:
+                codigo = row_ajuste["_CODIGO_NORM"]
+                if codigo in set(df_referentes["_CODIGO_NORM"]):
+                    continue  # Ya existe, no duplicar
+                nuevo_referente = {
+                    "CÓDIGO_SNIES_DEL_PROGRAMA": codigo,
+                    "NOMBRE_DEL_PROGRAMA": str(row_ajuste.get("NOMBRE_DEL_PROGRAMA", "")),
+                    "NombrePrograma EAFIT": str(row_ajuste.get("PROGRAMA_EAFIT_NOMBRE", "")),
+                    "CAMPO_AMPLIO": str(row_ajuste.get("CINE_F_2013_AC_CAMPO_AMPLIO", "")),
+                    "CAMPO_AMPLIO_EAFIT": "",
+                    "NIVEL_DE_FORMACIÓN": str(row_ajuste.get("NIVEL_DE_FORMACIÓN", "")),
+                    "NIVEL_DE_FORMACIÓN EAFIT": str(row_ajuste.get("NIVEL_DE_FORMACIÓN", "")),
+                    "label": 1,
+                    "_CODIGO_NORM": codigo,
+                }
+                for col in df_referentes.columns:
+                    if col not in nuevo_referente:
+                        nuevo_referente[col] = ""
+                df_referentes = pd.concat(
+                    [df_referentes, pd.DataFrame([nuevo_referente])], ignore_index=True
+                )
+                registros_actualizados += 1
+                self._log(f"Agregado nuevo referente confirmado: {codigo}")
+
             # 4. Guardar referentes actualizados
-            if cambios_realizados > 0 or nuevos_referentes > 0:
+            if registros_actualizados > 0:
                 # Eliminar columna temporal
                 if "_CODIGO_NORM" in df_referentes.columns:
                     df_referentes = df_referentes.drop(columns=["_CODIGO_NORM"])
@@ -2285,17 +2323,13 @@ class RetrainPage(ttk.Frame):
                     with pd.ExcelWriter(archivo_referentes, mode="w", engine="openpyxl") as writer:
                         df_referentes.to_excel(writer, index=False)
                 
-                self._log(f"✓ Sincronización completada:")
-                self._log(f"  - Referentes actualizados: {cambios_realizados}")
-                self._log(f"  - Nuevos referentes agregados: {nuevos_referentes}")
-                self._log(f"  - Total cambios: {cambios_realizados + nuevos_referentes}")
-                
+                self._log(f"✓ Sincronización completada (cambios aplicados: {registros_actualizados})")
+
                 messagebox.showinfo(
                     "Sincronización Completada",
                     f"Sincronización exitosa:\n\n"
-                    f"Referentes actualizados: {cambios_realizados}\n"
-                    f"Nuevos referentes agregados: {nuevos_referentes}\n\n"
-                    f"Los falsos positivos corregidos ahora tienen label=0 y NO entrenarán el modelo.",
+                    f"Operaciones aplicadas: {registros_actualizados}\n\n"
+                    f"Los falsos positivos fueron eliminados del archivo de referentes y ya no entrenan el modelo.",
                     parent=self
                 )
                 
@@ -4526,10 +4560,9 @@ class MercadoPipelinePage(ttk.Frame):
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(4, 0))
 
-        # ── Card: Benchmark de costo ─────────────────────────────────────────
-        # (solo se crea si get_benchmark_costo está disponible)
+        # ── Card: Benchmarks de costo por nivel ─────────────────────────────
         try:
-            from etl.config import get_benchmark_costo, set_benchmark_costo as _set_bench
+            from etl.config import get_todos_benchmarks
             _bench_available = True
         except ImportError:
             _bench_available = False
@@ -4537,60 +4570,117 @@ class MercadoPipelinePage(ttk.Frame):
         if _bench_available:
             bench_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
             bench_card.pack(fill=tk.X, pady=(0, 14))
-            ttk.Label(bench_card, text="🏷️ Benchmark de costo de matrícula", style="SectionTitle.TLabel").pack(anchor="w")
-            current_bench = get_benchmark_costo()
-            formatted_bench = f"{current_bench:,.0f}".replace(",", ".")
-            self.bench_label = ttk.Label(bench_card, text=f"Valor actual: ${formatted_bench}", style="Muted.TLabel")
-            self.bench_label.pack(anchor="w", pady=(4, 4))
-            bench_entry_row = ttk.Frame(bench_card, style="Card.TFrame")
-            bench_entry_row.pack(fill=tk.X, pady=(0, 0))
-            ttk.Label(bench_entry_row, text="Nuevo valor ($):", style="Muted.TLabel").pack(side=tk.LEFT)
-            self.bench_var = tk.StringVar(value=str(int(current_bench)))
-            vcmd_bench = (self.register(self._validate_digits), "%P")
-            self.bench_entry = ttk.Entry(bench_entry_row, textvariable=self.bench_var, width=14, validate="key", validatecommand=vcmd_bench)
-            self.bench_entry.pack(side=tk.LEFT, padx=(6, 6))
-            ttk.Button(bench_entry_row, text="Actualizar", command=self._update_benchmark, style="Secondary.TButton").pack(side=tk.LEFT)
+            ttk.Label(bench_card, text="🏷️ Benchmarks de costo de matrícula por nivel", style="SectionTitle.TLabel").pack(anchor="w")
             ttk.Label(
                 bench_card,
-                text="Precio de referencia para comparar el costo promedio de cada categoría. Se guarda en config.json y persiste entre sesiones.",
+                text="Precios de referencia para comparar el costo promedio de cada categoría según nivel. Se guardan en config.json.",
                 style="Muted.TLabel",
-            ).pack(anchor="w", pady=(4, 0))
+            ).pack(anchor="w", pady=(4, 10), fill=tk.X)
 
-        # ── Card: Ejecución ──────────────────────────────────────────────────
-        run_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
-        run_card.pack(fill=tk.X, pady=(0, 14))
-        ttk.Label(run_card, text="🚀 Ejecutar", style="SectionTitle.TLabel").pack(anchor="w")
+            vcmd_bench = (self.register(self._validate_digits), "%P")
+            benchmarks_actuales = get_todos_benchmarks()
+
+            # Filas: (label_texto, nivel_key, atributo_var, atributo_label)
+            _bench_niveles = [
+                ("Pregrado / Tecnológico ($):", "pregrado",        "bench_var_pre",  "bench_lbl_pre"),
+                ("Especialización ($):",        "especializacion",  "bench_var_esp",  "bench_lbl_esp"),
+                ("Maestría ($):",               "maestria",         "bench_var_mae",  "bench_lbl_mae"),
+                ("Doctorado ($):",              "doctorado",        "bench_var_doc",  "bench_lbl_doc"),
+            ]
+
+            self._bench_vars = {}
+            self._bench_labels = {}
+
+            for label_txt, nivel_key, var_attr, lbl_attr in _bench_niveles:
+                fila = ttk.Frame(bench_card, style="Card.TFrame")
+                fila.pack(fill=tk.X, pady=(0, 6))
+
+                ttk.Label(fila, text=label_txt, style="Muted.TLabel", width=26, anchor="w").pack(side=tk.LEFT)
+
+                valor_actual = benchmarks_actuales.get(nivel_key, 13_400_000)
+                formatted = f"{valor_actual:,.0f}".replace(",", ".")
+                lbl = ttk.Label(fila, text=f"${formatted}", style="Muted.TLabel", width=16, anchor="w")
+                lbl.pack(side=tk.LEFT, padx=(4, 8))
+                self._bench_labels[nivel_key] = lbl
+
+                var = tk.StringVar(value=str(int(valor_actual)))
+                self._bench_vars[nivel_key] = var
+                ttk.Entry(fila, textvariable=var, width=13, validate="key", validatecommand=vcmd_bench).pack(side=tk.LEFT)
+
+                # Capturar nivel_key para el closure
+                ttk.Button(
+                    fila,
+                    text="Actualizar",
+                    command=lambda nk=nivel_key: self._update_benchmark(nk),
+                    style="Secondary.TButton",
+                ).pack(side=tk.LEFT, padx=(6, 0))
+
+        # ── Card: Fase 1 — clasificación ─────────────────────────────────────
+        fase1_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
+        fase1_card.pack(fill=tk.X, pady=(0, 14))
+        ttk.Label(fase1_card, text="1. Fase 1 — Clasificar programas por categoría", style="SectionTitle.TLabel").pack(anchor="w")
         ttk.Label(
-            run_card,
-            text="Clasifica 30.744 programas, consolida matrículas OLE y genera Estudio_Mercado_Colombia.xlsx. Primera corrida ~37 min.",
+            fase1_card,
+            text="Cruza Programas.xlsx con el referente de categorías y clasifica cada programa usando cascada SNIES → Nombre → KNN TF-IDF. Genera un Excel descargable. El checkpoint queda guardado para las fases siguientes.",
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(6, 12), fill=tk.X)
-        btn_frame = ttk.Frame(run_card, style="Card.TFrame")
-        btn_frame.pack(fill=tk.X)
-        self.btn_execute = ttk.Button(btn_frame, text="▶️ Ejecutar", command=self._on_execute_clicked, style="Primary.TButton")
-        self.btn_execute.pack(side=tk.LEFT)
-        self.btn_cancel = ttk.Button(btn_frame, text="⏹️ Cancelar", command=self._on_cancel_clicked, state=tk.DISABLED, style="Danger.TButton")
-        self.btn_cancel.pack(side=tk.LEFT, padx=(10, 0))
-        self.btn_resultado = ttk.Button(btn_frame, text="📂 Ver resultado", command=self._open_resultado, state=tk.DISABLED, style="Secondary.TButton")
-        self.btn_resultado.pack(side=tk.LEFT, padx=(10, 0))
+        btn_frame_f1 = ttk.Frame(fase1_card, style="Card.TFrame")
+        btn_frame_f1.pack(fill=tk.X)
+        self.btn_fase1 = ttk.Button(
+            btn_frame_f1,
+            text="▶️ Ejecutar Fase 1 → Excel",
+            command=self._on_fase1_clicked,
+            style="Primary.TButton",
+        )
+        self.btn_fase1.pack(side=tk.LEFT)
+        self.btn_cancel_fase1 = ttk.Button(
+            btn_frame_f1,
+            text="⏹️ Cancelar",
+            command=self._on_cancel_clicked,
+            state=tk.DISABLED,
+            style="Danger.TButton",
+        )
+        self.btn_cancel_fase1.pack(side=tk.LEFT, padx=(10, 0))
         self.btn_ver_programas = ttk.Button(
-            btn_frame,
+            btn_frame_f1,
             text="📋 Ver Programas con Categorías",
             command=self._open_programas_categorias,
             style="Secondary.TButton",
         )
         self.btn_ver_programas.pack(side=tk.LEFT, padx=(10, 0))
-        self.btn_exportar_f1 = ttk.Button(
+        self.progress_fase1 = ttk.Progressbar(fase1_card, mode="indeterminate")
+        self.progress_fase1.pack(fill=tk.X, pady=(12, 0))
+        self.progress_label_fase1 = ttk.Label(fase1_card, text="", style="Status.TLabel")
+        self.progress_label_fase1.pack(anchor="w", pady=(4, 0))
+
+        # ── Card: Fases 2-5 — pipeline completo ─────────────────────────────
+        run_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
+        run_card.pack(fill=tk.X, pady=(0, 14))
+        ttk.Label(run_card, text="2. Fases 2-5 — Pipeline completo → Estudio de Mercado", style="SectionTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            run_card,
+            text="Consolida matrículas históricas (2019-2024), OLE, costos y scoring. Requiere haber ejecutado la Fase 1 primero. Genera Estudio_Mercado_Colombia.xlsx.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(6, 12), fill=tk.X)
+        btn_frame = ttk.Frame(run_card, style="Card.TFrame")
+        btn_frame.pack(fill=tk.X)
+        self.btn_execute = ttk.Button(
             btn_frame,
-            text="⬇️ Exportar Fase 1 a Excel",
-            command=self._exportar_fase1_excel,
-            style="Secondary.TButton",
+            text="▶️ Ejecutar Fases 2-5",
+            command=self._on_execute_clicked,
+            style="Primary.TButton",
         )
-        self.btn_exportar_f1.pack(side=tk.LEFT, padx=(10, 0))
-        self.progress = ttk.Progressbar(run_card, mode="determinate", maximum=5, value=0)
+        self.btn_execute.pack(side=tk.LEFT)
+        self.btn_cancel = ttk.Button(btn_frame, text="⏹️ Cancelar", command=self._on_cancel_clicked, state=tk.DISABLED, style="Danger.TButton")
+        self.btn_cancel.pack(side=tk.LEFT, padx=(10, 0))
+        self.btn_resultado = ttk.Button(btn_frame, text="📂 Ver resultado", command=self._open_resultado, state=tk.DISABLED, style="Secondary.TButton")
+        self.btn_resultado.pack(side=tk.LEFT, padx=(10, 0))
+        self.lbl_checkpoint = ttk.Label(run_card, text="", style="Status.TLabel")
+        self.lbl_checkpoint.pack(anchor="w", pady=(8, 0))
+        self.progress = ttk.Progressbar(run_card, mode="determinate", maximum=4, value=0)
         self.progress.pack(fill=tk.X, pady=(12, 0))
-        self.progress_label = ttk.Label(btn_frame, text="Progreso: listo", style="Status.TLabel")
-        self.progress_label.pack(side=tk.LEFT, padx=(16, 0))
+        self.progress_label = ttk.Label(run_card, text="Progreso: listo", style="Status.TLabel")
+        self.progress_label.pack(anchor="w", pady=(4, 0))
 
         # ── Card: Logs ───────────────────────────────────────────────────────
         log_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
@@ -4764,74 +4854,6 @@ class MercadoPipelinePage(ttk.Frame):
         aplicar()
         win.grab_set()
 
-    def _exportar_fase1_excel(self):
-        """Exporta la base maestra de Fase 1 (Esp+Maestría con categorías) a Excel."""
-        from etl.config import CHECKPOINT_BASE_MAESTRA, OUTPUTS_DIR
-
-        if not CHECKPOINT_BASE_MAESTRA.exists():
-            safe_messagebox_error(
-                "Fase 1 no ejecutada",
-                "No existe base_maestra.parquet.\n\n"
-                "Ejecuta primero el pipeline de Estudio de Mercado (al menos la Fase 1) "
-                "para generar el archivo de base maestra.",
-                parent=self.root,
-            )
-            return
-
-        # Preguntar ruta de guardado
-        import tkinter.filedialog as fd
-        import datetime
-
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-        nombre_sugerido = f"Base_Maestra_F1_{ts}.xlsx"
-        ruta = fd.asksaveasfilename(
-            title="Guardar Excel de Fase 1",
-            initialdir=str(OUTPUTS_DIR),
-            initialfile=nombre_sugerido,
-            defaultextension=".xlsx",
-            filetypes=[("Excel", "*.xlsx")],
-            parent=self.root,
-        )
-        if not ruta:
-            return  # usuario canceló
-
-        self._log_message(f"Generando Excel de Fase 1 → {ruta} ...")
-        self.btn_exportar_f1.config(state=tk.DISABLED)
-
-        def _worker():
-            try:
-                from etl.mercado_pipeline import exportar_base_maestra_excel
-                from pathlib import Path
-
-                resultado = exportar_base_maestra_excel(ruta_salida=Path(ruta))
-
-                def _ok():
-                    self._log_message(f"✓ Excel generado: {resultado.name}")
-                    abrir = messagebox.askyesno(
-                        "Excel generado",
-                        f"El archivo se guardó correctamente:\n{resultado}\n\n¿Deseas abrirlo ahora?",
-                        parent=self.root,
-                    )
-                    if abrir:
-                        try:
-                            import os
-
-                            os.startfile(str(resultado))
-                        except Exception as exc:
-                            safe_messagebox_error("Error", f"No se pudo abrir el archivo:\n{exc}", parent=self.root)
-
-                self.root.after(0, _ok)
-            except Exception as exc:
-                msg = str(exc)
-                self.root.after(0, lambda: safe_messagebox_error("Error", f"No se pudo generar el Excel:\n\n{msg}", parent=self.root))
-                self.root.after(0, lambda: self._log_message(f"✗ Error: {msg}"))
-            finally:
-                self.root.after(0, lambda: self.btn_exportar_f1.config(state=tk.NORMAL))
-
-        import threading
-
-        threading.Thread(target=_worker, daemon=True).start()
-
     def _check_checkpoints(self):
         from etl.config import CHECKPOINT_BASE_MAESTRA
         sabana_path = CHECKPOINT_BASE_MAESTRA.parent / "sabana_consolidada.parquet"
@@ -4852,6 +4874,7 @@ class MercadoPipelinePage(ttk.Frame):
             self._log_message(f"💰 SMLMV vigente: ${formatted}. Puedes ajustarlo antes de ejecutar.")
         except Exception:
             pass
+        self.root.after(200, self._refresh_checkpoint_label)
 
     def _validate_digits(self, value: str) -> bool:
         """Validador simple para permitir solo dígitos (o vacío) en el Entry de SMLMV."""
@@ -4875,11 +4898,15 @@ class MercadoPipelinePage(ttk.Frame):
         self.smlmv_label.config(text=f"Valor actual: ${formatted}")
         self._log_message(f"SMLMV de sesión actualizado a ${formatted}")
 
-    def _update_benchmark(self):
-        """Actualiza el benchmark de costo desde el Entry y refresca la etiqueta."""
-        raw = (self.bench_var.get() or "").strip()
+    def _update_benchmark(self, nivel: str = "general"):
+        if not getattr(self, "_bench_vars", None):
+            return
+        var = self._bench_vars.get(nivel)
+        if var is None:
+            return
+        raw = (var.get() or "").strip()
         if not raw.isdigit():
-            safe_messagebox_error("Valor inválido", "Ingresa un número entero para el benchmark de costo.", parent=self.root)
+            safe_messagebox_error("Valor inválido", "Ingresa un número entero.", parent=self.root)
             return
         try:
             valor = int(raw)
@@ -4888,13 +4915,17 @@ class MercadoPipelinePage(ttk.Frame):
         except Exception as e:
             safe_messagebox_error("Valor inválido", str(e), parent=self.root)
             return
-        ok = set_benchmark_costo(float(valor))
+        ok = set_benchmark_costo(float(valor), nivel=nivel)
         if ok:
             formatted = f"{valor:,.0f}".replace(",", ".")
-            self.bench_label.config(text=f"Valor actual: ${formatted}")
-            self._log_message(f"Benchmark de costo actualizado a ${formatted}")
+            lbl = self._bench_labels.get(nivel)
+            if lbl:
+                lbl.config(text=f"${formatted}")
+            nombres = {"pregrado": "Pregrado", "especializacion": "Especialización",
+                       "maestria": "Maestría", "doctorado": "Doctorado"}
+            self._log_message(f"Benchmark {nombres.get(nivel, nivel)} actualizado a ${formatted}")
         else:
-            safe_messagebox_error("Error", "No se pudo guardar el benchmark en config.json.", parent=self.root)
+            safe_messagebox_error("Error", "No se pudo guardar en config.json.", parent=self.root)
 
     def _log_message(self, message: str):
         """Agrega un mensaje al área de texto (thread-safe vía root.after si se llama desde otro hilo)."""
@@ -4912,11 +4943,22 @@ class MercadoPipelinePage(ttk.Frame):
 
     def _on_execute_clicked(self):
         if self.is_running:
-            messagebox.showwarning("Atención", "El pipeline ya se está ejecutando.", parent=self.root)
+            messagebox.showwarning("Atención", "Ya hay un proceso en ejecución.", parent=self.root)
+            return
+        from etl.config import CHECKPOINT_BASE_MAESTRA
+        if not CHECKPOINT_BASE_MAESTRA.exists():
+            messagebox.showerror(
+                "Fase 1 requerida",
+                "No se encontró el checkpoint de la Fase 1 (base_maestra.parquet).\n\n"
+                "Ejecuta primero 'Ejecutar Fase 1 → Excel' y luego vuelve aquí.",
+                parent=self.root,
+            )
             return
         if not messagebox.askyesno(
-            "Confirmar ejecución",
-            "¿Desea ejecutar el pipeline de estudio de mercado ahora?\n\nPuede tardar varios minutos (~37 min en primera corrida).",
+            "Confirmar Fases 2-5",
+            "¿Ejecutar las Fases 2-5 del estudio de mercado?\n\n"
+            "Consolida matrículas, OLE, scoring y genera Estudio_Mercado_Colombia.xlsx.\n"
+            "Puede tardar varios minutos.",
             parent=self.root,
         ):
             return
@@ -4935,8 +4977,19 @@ class MercadoPipelinePage(ttk.Frame):
         # Feedback inmediato en la UI: la cancelación se aplica al finalizar la fase actual
         self.btn_cancel.config(state=tk.DISABLED)
         try:
+            self.btn_cancel_fase1.config(state=tk.DISABLED)
+        except Exception:
+            pass
+        try:
             self.progress_label.config(
                 text="Progreso: cancelando (se detendrá al final de la fase actual)",
+                foreground=EAFIT["warning"],
+            )
+        except Exception:
+            pass
+        try:
+            self.progress_label_fase1.config(
+                text="Cancelando (se detendrá al final de la fase actual)",
                 foreground=EAFIT["warning"],
             )
         except Exception:
@@ -4969,6 +5022,7 @@ class MercadoPipelinePage(ttk.Frame):
             pass
 
         self.is_running = True
+        self.btn_fase1.config(state=tk.DISABLED)
         self.cancel_event.clear()
         self.btn_execute.config(state=tk.DISABLED)
         self.btn_cancel.config(state=tk.NORMAL)
@@ -4991,8 +5045,10 @@ class MercadoPipelinePage(ttk.Frame):
         except Exception:
             pass
         self.btn_execute.config(state=tk.NORMAL)
+        self.btn_fase1.config(state=tk.NORMAL)
         self.btn_cancel.config(state=tk.DISABLED)
         self.is_running = False
+        self._refresh_checkpoint_label()
 
     def _run_thread(self):
         try:
@@ -5001,66 +5057,50 @@ class MercadoPipelinePage(ttk.Frame):
                 self.root.after(0, lambda: self._on_mercado_error("No hay carpeta del proyecto configurada."))
                 return
             update_paths_for_base_dir(base_dir)
-            reuse_base = self.reuse_base_var.get()
             reuse_sabana = self.reuse_sabana_var.get()
 
-            def ask_reuse(name: str) -> bool:
-                return reuse_base if "base_maestra" in name else reuse_sabana
-
-            from etl.config import CHECKPOINT_BASE_MAESTRA, ARCHIVO_ESTUDIO_MERCADO
-            from etl.mercado_pipeline import run_fase1, run_fase2, run_fase3, run_fase4, run_fase5
+            from etl.config import CHECKPOINT_BASE_MAESTRA
+            from etl.mercado_pipeline import run_fase2, run_fase3, run_fase4, run_fase5
             sabana_path = CHECKPOINT_BASE_MAESTRA.parent / "sabana_consolidada.parquet"
-
-            # Fase 1
-            if self.cancel_event.is_set():
-                self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
-                return
-            if not CHECKPOINT_BASE_MAESTRA.exists() or not ask_reuse("base_maestra.parquet"):
-                self.root.after(0, lambda: self._log_message("Ejecutando Fase 1 (base maestra + ML)..."))
-                self.root.after(0, lambda: self._update_progress(0, "Fase 1..."))
-                run_fase1()
-            else:
-                self.root.after(0, lambda: self._log_message("Reusando base_maestra.parquet"))
-            self.root.after(0, lambda: self._update_progress(1, "Fase 1 ✓"))
 
             # Fase 2
             if self.cancel_event.is_set():
                 self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
                 return
             self.root.after(0, lambda: self._log_message("Ejecutando Fase 2 (scrapers)..."))
-            self.root.after(0, lambda: self._update_progress(2, "Fase 2..."))
+            self.root.after(0, lambda: self._update_progress(1, "Fase 2..."))
             run_fase2()
-            self.root.after(0, lambda: self._update_progress(2, "Fase 2 ✓"))
+            self.root.after(0, lambda: self._update_progress(1, "Fase 2 ✓"))
 
             # Fase 3
             if self.cancel_event.is_set():
                 self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
                 return
-            if not sabana_path.exists() or not ask_reuse("sabana_consolidada.parquet"):
+            if not sabana_path.exists() or not reuse_sabana:
                 self.root.after(0, lambda: self._log_message("Ejecutando Fase 3 (consolidación)..."))
-                self.root.after(0, lambda: self._update_progress(3, "Fase 3..."))
+                self.root.after(0, lambda: self._update_progress(2, "Fase 3..."))
                 run_fase3()
             else:
                 self.root.after(0, lambda: self._log_message("Reusando sabana_consolidada.parquet"))
-            self.root.after(0, lambda: self._update_progress(3, "Fase 3 ✓"))
+            self.root.after(0, lambda: self._update_progress(2, "Fase 3 ✓"))
 
             # Fase 4
             if self.cancel_event.is_set():
                 self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
                 return
             self.root.after(0, lambda: self._log_message("Ejecutando Fase 4 (agregación + scoring)..."))
-            self.root.after(0, lambda: self._update_progress(4, "Fase 4..."))
+            self.root.after(0, lambda: self._update_progress(3, "Fase 4..."))
             ag = run_fase4()
-            self.root.after(0, lambda: self._update_progress(4, "Fase 4 ✓"))
+            self.root.after(0, lambda: self._update_progress(3, "Fase 4 ✓"))
 
             # Fase 5
             if self.cancel_event.is_set():
                 self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
                 return
             self.root.after(0, lambda: self._log_message("Ejecutando Fase 5 (exportación)..."))
-            self.root.after(0, lambda: self._update_progress(5, "Fase 5..."))
+            self.root.after(0, lambda: self._update_progress(4, "Fase 5..."))
             run_fase5(ag)
-            self.root.after(0, lambda: self._update_progress(5, "Fase 5 ✓"))
+            self.root.after(0, lambda: self._update_progress(4, "Fase 5 ✓"))
 
             if self.cancel_event.is_set():
                 self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
@@ -5100,6 +5140,137 @@ class MercadoPipelinePage(ttk.Frame):
             self.progress_label.config(text="Progreso: error", foreground=EAFIT["danger"])
             self._log_message(f"✗ ERROR: {error_msg}")
             messagebox.showerror("Error", f"Error durante la ejecución:\n\n{error_msg}", parent=self.root)
+
+    def _refresh_checkpoint_label(self):
+        try:
+            from etl.config import CHECKPOINT_BASE_MAESTRA
+            if CHECKPOINT_BASE_MAESTRA.exists():
+                ts = time.strftime("%d/%m/%Y %H:%M", time.localtime(CHECKPOINT_BASE_MAESTRA.stat().st_mtime))
+                self.lbl_checkpoint.config(text=f"✅ Fase 1 lista ({ts})", foreground=EAFIT["success"])
+            else:
+                self.lbl_checkpoint.config(text="⚠️ Ejecuta primero la Fase 1", foreground=EAFIT["warning"])
+        except Exception:
+            pass
+
+    def _on_fase1_clicked(self):
+        if self.is_running:
+            messagebox.showwarning("Atención", "Ya hay un proceso en ejecución.", parent=self.root)
+            return
+        if not messagebox.askyesno(
+            "Confirmar Fase 1",
+            "¿Ejecutar la Fase 1 (clasificación de programas por categoría)?\n\n"
+            "Al finalizar se pedirá dónde guardar el Excel con los resultados.\n"
+            "Esto puede tardar varios minutos.",
+            parent=self.root,
+        ):
+            return
+        self._execute_fase1()
+
+    def _execute_fase1(self):
+        self.is_running = True
+        self.cancel_event.clear()
+        self.btn_fase1.config(state=tk.DISABLED)
+        self.btn_cancel_fase1.config(state=tk.NORMAL)
+        self.btn_execute.config(state=tk.DISABLED)
+        self.lbl_checkpoint.config(text="Ejecutando Fase 1...", foreground=EAFIT["text_muted"])
+        self.progress_fase1.start(12)
+        self.progress_label_fase1.config(text="Ejecutando...", foreground=EAFIT["text_muted"])
+        self.messages_text.config(state=tk.NORMAL)
+        self.messages_text.delete("1.0", tk.END)
+        self.messages_text.config(state=tk.DISABLED)
+        threading.Thread(target=self._run_fase1_only_thread, daemon=True).start()
+
+    def _run_fase1_only_thread(self):
+        try:
+            base_dir = get_configured_base_dir()
+            if not base_dir or not base_dir.exists():
+                self.root.after(0, lambda: self._on_fase1_error("No hay carpeta del proyecto configurada."))
+                return
+            update_paths_for_base_dir(base_dir)
+            if self.cancel_event.is_set():
+                self.root.after(0, lambda: self._on_fase1_error("Cancelado"))
+                return
+            self.root.after(0, lambda: self._log_message("Iniciando Fase 1 — clasificación de programas..."))
+            from etl.mercado_pipeline import run_fase1
+            run_fase1()
+            if self.cancel_event.is_set():
+                self.root.after(0, lambda: self._on_fase1_error("Cancelado"))
+                return
+            self.root.after(0, self._on_fase1_completed)
+        except Exception as e:
+            msg = str(e)
+            self.root.after(0, lambda msg=msg: self._on_fase1_error(msg))
+        finally:
+            self.root.after(0, self._release_fase1_ui)
+
+    def _on_fase1_completed(self):
+        self._log_message("✓ Fase 1 completada. Selecciona dónde guardar el Excel...")
+        self._refresh_checkpoint_label()
+        import tkinter.filedialog as fd
+        from etl.config import OUTPUTS_DIR
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+        ruta = fd.asksaveasfilename(
+            title="Guardar Excel — Fase 1 (Programas con Categorías)",
+            initialdir=str(OUTPUTS_DIR),
+            initialfile=f"Base_Maestra_F1_{ts}.xlsx",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            parent=self.root,
+        )
+        if not ruta:
+            self._log_message("⚠️ Exportación cancelada. El checkpoint sigue disponible para las Fases 2-5.")
+            self._refresh_checkpoint_label()
+            return
+        self._log_message(f"Exportando Excel → {ruta} ...")
+
+        def _export_worker():
+            try:
+                from etl.mercado_pipeline import exportar_base_maestra_excel
+                from pathlib import Path
+
+                resultado = exportar_base_maestra_excel(ruta_salida=Path(ruta))
+
+                def _ok():
+                    self._log_message(f"✓ Excel generado: {resultado.name}")
+                    self._refresh_checkpoint_label()
+                    if messagebox.askyesno("Fase 1 completada", f"Excel guardado en:\n{resultado}\n\n¿Deseas abrirlo ahora?", parent=self.root):
+                        try:
+                            import os
+
+                            os.startfile(str(resultado))
+                        except Exception as exc:
+                            safe_messagebox_error("Error", f"No se pudo abrir:\n{exc}", parent=self.root)
+
+                self.root.after(0, _ok)
+            except Exception as exc:
+                msg = str(exc)
+                self.root.after(0, lambda msg=msg: self._log_message(f"✗ Error al exportar: {msg}"))
+            finally:
+                self.root.after(0, lambda: self.btn_fase1.config(state=tk.NORMAL))
+
+        threading.Thread(target=_export_worker, daemon=True).start()
+
+    def _on_fase1_error(self, error_msg: str):
+        if "Cancelado" in error_msg or self.cancel_event.is_set():
+            self.progress_label_fase1.config(text="Cancelado", foreground=EAFIT["warning"])
+            self._log_message("✗ Fase 1 cancelada.")
+            messagebox.showinfo("Cancelado", "La Fase 1 fue cancelada.", parent=self.root)
+        else:
+            self.progress_label_fase1.config(text="Error", foreground=EAFIT["danger"])
+            self._log_message(f"✗ ERROR Fase 1: {error_msg}")
+            safe_messagebox_error("Error Fase 1", f"Error durante la Fase 1:\n\n{error_msg}", parent=self.root)
+        self._refresh_checkpoint_label()
+
+    def _release_fase1_ui(self):
+        try:
+            self.progress_fase1.stop()
+        except Exception:
+            pass
+        self.is_running = False
+        self.btn_fase1.config(state=tk.NORMAL)
+        self.btn_cancel_fase1.config(state=tk.DISABLED)
+        self.btn_execute.config(state=tk.NORMAL)
+        self.progress_label_fase1.config(text="")
 
 
 class EstudioMercadoResultsPage(ttk.Frame):

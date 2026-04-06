@@ -216,8 +216,13 @@ SNIES_URLS = {
 }
 OLE_URLS = {"url": "", "selectors": {}}
 
-# Fase 4: scoring y comparación de costos
-# Se inicializa con el valor por defecto; get_benchmark_costo() lo sobreescribe desde config.json
+# Fase 4: scoring y comparación de costos por nivel de formación
+# Cada nivel tiene su propio benchmark; se sobrescriben desde config.json
+BENCHMARK_COSTO_PREGRADO = 10_000_000
+BENCHMARK_COSTO_ESPECIALIZACION = 13_400_000
+BENCHMARK_COSTO_MAESTRIA = 18_000_000
+BENCHMARK_COSTO_DOCTORADO = 25_000_000
+# Valor genérico (fallback para niveles no clasificados)
 BENCHMARK_COSTO = 13_400_000
 SMLMV = 1_300_000  # O el valor dinámico que tenga
 
@@ -241,11 +246,19 @@ SMLMV_POR_ANO: dict[int, int] = {
     2025: 1_423_500,
 }
 
-# Sobreescribir BENCHMARK_COSTO con el valor guardado en config.json si existe
 try:
-    _cfg_bench = _load_config().get("BENCHMARK_COSTO")
-    if isinstance(_cfg_bench, (int, float)) and _cfg_bench > 0:
-        BENCHMARK_COSTO = float(_cfg_bench)
+    _cfg = _load_config()
+    if isinstance(_cfg.get("BENCHMARK_COSTO_PREGRADO"), (int, float)) and _cfg["BENCHMARK_COSTO_PREGRADO"] > 0:
+        BENCHMARK_COSTO_PREGRADO = float(_cfg["BENCHMARK_COSTO_PREGRADO"])
+    if isinstance(_cfg.get("BENCHMARK_COSTO_ESPECIALIZACION"), (int, float)) and _cfg["BENCHMARK_COSTO_ESPECIALIZACION"] > 0:
+        BENCHMARK_COSTO_ESPECIALIZACION = float(_cfg["BENCHMARK_COSTO_ESPECIALIZACION"])
+    if isinstance(_cfg.get("BENCHMARK_COSTO_MAESTRIA"), (int, float)) and _cfg["BENCHMARK_COSTO_MAESTRIA"] > 0:
+        BENCHMARK_COSTO_MAESTRIA = float(_cfg["BENCHMARK_COSTO_MAESTRIA"])
+    if isinstance(_cfg.get("BENCHMARK_COSTO_DOCTORADO"), (int, float)) and _cfg["BENCHMARK_COSTO_DOCTORADO"] > 0:
+        BENCHMARK_COSTO_DOCTORADO = float(_cfg["BENCHMARK_COSTO_DOCTORADO"])
+    # Fallback genérico (mantener compatibilidad)
+    if isinstance(_cfg.get("BENCHMARK_COSTO"), (int, float)) and _cfg["BENCHMARK_COSTO"] > 0:
+        BENCHMARK_COSTO = float(_cfg["BENCHMARK_COSTO"])
 except Exception:
     pass
 
@@ -559,40 +572,53 @@ def set_last_success(iso_timestamp: str, duration_minutes: float) -> bool:
     return _save_config(c)
 
 
-def get_benchmark_costo() -> float:
-    """
-    Obtiene el benchmark de costo desde config.json.
-    Si no existe, retorna el valor por defecto (13.400.000).
-    """
+def get_benchmark_costo(nivel: str = "general") -> float:
+    nivel_norm = str(nivel).lower().strip()
+    if "especial" in nivel_norm:
+        return BENCHMARK_COSTO_ESPECIALIZACION
+    if "maestr" in nivel_norm or "magist" in nivel_norm:
+        return BENCHMARK_COSTO_MAESTRIA
+    if "doctor" in nivel_norm:
+        return BENCHMARK_COSTO_DOCTORADO
+    if "universit" in nivel_norm or "pregrad" in nivel_norm or "tecno" in nivel_norm or "tecni" in nivel_norm:
+        return BENCHMARK_COSTO_PREGRADO
+    return BENCHMARK_COSTO
+
+
+def set_benchmark_costo(valor: float, nivel: str = "general") -> bool:
+    global BENCHMARK_COSTO, BENCHMARK_COSTO_PREGRADO, BENCHMARK_COSTO_ESPECIALIZACION
+    global BENCHMARK_COSTO_MAESTRIA, BENCHMARK_COSTO_DOCTORADO
     try:
         c = _load_config()
-        val = c.get("BENCHMARK_COSTO")
-        if isinstance(val, (int, float)) and val > 0:
-            return float(val)
-    except Exception:
-        pass
-    return 13_400_000.0
-
-
-def set_benchmark_costo(valor: float) -> bool:
-    """
-    Persiste el benchmark de costo en config.json (clave 'BENCHMARK_COSTO').
-    También actualiza la variable global BENCHMARK_COSTO en este módulo.
-
-    Returns:
-        True si se guardó correctamente, False en caso contrario.
-    """
-    global BENCHMARK_COSTO
-    try:
-        c = _load_config()
-        c["BENCHMARK_COSTO"] = float(valor)
-        ok = _save_config(c)
-        if ok:
+        nivel_norm = str(nivel).lower().strip()
+        if "especial" in nivel_norm:
+            c["BENCHMARK_COSTO_ESPECIALIZACION"] = float(valor)
+            BENCHMARK_COSTO_ESPECIALIZACION = float(valor)
+        elif "maestr" in nivel_norm or "magist" in nivel_norm:
+            c["BENCHMARK_COSTO_MAESTRIA"] = float(valor)
+            BENCHMARK_COSTO_MAESTRIA = float(valor)
+        elif "doctor" in nivel_norm:
+            c["BENCHMARK_COSTO_DOCTORADO"] = float(valor)
+            BENCHMARK_COSTO_DOCTORADO = float(valor)
+        elif "universit" in nivel_norm or "pregrad" in nivel_norm:
+            c["BENCHMARK_COSTO_PREGRADO"] = float(valor)
+            BENCHMARK_COSTO_PREGRADO = float(valor)
+        else:
+            c["BENCHMARK_COSTO"] = float(valor)
             BENCHMARK_COSTO = float(valor)
-        return ok
+        return _save_config(c)
     except Exception as e:
-        print(f"[ERROR] No se pudo guardar BENCHMARK_COSTO en config.json: {e}")
+        print(f"[ERROR] No se pudo guardar benchmark en config.json: {e}")
         return False
+
+
+def get_todos_benchmarks() -> dict[str, float]:
+    return {
+        "pregrado": BENCHMARK_COSTO_PREGRADO,
+        "especializacion": BENCHMARK_COSTO_ESPECIALIZACION,
+        "maestria": BENCHMARK_COSTO_MAESTRIA,
+        "doctorado": BENCHMARK_COSTO_DOCTORADO,
+    }
 
 # ========= INFORMACIÓN DE DEBUG =========
 def print_config_info() -> None:

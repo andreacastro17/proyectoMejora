@@ -35,6 +35,7 @@ from etl.config import (
     RAW_HISTORIC_DIR,
     REF_DIR,
     UMBRAL_REGIONAL_MATRICULA,
+    get_benchmark_costo,
     get_smlmv_sesion,
 )
 from etl.exceptions_helpers import leer_excel_con_reintentos
@@ -1091,6 +1092,7 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
     else:
         ag["participacion_2024"] = np.nan
 
+    # AAGR_suma y AAGR_prom
     var_suma_cols = [f"var_suma_{y}" for y in range(2020, 2025) if f"var_suma_{y}" in ag.columns]
     var_prom_cols = [f"var_prom_{y}" for y in range(2020, 2025) if f"var_prom_{y}" in ag.columns]
     ag["AAGR_suma"] = ag[var_suma_cols].mean(axis=1) if var_suma_cols else np.nan
@@ -1185,8 +1187,29 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
     else:
         ag["prom_matricula_por_programa_2024"] = np.nan
 
-    # Bloque D: distancia_costo_pct
-    if "costo_promedio" in ag.columns:
+    # Bloque D: distancia_costo_pct por nivel de formación
+    # Se calcula a nivel de programa (antes de agregar) para usar el benchmark correcto por nivel
+    col_costo_prog = "COSTO_MATRÍCULA_ESTUD_NUEVOS"
+    col_nivel_prog = "NIVEL_DE_FORMACIÓN"
+    if col_costo_prog in df.columns:
+        def _distancia_costo(row):
+            costo = row.get(col_costo_prog)
+            nivel = row.get(col_nivel_prog, "")
+            if pd.isna(costo) or costo == 0:
+                return np.nan
+            bench = get_benchmark_costo(str(nivel))
+            return (float(costo) - bench) / bench * 100
+
+        df["_distancia_costo_prog"] = df.apply(_distancia_costo, axis=1)
+        distancia_por_cat = df.groupby("CATEGORIA_FINAL")["_distancia_costo_prog"].mean()
+        ag = ag.merge(
+            distancia_por_cat.rename("distancia_costo_pct").reset_index(),
+            on="CATEGORIA_FINAL",
+            how="left",
+        )
+        df = df.drop(columns=["_distancia_costo_prog"], errors="ignore")
+    elif "costo_promedio" in ag.columns:
+        # Fallback: si no hay costo por programa, usar costo_promedio con benchmark general
         ag["distancia_costo_pct"] = (ag["costo_promedio"] - BENCHMARK_COSTO) / BENCHMARK_COSTO * 100
     else:
         ag["distancia_costo_pct"] = np.nan
