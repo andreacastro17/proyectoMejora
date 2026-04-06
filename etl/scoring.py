@@ -9,8 +9,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from etl.config import BENCHMARK_COSTO, SMLMV
-
 # Umbrales: lista de (límite_superior_inclusivo, score). Valores por encima del último → score 5 (o 1 si inverse).
 # Para "inverse" (menor es mejor), se usa score 5 para el rango más bajo.
 SCORING_CONFIG = [

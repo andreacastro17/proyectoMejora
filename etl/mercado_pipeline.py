@@ -1,13 +1,15 @@
 """
-Orquestador del pipeline de mercado (clasificación de programas por categoría).
+Orquestador del pipeline de mercado (Fases 1–6 + segmentos regionales/modales).
 
-Sección 1 de 5: Fase 1 — Base maestra con categorías (ML).
-Fases 2–5 son stubs y se implementarán en secciones posteriores.
+Fases: 1-Base maestra (ML) · 2-Scrapers · 3-Sábana · 4-Scoring ·
+       5-Exportación nacional · 6-EAFIT vs Mercado ·
+       run_segmentos_regionales — Bogotá / Antioquia / Eje Cafetero / Virtual.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 from typing import Callable
 import re
 
@@ -1830,6 +1832,243 @@ def run_analisis_regional(
     return df_regional
 
 
+def _exportar_estudio_segmento(
+    etiqueta: str,
+    sabana_seg: pd.DataFrame,
+    ag_seg: pd.DataFrame,
+    ag_nacional: pd.DataFrame,
+    ruta: Path,
+) -> None:
+    """
+    Exporta un Excel de estudio de mercado para un segmento geográfico o modal.
+    Misma estructura que run_fase5 pero:
+      - Sin merge_incremental (siempre fresco).
+      - Sin análisis regional (aplica solo al nacional).
+      - Añade hoja 'contexto_nacional' con comparación segmento vs. país.
+    """
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+
+    NAC_COLS = {
+        "calificacion_final": "calificacion_nacional",
+        "AAGR_ROBUSTO": "AAGR_ROBUSTO_nacional",
+        "suma_matricula_2024": "suma_matricula_nacional_2024",
+    }
+    keys = [k for k in NAC_COLS if k in ag_nacional.columns]
+    if not keys:
+        log_warning(
+            f"[Segmento {etiqueta}] ag_nacional sin columnas de comparación — "
+            "contexto_nacional quedará limitado."
+        )
+    nac_cols_use = ["CATEGORIA_FINAL"] + keys
+    nac_merge = ag_nacional[nac_cols_use].rename(columns={k: NAC_COLS[k] for k in keys})
+    ag_con_nac = ag_seg.merge(nac_merge, on="CATEGORIA_FINAL", how="left")
+
+    while True:
+        try:
+            with pd.ExcelWriter(ruta, engine="openpyxl") as writer:
+                try:
+                    _escribir_resumen_ejecutivo(writer, sabana_seg, ag_seg)
+                except Exception as e:
+                    log_warning(f"[Segmento {etiqueta}] Resumen ejecutivo: {e}")
+
+                col_nivel = "NIVEL_DE_FORMACIÓN"
+                sabana_export = sabana_seg.copy()
+                if col_nivel in sabana_export.columns and NIVELES_MERCADO:
+                    sabana_export = sabana_export[sabana_export[col_nivel].isin(NIVELES_MERCADO)]
+                sabana_export.to_excel(writer, sheet_name="programas_detalle", index=False)
+
+                col_order = _escribir_hoja_total(writer, ag_seg)
+
+                ctx_cols = [
+                    "CATEGORIA_FINAL",
+                    "calificacion_final",
+                    "calificacion_nacional",
+                    "AAGR_ROBUSTO",
+                    "AAGR_ROBUSTO_nacional",
+                    "suma_matricula_2024",
+                    "suma_matricula_nacional_2024",
+                    "participacion_2024",
+                    "num_programas_2024",
+                ]
+                ctx_export = ag_con_nac[[c for c in ctx_cols if c in ag_con_nac.columns]].copy()
+                ctx_export = ctx_export.rename(
+                    columns={
+                        "calificacion_final": "Calif. segmento",
+                        "calificacion_nacional": "Calif. nacional",
+                        "AAGR_ROBUSTO": "AAGR segmento",
+                        "AAGR_ROBUSTO_nacional": "AAGR nacional",
+                        "suma_matricula_2024": "Matrícula segmento 2024",
+                        "suma_matricula_nacional_2024": "Matrícula nacional 2024",
+                        "participacion_2024": "Participación segmento",
+                        "num_programas_2024": "N° programas segmento",
+                    }
+                )
+                if "Calif. segmento" in ctx_export.columns:
+                    ctx_export = ctx_export.sort_values("Calif. segmento", ascending=False)
+                elif "CATEGORIA_FINAL" in ctx_export.columns:
+                    ctx_export = ctx_export.sort_values("CATEGORIA_FINAL")
+                ctx_export.to_excel(writer, sheet_name="contexto_nacional", index=False)
+
+                try:
+                    df_eafit = run_fase6(ag_seg, log_info)
+                    if df_eafit is not None and len(df_eafit) > 0:
+                        df_eafit.to_excel(writer, sheet_name="eafit_vs_mercado", index=False)
+                        _formatear_hoja_eafit(writer, df_eafit)
+                except Exception as e:
+                    log_warning(f"[Segmento {etiqueta}] eafit_vs_mercado: {e}")
+
+                wb = writer.book
+                ws_det = wb["programas_detalle"]
+                ws_det.freeze_panes = "A2"
+                ws_det.auto_filter.ref = ws_det.dimensions
+                from openpyxl.utils import get_column_letter
+
+                for col_name, width in COL_ANCHOS_PROGRAMAS.items():
+                    if col_name in sabana_export.columns:
+                        idx = list(sabana_export.columns).index(col_name) + 1
+                        ws_det.column_dimensions[get_column_letter(idx)].width = width
+                ws_total = wb["total"]
+                if col_order:
+                    _aplicar_formato_total(ws_total, col_order)
+
+            log_info(f"[Segmento {etiqueta}] Excel exportado: {ruta}")
+            break
+
+        except PermissionError:
+            log_warning(
+                f"[Segmento {etiqueta}] No se pudo escribir '{ruta.name}' — "
+                "el archivo está abierto en Excel. Ciérrelo e intente de nuevo desde la UI."
+            )
+            break
+        except Exception as e:
+            log_error(f"[Segmento {etiqueta}] Error exportando: {e}")
+            break
+
+
+def run_segmentos_regionales(
+    sabana: pd.DataFrame,
+    ag_nacional: pd.DataFrame,
+    cancel_event: threading.Event | None = None,
+) -> dict[str, pd.DataFrame]:
+    """
+    Genera un Excel independiente para cada segmento geográfico/modal.
+
+    Cada Excel recalcula Fase 4 completa (scoring, AAGR, participación, semáforo)
+    solo con los programas del segmento, sin tocar los datos nacionales.
+
+    Segmentos:
+      - Bogotá      → DEPARTAMENTO_OFERTA_PROGRAMA == "BOGOTÁ D.C."
+      - Antioquia   → DEPARTAMENTO_OFERTA_PROGRAMA == "ANTIOQUIA"
+      - Eje Cafetero → DEPARTAMENTO_OFERTA_PROGRAMA in {CALDAS, RISARALDA, QUINDÍO}
+      - Virtual     → MODALIDAD normalizada == "VIRTUAL"
+
+    Retorna dict {nombre_segmento: DataFrame_agregado} con los resultados.
+    """
+    from etl.config import OUTPUTS_DIR
+
+    COL_DEPT = "DEPARTAMENTO_OFERTA_PROGRAMA"
+    COL_MOD = "MODALIDAD"
+
+    SEGMENTOS: list[dict] = [
+        {
+            "nombre": "Bogota",
+            "etiqueta": "Bogotá D.C.",
+            "filtro": (
+                lambda df: df[df[COL_DEPT] == "BOGOTÁ D.C."].copy()
+                if COL_DEPT in df.columns
+                else df.iloc[0:0]
+            ),
+        },
+        {
+            "nombre": "Antioquia",
+            "etiqueta": "Antioquia",
+            "filtro": (
+                lambda df: df[df[COL_DEPT] == "ANTIOQUIA"].copy()
+                if COL_DEPT in df.columns
+                else df.iloc[0:0]
+            ),
+        },
+        {
+            "nombre": "Eje_Cafetero",
+            "etiqueta": "Eje Cafetero",
+            "filtro": (
+                lambda df: df[
+                    df[COL_DEPT].isin(["CALDAS", "RISARALDA", "QUINDÍO"])
+                ].copy()
+                if COL_DEPT in df.columns
+                else df.iloc[0:0]
+            ),
+        },
+        {
+            "nombre": "Virtual",
+            "etiqueta": "Virtual (Colombia)",
+            "filtro": (
+                lambda df: df[
+                    df[COL_MOD].astype(str).str.upper().str.strip() == "VIRTUAL"
+                ].copy()
+                if COL_MOD in df.columns
+                else df.iloc[0:0]
+            ),
+        },
+    ]
+
+    resultados: dict[str, pd.DataFrame] = {}
+
+    log_etapa_iniciada("Segmentos regionales/modales")
+
+    for seg in SEGMENTOS:
+        if cancel_event is not None and cancel_event.is_set():
+            log_warning("[Segmentos] Cancelado por el usuario antes de continuar.")
+            break
+
+        nombre = seg["nombre"]
+        etiqueta = seg["etiqueta"]
+
+        try:
+            df_seg = seg["filtro"](sabana)
+
+            if len(df_seg) == 0:
+                log_warning(f"[Segmento {nombre}] Sin programas tras filtro — omitido.")
+                continue
+
+            log_info(
+                f"[Segmento {nombre}] {len(df_seg):,} programas "
+                f"→ recalculando Fase 4..."
+            )
+
+            try:
+                ag_seg = run_fase4_desde_sabana(df_seg)
+            except Exception as e:
+                log_error(f"[Segmento {nombre}] Fase 4 falló: {e}")
+                continue
+
+            if ag_seg is None or len(ag_seg) == 0:
+                log_warning(f"[Segmento {nombre}] Fase 4 sin resultados — omitido.")
+                continue
+
+            log_info(
+                f"[Segmento {nombre}] {len(ag_seg)} categorías. "
+                f"Verde(>=4): {(ag_seg['calificacion_final'] >= 4.0).sum()}, "
+                f"Amarillo: {((ag_seg['calificacion_final'] >= 3.0) & (ag_seg['calificacion_final'] < 4.0)).sum()}, "
+                f"Rojo(<3): {(ag_seg['calificacion_final'] < 3.0).sum()}"
+            )
+
+            ruta = OUTPUTS_DIR / f"Estudio_Mercado_{nombre}.xlsx"
+            _exportar_estudio_segmento(etiqueta, df_seg, ag_seg, ag_nacional, ruta)
+
+            resultados[nombre] = ag_seg
+
+        except Exception as e:
+            log_error(f"[Segmento {nombre}] Error inesperado: {e}")
+            continue
+
+    log_etapa_completada(
+        "Segmentos regionales/modales",
+        f"{len(resultados)}/{len(SEGMENTOS)} segmentos exportados",
+    )
+    return resultados
+
+
 def run_fase5(agregado_df: pd.DataFrame | None) -> None:
     """
     Fase 5: Exportación formateada a Estudio_Mercado_Colombia.xlsx.
@@ -2780,6 +3019,16 @@ def run_pipeline(
     ag = run_fase4()
     run_fase5(ag)
 
+    # ── Segmentos regionales/modales ──────────────────────────────────────────
+    try:
+        if sabana_path.exists() and ag is not None:
+            sabana_seg = pd.read_parquet(sabana_path)
+            run_segmentos_regionales(sabana_seg, ag)
+        else:
+            log_warning("Segmentos omitidos: sábana o agregado nacional no disponibles.")
+    except Exception as e:
+        log_warning(f"Segmentos regionales/modales fallaron (no bloquea): {e}")
+
     elapsed = time.perf_counter() - t0
     log_resultado(f"Tiempo total: {elapsed:.1f}s")
     log_info(f"Salida: {ARCHIVO_ESTUDIO_MERCADO}")
@@ -2805,6 +3054,16 @@ def run_pipeline_mercado() -> None:
     run_fase3()
     ag = run_fase4()
     run_fase5(ag)
+
+    try:
+        sabana_path = CHECKPOINT_BASE_MAESTRA.parent / "sabana_consolidada.parquet"
+        if sabana_path.exists() and ag is not None:
+            sabana_seg = pd.read_parquet(sabana_path)
+            run_segmentos_regionales(sabana_seg, ag)
+        else:
+            log_warning("Segmentos omitidos: sábana o agregado nacional no disponibles.")
+    except Exception as e:
+        log_warning(f"Segmentos regionales/modales fallaron (no bloquea): {e}")
 
 
 if __name__ == "__main__":

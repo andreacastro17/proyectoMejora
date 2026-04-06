@@ -4451,6 +4451,7 @@ class MercadoPipelinePage(ttk.Frame):
         self.root = parent.winfo_toplevel()
         self.is_running = False
         self.cancel_event = threading.Event()
+        self.seg_cancel_event = threading.Event()
         self._setup_ui()
         self._check_checkpoints()
 
@@ -4682,6 +4683,43 @@ class MercadoPipelinePage(ttk.Frame):
         self.progress_label = ttk.Label(run_card, text="Progreso: listo", style="Status.TLabel")
         self.progress_label.pack(anchor="w", pady=(4, 0))
 
+        # ── Card 3: Segmentos ────────────────────────────────────────────
+        seg_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
+        seg_card.pack(fill=tk.X, pady=(0, 14))
+        ttk.Label(
+            seg_card,
+            text="3. Reportes segmentados — Bogotá · Antioquia · Eje Cafetero · Virtual",
+            style="SectionTitle.TLabel",
+        ).pack(anchor="w")
+        ttk.Label(
+            seg_card,
+            text=(
+                "Recalcula scoring, AAGR y semáforos de calidad de forma independiente "
+                "para cada segmento. Requiere haber ejecutado las Fases 2-5 primero."
+            ),
+            style="Muted.TLabel",
+            wraplength=900,
+        ).pack(anchor="w", pady=(4, 10))
+        btn_frame_seg = ttk.Frame(seg_card, style="Card.TFrame")
+        btn_frame_seg.pack(anchor="w")
+        self.btn_segmentos = ttk.Button(
+            btn_frame_seg,
+            text="Generar Reportes Segmentados",
+            style="Primary.TButton",
+            command=self._on_segmentos_clicked,
+        )
+        self.btn_segmentos.pack(side=tk.LEFT, padx=(0, 8))
+        self.btn_cancel_seg = ttk.Button(
+            btn_frame_seg,
+            text="Cancelar",
+            style="Secondary.TButton",
+            state=tk.DISABLED,
+            command=self._on_cancel_segmentos_clicked,
+        )
+        self.btn_cancel_seg.pack(side=tk.LEFT)
+        self.prog_seg = ttk.Progressbar(seg_card, mode="indeterminate", length=500)
+        self.prog_seg.pack(fill=tk.X, pady=(10, 4))
+
         # ── Card: Logs ───────────────────────────────────────────────────────
         log_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
         log_card.pack(fill=tk.X, pady=(0, 10))
@@ -4853,6 +4891,85 @@ class MercadoPipelinePage(ttk.Frame):
         # Renderizado inicial
         aplicar()
         win.grab_set()
+
+    def _on_segmentos_clicked(self) -> None:
+        from etl.config import CHECKPOINT_BASE_MAESTRA
+
+        sabana_path = CHECKPOINT_BASE_MAESTRA.parent / "sabana_consolidada.parquet"
+        ag_path = CHECKPOINT_BASE_MAESTRA.parent / "agregado_categorias.parquet"
+
+        if not sabana_path.exists() or not ag_path.exists():
+            messagebox.showwarning(
+                "Fases incompletas",
+                "Ejecuta primero las Fases 1-5 (nacional) antes de generar los reportes segmentados.",
+                parent=self.root,
+            )
+            return
+        if self.is_running:
+            messagebox.showwarning(
+                "Atención",
+                "Espera a que termine el pipeline en curso o cancélalo antes de generar reportes segmentados.",
+                parent=self.root,
+            )
+            return
+
+        self.seg_cancel_event.clear()
+        self.btn_segmentos.config(state=tk.DISABLED)
+        self.btn_cancel_seg.config(state=tk.NORMAL)
+        self.prog_seg.start(12)
+        self._log_message("Iniciando generación de reportes segmentados...")
+
+        threading.Thread(target=self._run_segmentos_thread, daemon=True).start()
+
+    def _on_cancel_segmentos_clicked(self) -> None:
+        self.seg_cancel_event.set()
+        self._log_message("[Segmentos] Cancelación solicitada; se detendrá al terminar el segmento en curso.")
+
+    def _run_segmentos_thread(self) -> None:
+        from etl.config import CHECKPOINT_BASE_MAESTRA
+        from etl.mercado_pipeline import run_segmentos_regionales
+
+        try:
+            base_dir = get_configured_base_dir()
+            if not base_dir or not base_dir.exists():
+                self.root.after(0, lambda: self._on_segmentos_error("No hay carpeta del proyecto configurada."))
+                return
+            update_paths_for_base_dir(base_dir)
+
+            sabana_path = CHECKPOINT_BASE_MAESTRA.parent / "sabana_consolidada.parquet"
+            ag_path = CHECKPOINT_BASE_MAESTRA.parent / "agregado_categorias.parquet"
+
+            sabana = pd.read_parquet(sabana_path)
+            ag_nac = pd.read_parquet(ag_path)
+
+            resultados = run_segmentos_regionales(sabana, ag_nac, cancel_event=self.seg_cancel_event)
+
+            self.root.after(0, self._on_segmentos_completed, resultados)
+        except Exception as e:
+            self.root.after(0, self._on_segmentos_error, str(e))
+
+    def _on_segmentos_completed(self, resultados: dict) -> None:
+        self.prog_seg.stop()
+        self.btn_segmentos.config(state=tk.NORMAL)
+        self.btn_cancel_seg.config(state=tk.DISABLED)
+        nombres = ", ".join(resultados.keys()) if resultados else "ninguno"
+        self._log_message(f"Reportes segmentados listos: {nombres}")
+        from etl.config import OUTPUTS_DIR
+
+        messagebox.showinfo(
+            "Reportes segmentados generados",
+            f"Se generaron {len(resultados)} archivos Excel:\n\n"
+            + "\n".join(f"  Estudio_Mercado_{k}.xlsx" for k in resultados)
+            + f"\n\nUbicación: {OUTPUTS_DIR}",
+            parent=self.root,
+        )
+
+    def _on_segmentos_error(self, error: str) -> None:
+        self.prog_seg.stop()
+        self.btn_segmentos.config(state=tk.NORMAL)
+        self.btn_cancel_seg.config(state=tk.DISABLED)
+        self._log_message(f"Error en segmentos: {error}")
+        messagebox.showerror("Error en segmentos", error, parent=self.root)
 
     def _check_checkpoints(self):
         from etl.config import CHECKPOINT_BASE_MAESTRA
@@ -5101,6 +5218,28 @@ class MercadoPipelinePage(ttk.Frame):
             self.root.after(0, lambda: self._update_progress(4, "Fase 5..."))
             run_fase5(ag)
             self.root.after(0, lambda: self._update_progress(4, "Fase 5 ✓"))
+
+            if self.cancel_event.is_set():
+                self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
+                return
+
+            try:
+                from etl.mercado_pipeline import run_segmentos_regionales
+
+                self.root.after(
+                    0,
+                    lambda: self._log_message(
+                        "Exportando estudios por segmento (Bogotá, Antioquia, Eje Cafetero, Virtual)..."
+                    ),
+                )
+                sabana_cur = pd.read_parquet(sabana_path)
+                if ag is not None:
+                    run_segmentos_regionales(sabana_cur, ag, cancel_event=self.cancel_event)
+            except Exception as e:
+                self.root.after(
+                    0,
+                    lambda msg=str(e): self._log_message(f"Aviso — segmentos regionales: {msg}"),
+                )
 
             if self.cancel_event.is_set():
                 self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
