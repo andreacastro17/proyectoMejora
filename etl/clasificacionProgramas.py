@@ -96,41 +96,17 @@ def normalizar_texto(texto: str) -> str:
 
 
 def normalizar_nivel_formacion(nivel: str) -> str:
-    """
-    Normaliza el nivel de formación a uno de los 4 valores canónicos:
-    - 'universitario' (pregrado, universitario)
-    - 'maestria' (maestría, magíster)
-    - 'doctorado' (doctorado, phd)
-    - 'especializacion universitaria' (especialización, especialidad)
-    
-    Args:
-        nivel: Nivel de formación a normalizar
-        
-    Returns:
-        Nivel normalizado a uno de los 4 valores canónicos
-    """
     if pd.isna(nivel):
         return ""
-    
     nivel_norm = normalizar_texto(str(nivel))
-    
-    # Universitario / Pregrado
-    if any(x in nivel_norm for x in ['universit', 'pregrad', 'pregra']):
-        return 'universitario'
-    
-    # Maestría
-    if any(x in nivel_norm for x in ['maestr', 'magist', 'master']):
-        return 'maestria'
-    
-    # Doctorado
-    if any(x in nivel_norm for x in ['doctor', 'phd']):
-        return 'doctorado'
-    
-    # Especialización universitaria
     if any(x in nivel_norm for x in ['especial', 'especializ']):
         return 'especializacion universitaria'
-    
-    # Si no coincide con ningún patrón, retornar vacío (se considerará inválido)
+    if any(x in nivel_norm for x in ['universit', 'pregrad', 'pregra']):
+        return 'universitario'
+    if any(x in nivel_norm for x in ['maestr', 'magist', 'master']):
+        return 'maestria'
+    if any(x in nivel_norm for x in ['doctor', 'phd']):
+        return 'doctorado'
     return ""
 
 
@@ -155,61 +131,118 @@ def niveles_coinciden(nivel1: str, nivel2: str) -> bool:
 
 
 def cargar_referentes(archivo: Path = None) -> pd.DataFrame:
-    """
-    Carga el archivo de referentes unificados y prepara los datos de entrenamiento.
-    
-    Args:
-        archivo: Ruta al archivo de referentes (Excel o CSV). Si es None, usa detección automática.
-        
-    Returns:
-        DataFrame con los referentes preparados
-    """
     if archivo is None:
         archivo = get_archivo_referentes()
-    
+
     print(f"Cargando referentes desde: {archivo}")
     df = leer_datos_flexible(archivo)
-    
-    # Filtrar solo los que tienen label=1 (son referentes confirmados)
     df = df[df['label'] == 1].copy()
-    
-    # Limpiar datos - eliminar filas sin nombre de programa o programa EAFIT
     df = df.dropna(subset=['NOMBRE_DEL_PROGRAMA', 'NombrePrograma EAFIT'])
-    
-    # Normalizar textos
+
+    # Cargar pares positivos adicionales si existen en la misma carpeta
+    carpeta = archivo.parent
+    archivos_pares = {
+        'posParesPositivos': carpeta / 'posParesPositivos.csv',
+        'preParesPositivos': carpeta / 'preParesPositivos.csv',
+    }
+    dfs_extra = []
+    for nombre, ruta_pares in archivos_pares.items():
+        if not ruta_pares.exists():
+            # También buscar en subcarpeta backup/
+            ruta_pares = carpeta / 'backup' / ruta_pares.name
+        if ruta_pares.exists():
+            try:
+                df_pares = leer_datos_flexible(ruta_pares)
+                # Normalizar columnas al esquema de referentesUnificados
+                rename_map = {}
+                for col in df_pares.columns:
+                    col_l = str(col).strip().lower()
+                    if 'nombre' in col_l and 'instituci' in col_l:
+                        rename_map[col] = 'NOMBRE_INSTITUCIÓN'
+                    elif 'nombre' in col_l and 'programa' in col_l and 'eafit' not in col_l:
+                        rename_map[col] = 'NOMBRE_DEL_PROGRAMA'
+                    elif 'nombre' in col_l and 'eafit' in col_l:
+                        rename_map[col] = 'NombrePrograma EAFIT'
+                    elif 'campo' in col_l and 'eafit' not in col_l and 'amplio' in col_l:
+                        rename_map[col] = 'CAMPO_AMPLIO'
+                    elif 'campo' in col_l and 'eafit' in col_l:
+                        rename_map[col] = 'CAMPO_AMPLIO_EAFIT'
+                    elif 'nivel' in col_l and 'eafit' not in col_l:
+                        rename_map[col] = 'NIVEL_DE_FORMACIÓN'
+                    elif 'nivel' in col_l and 'eafit' in col_l:
+                        rename_map[col] = 'NIVEL_DE_FORMACIÓN EAFIT'
+                    elif 'codigo' in col_l and 'eafit' in col_l:
+                        rename_map[col] = 'Codigo EAFIT'
+                if rename_map:
+                    df_pares = df_pares.rename(columns=rename_map)
+                df_pares['label'] = 1
+                # Conservar solo filas con los campos mínimos necesarios
+                required = ['NOMBRE_DEL_PROGRAMA', 'NombrePrograma EAFIT']
+                if all(c in df_pares.columns for c in required):
+                    df_pares = df_pares.dropna(subset=required)
+                    dfs_extra.append(df_pares)
+                    print(f"  Pares adicionales cargados desde {ruta_pares.name}: {len(df_pares)} filas")
+                else:
+                    print(f"  Advertencia: {ruta_pares.name} no tiene columnas mínimas requeridas, se omite")
+            except Exception as e:
+                print(f"  Advertencia: no se pudo cargar {ruta_pares.name}: {e}")
+        else:
+            print(f"  Archivo opcional no encontrado, se omite: {ruta_pares.name}")
+
+    if dfs_extra:
+        # Guardar el df original del referente para obtener niveles de los pares
+        df_ref_original = df.copy()
+        df = pd.concat([df] + dfs_extra, ignore_index=True)
+
+        # Enriquecer filas de pares que no tienen NIVEL con datos del referente original
+        if 'CÓDIGO_SNIES_DEL_PROGRAMA' in df.columns and 'CÓDIGO_SNIES_DEL_PROGRAMA' in df_ref_original.columns:
+            df_ref_original['_snies_str'] = df_ref_original['CÓDIGO_SNIES_DEL_PROGRAMA'].astype(str).str.strip()
+            df['_snies_str'] = df['CÓDIGO_SNIES_DEL_PROGRAMA'].astype(str).str.strip()
+            nivel_lookup = df_ref_original.drop_duplicates(subset=['_snies_str']).set_index('_snies_str')
+            for col_nivel in ['NIVEL_DE_FORMACIÓN', 'NIVEL_DE_FORMACIÓN EAFIT']:
+                if col_nivel in nivel_lookup.columns:
+                    mask_vacio = df[col_nivel].isna() | (df[col_nivel].astype(str).str.strip() == '')
+                    df.loc[mask_vacio, col_nivel] = df.loc[mask_vacio, '_snies_str'].map(nivel_lookup[col_nivel])
+            df = df.drop(columns=['_snies_str'], errors='ignore')
+
+        # Eliminar duplicados conservando referente original (keep='first')
+        if 'CÓDIGO_SNIES_DEL_PROGRAMA' in df.columns:
+            df = df.drop_duplicates(subset=['CÓDIGO_SNIES_DEL_PROGRAMA'], keep='first')
+        else:
+            df = df.drop_duplicates(subset=['NOMBRE_DEL_PROGRAMA', 'NombrePrograma EAFIT'], keep='first')
+        print(f"Total referentes combinados (referentes + pares): {len(df)}")
+
+    # Asegurar columnas opcionales con fallback vacío
+    for col_opt in ['CAMPO_AMPLIO', 'CAMPO_AMPLIO_EAFIT', 'NIVEL_DE_FORMACIÓN', 'NIVEL_DE_FORMACIÓN EAFIT']:
+        if col_opt not in df.columns:
+            df[col_opt] = ''
+
     df['NOMBRE_DEL_PROGRAMA_norm'] = df['NOMBRE_DEL_PROGRAMA'].apply(normalizar_texto)
     df['NombrePrograma EAFIT_norm'] = df['NombrePrograma EAFIT'].apply(normalizar_texto)
-    
-    # Normalizar campos amplios
     df['CAMPO_AMPLIO_norm'] = df['CAMPO_AMPLIO'].fillna('').apply(normalizar_texto)
     df['CAMPO_AMPLIO_EAFIT_norm'] = df['CAMPO_AMPLIO_EAFIT'].fillna('').apply(normalizar_texto)
-    
-    # Normalizar niveles de formación
+
     if 'NIVEL_DE_FORMACIÓN' in df.columns:
         df['NIVEL_DE_FORMACIÓN_norm'] = df['NIVEL_DE_FORMACIÓN'].fillna('').apply(normalizar_nivel_formacion)
     else:
-        print("ADVERTENCIA: No se encontró la columna 'NIVEL_DE_FORMACIÓN' en referentes")
         df['NIVEL_DE_FORMACIÓN_norm'] = ''
-    
+
     if 'NIVEL_DE_FORMACIÓN EAFIT' in df.columns:
         df['NIVEL_DE_FORMACIÓN_EAFIT_norm'] = df['NIVEL_DE_FORMACIÓN EAFIT'].fillna('').apply(normalizar_nivel_formacion)
     else:
-        print("ADVERTENCIA: No se encontró la columna 'NIVEL_DE_FORMACIÓN EAFIT' en referentes")
         df['NIVEL_DE_FORMACIÓN_EAFIT_norm'] = ''
-    
-    # FILTRAR: Solo entrenar con referentes donde los niveles coinciden
-    # CRÍTICO: Si los niveles no coinciden, no son referentes válidos
+
     antes_filtro = len(df)
     df = df[
-        (df['NIVEL_DE_FORMACIÓN_norm'] != '') & 
+        (df['NIVEL_DE_FORMACIÓN_norm'] != '') &
         (df['NIVEL_DE_FORMACIÓN_EAFIT_norm'] != '') &
         (df['NIVEL_DE_FORMACIÓN_norm'] == df['NIVEL_DE_FORMACIÓN_EAFIT_norm'])
     ].copy()
     despues_filtro = len(df)
-    
+
     if antes_filtro != despues_filtro:
         print(f"Filtrados {antes_filtro - despues_filtro} referentes donde los niveles no coinciden")
-    
+
     print(f"Total de referentes con label=1 y niveles coincidentes: {len(df)}")
     return df
 
@@ -508,9 +541,10 @@ def entrenar_modelo(
     print("Entrenando modelo RandomForest...")
     modelo = RandomForestClassifier(
         n_estimators=200,
-        max_depth=30,
+        max_depth=15,
         min_samples_split=5,
         min_samples_leaf=2,
+        class_weight='balanced',
         random_state=random_state,
         n_jobs=-1,
         verbose=1
@@ -889,20 +923,20 @@ def clasificar_programa_nuevo(
         # Predecir con el modelo
         # El modelo predice qué programa EAFIT corresponde
         try:
-            # Verificar si este programa EAFIT está en el encoder (fue visto en entrenamiento)
             if nombre_eafit_norm in encoder.classes_:
                 label_eafit = encoder.transform([nombre_eafit_norm])[0]
                 proba = modelo_clasificador.predict_proba(features)[0]
                 probabilidad_modelo = proba[label_eafit] if label_eafit < len(proba) else 0.0
+                # Score combinado: modelo conoce este programa
+                score_final = 0.6 * probabilidad_modelo + 0.4 * similitud_emb
             else:
-                # Si no está en el entrenamiento, usar solo similitud de embedding
-                probabilidad_modelo = similitud_emb * 0.7  # Penalizar ligeramente
+                # Programa EAFIT no visto en entrenamiento: usar solo similitud semántica
+                # sin penalizar, porque el modelo simplemente no tiene ejemplos de él
+                probabilidad_modelo = similitud_emb
+                score_final = similitud_emb
         except Exception:
-            probabilidad_modelo = similitud_emb * 0.7
-        
-        # Combinar similitud de embedding y probabilidad del modelo
-        # Peso: 60% modelo, 40% similitud directa
-        score_final = 0.6 * probabilidad_modelo + 0.4 * similitud_emb
+            probabilidad_modelo = similitud_emb * 0.8
+            score_final = similitud_emb * 0.8
         
         # Obtener estado del programa EAFIT
         estado_programa_eafit = ''
