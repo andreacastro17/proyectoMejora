@@ -1010,7 +1010,7 @@ def run_fase3() -> None:
         pass
     try:
         fechas = pd.to_datetime(base.get("FECHA_DE_REGISTRO_EN_SNIES", pd.Series()), errors="coerce")
-        base["nuevo_en_snies_3a"] = fechas >= pd.Timestamp("2022-01-01")
+        base["nuevo_en_snies_3a"] = fechas >= (pd.Timestamp.today().normalize() - pd.DateOffset(years=3))
     except Exception:
         base["nuevo_en_snies_3a"] = False
     base["nuevo_en_snies_3a"] = base["nuevo_en_snies_3a"].fillna(False)
@@ -1104,7 +1104,7 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
     grouped = df.groupby("CATEGORIA_FINAL", as_index=True)
 
     def _count_false(s: pd.Series) -> int:
-        return (s == False).sum()
+        return int((~s.fillna(True).astype(bool)).sum())
 
     simple_agg = {}
     for y in years:
@@ -2043,7 +2043,7 @@ def run_segmentos_regionales(
 
     Retorna dict {nombre_segmento: DataFrame_agregado} con los resultados.
     """
-    from etl.config import OUTPUTS_DIR, TEMP_DIR
+    from etl.config import OUTPUTS_DIR, TEMP_DIR, ESTUDIO_MERCADO_DIR
 
     COL_DEPT = "DEPARTAMENTO_OFERTA_PROGRAMA"
     COL_MOD = "MODALIDAD"
@@ -2157,7 +2157,7 @@ def run_segmentos_regionales(
                 f"Rojo(<3): {(ag_seg['calificacion_final'] < 3.0).sum()}"
             )
 
-            ruta = OUTPUTS_DIR / f"Estudio_Mercado_{nombre}.xlsx"
+            ruta = ESTUDIO_MERCADO_DIR / f"Estudio_Mercado_{nombre}.xlsx"
             _exportar_estudio_segmento(etiqueta, df_seg, ag_seg, ag_nacional, ruta)
 
             resultados[nombre] = ag_seg
@@ -3324,16 +3324,6 @@ def run_pipeline(
     ag = run_fase4()
     run_fase5(ag)
 
-    # ── Segmentos regionales/modales ──────────────────────────────────────────
-    try:
-        if sabana_path.exists() and ag is not None:
-            sabana_seg = pd.read_parquet(sabana_path)
-            run_segmentos_regionales(sabana_seg, ag)
-        else:
-            log_warning("Segmentos omitidos: sábana o agregado nacional no disponibles.")
-    except Exception as e:
-        log_warning(f"Segmentos regionales/modales fallaron (no bloquea): {e}")
-
     elapsed = time.perf_counter() - t0
     log_resultado(f"Tiempo total: {elapsed:.1f}s")
     log_info(f"Salida: {ARCHIVO_ESTUDIO_MERCADO}")
@@ -3365,16 +3355,6 @@ def run_pipeline_mercado() -> None:
     run_fase3()
     ag = run_fase4()
     run_fase5(ag)
-
-    try:
-        sabana_path = CHECKPOINT_BASE_MAESTRA.parent / "sabana_consolidada.parquet"
-        if sabana_path.exists() and ag is not None:
-            sabana_seg = pd.read_parquet(sabana_path)
-            run_segmentos_regionales(sabana_seg, ag)
-        else:
-            log_warning("Segmentos omitidos: sábana o agregado nacional no disponibles.")
-    except Exception as e:
-        log_warning(f"Segmentos regionales/modales fallaron (no bloquea): {e}")
 
 
 if __name__ == "__main__":
