@@ -203,6 +203,12 @@ ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos .xlsx"  # Con espaci
 # ========= PIPELINE MERCADO (Fase 1+) =========
 TEMP_DIR = OUTPUTS_DIR / "temp"
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+ESTUDIO_MERCADO_DIR = OUTPUTS_DIR / "estudio_de_mercado"
+ESTUDIO_MERCADO_DIR.mkdir(parents=True, exist_ok=True)
+
+HISTORICO_ESTUDIO_MERCADO_DIR = ESTUDIO_MERCADO_DIR / "historico_estudio_de_mercado"
+HISTORICO_ESTUDIO_MERCADO_DIR.mkdir(parents=True, exist_ok=True)
 RAW_HISTORIC_DIR = HISTORIC_DIR / "raw"
 RAW_HISTORIC_DIR.mkdir(parents=True, exist_ok=True)
 HOJA_REFERENTE_CATEGORIAS = "1_Consolidado"
@@ -304,7 +310,7 @@ def get_smlmv_sesion() -> float:
     return 1_300_000.0
 
 # Fase 5: exportación estudio de mercado
-ARCHIVO_ESTUDIO_MERCADO = OUTPUTS_DIR / "Estudio_Mercado_Colombia.xlsx"
+ARCHIVO_ESTUDIO_MERCADO = ESTUDIO_MERCADO_DIR / "Estudio_Mercado_Colombia.xlsx"
 
 
 def _resolve_referencia_path(ref_dir: Path, nombre_base: str) -> Path:
@@ -374,7 +380,8 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     """
     global _BASE_PATH, OUTPUTS_DIR, HISTORIC_DIR, REF_DIR, MODELS_DIR, DOCS_DIR, LOGS_DIR
     global ARCHIVO_PROGRAMAS, ARCHIVO_HISTORICO, ARCHIVO_REFERENTES, ARCHIVO_CATALOGO_EAFIT, ARCHIVO_NORMALIZACION
-    global TEMP_DIR, RAW_HISTORIC_DIR, CHECKPOINT_BASE_MAESTRA, MODELO_CLASIFICADOR_MERCADO, ARCHIVO_REFERENTE_CATEGORIAS, ARCHIVO_ESTUDIO_MERCADO
+    global TEMP_DIR, ESTUDIO_MERCADO_DIR, HISTORICO_ESTUDIO_MERCADO_DIR
+    global RAW_HISTORIC_DIR, CHECKPOINT_BASE_MAESTRA, MODELO_CLASIFICADOR_MERCADO, ARCHIVO_REFERENTE_CATEGORIAS, ARCHIVO_ESTUDIO_MERCADO
 
     if not set_base_dir(base_dir):
         raise ValueError(f"No se pudo establecer el directorio base: {base_dir}")
@@ -388,6 +395,12 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     MODELS_DIR = _get_path("models_dir", "models")
     DOCS_DIR = _get_path("docs_dir", "docs")
     LOGS_DIR = _get_path("logs_dir", "logs")
+
+    ESTUDIO_MERCADO_DIR = OUTPUTS_DIR / "estudio_de_mercado"
+    ESTUDIO_MERCADO_DIR.mkdir(parents=True, exist_ok=True)
+
+    HISTORICO_ESTUDIO_MERCADO_DIR = ESTUDIO_MERCADO_DIR / "historico_estudio_de_mercado"
+    HISTORICO_ESTUDIO_MERCADO_DIR.mkdir(parents=True, exist_ok=True)
     
     # Recalcular rutas de archivos
     ARCHIVO_PROGRAMAS = OUTPUTS_DIR / "Programas.xlsx"
@@ -399,7 +412,7 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     RAW_HISTORIC_DIR.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_BASE_MAESTRA = TEMP_DIR / "base_maestra.parquet"
     MODELO_CLASIFICADOR_MERCADO = MODELS_DIR / "clasificador_mercado.pkl"
-    ARCHIVO_ESTUDIO_MERCADO = OUTPUTS_DIR / "Estudio_Mercado_Colombia.xlsx"
+    ARCHIVO_ESTUDIO_MERCADO = ESTUDIO_MERCADO_DIR / "Estudio_Mercado_Colombia.xlsx"
 
     # Funciones para detección automática de formato en archivos de referencia
     def _cargar_archivo_referencia(base_path: Path, nombre_base: str) -> Path:

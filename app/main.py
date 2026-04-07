@@ -4965,13 +4965,13 @@ class MercadoPipelinePage(ttk.Frame):
         self.btn_cancel_seg.config(state=tk.DISABLED)
         nombres = ", ".join(resultados.keys()) if resultados else "ninguno"
         self._log_message(f"Reportes segmentados listos: {nombres}")
-        from etl.config import OUTPUTS_DIR
+        from etl.config import ESTUDIO_MERCADO_DIR
 
         messagebox.showinfo(
             "Reportes segmentados generados",
             f"Se generaron {len(resultados)} archivos Excel:\n\n"
             + "\n".join(f"  Estudio_Mercado_{k}.xlsx" for k in resultados)
-            + f"\n\nUbicación: {OUTPUTS_DIR}",
+            + f"\n\nUbicación: {ESTUDIO_MERCADO_DIR}",
             parent=self.root,
         )
 
@@ -5234,24 +5234,6 @@ class MercadoPipelinePage(ttk.Frame):
                 self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
                 return
 
-            try:
-                from etl.mercado_pipeline import run_segmentos_regionales
-
-                self.root.after(
-                    0,
-                    lambda: self._log_message(
-                        "Exportando estudios por segmento (Bogotá, Antioquia, Eje Cafetero, Virtual)..."
-                    ),
-                )
-                sabana_cur = pd.read_parquet(sabana_path)
-                if ag is not None:
-                    run_segmentos_regionales(sabana_cur, ag, cancel_event=self.cancel_event)
-            except Exception as e:
-                self.root.after(
-                    0,
-                    lambda msg=str(e): self._log_message(f"Aviso — segmentos regionales: {msg}"),
-                )
-
             if self.cancel_event.is_set():
                 self.root.after(0, lambda: self._on_mercado_error("Cancelado"))
                 return
@@ -5271,10 +5253,10 @@ class MercadoPipelinePage(ttk.Frame):
         self.progress_label.config(text="Progreso: completado", foreground=EAFIT["success"])
         self._log_message("=" * 50)
         self._log_message("✓ Pipeline de estudio de mercado completado")
-        from etl.config import ARCHIVO_ESTUDIO_MERCADO
+        from etl.config import ARCHIVO_ESTUDIO_MERCADO, ESTUDIO_MERCADO_DIR
         messagebox.showinfo(
             "Éxito",
-            f"Exportación guardada en:\n{ARCHIVO_ESTUDIO_MERCADO}",
+            f"Exportación guardada en:\n{ARCHIVO_ESTUDIO_MERCADO}\n\nCarpeta: {ESTUDIO_MERCADO_DIR}",
             parent=self.root,
         )
 
@@ -5354,31 +5336,18 @@ class MercadoPipelinePage(ttk.Frame):
             self.root.after(0, self._release_fase1_ui)
 
     def _on_fase1_completed(self):
-        self._log_message("✓ Fase 1 completada. Selecciona dónde guardar el Excel...")
+        self._log_message("✓ Fase 1 completada. Exportando Excel en carpeta de estudio de mercado...")
         self._refresh_checkpoint_label()
-        import tkinter.filedialog as fd
-        from etl.config import OUTPUTS_DIR
+        from etl.config import ESTUDIO_MERCADO_DIR
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-        ruta = fd.asksaveasfilename(
-            title="Guardar Excel — Fase 1 (Programas con Categorías)",
-            initialdir=str(OUTPUTS_DIR),
-            initialfile=f"Base_Maestra_F1_{ts}.xlsx",
-            defaultextension=".xlsx",
-            filetypes=[("Excel", "*.xlsx")],
-            parent=self.root,
-        )
-        if not ruta:
-            self._log_message("⚠️ Exportación cancelada. El checkpoint sigue disponible para las Fases 2-5.")
-            self._refresh_checkpoint_label()
-            return
+        ruta = ESTUDIO_MERCADO_DIR / f"Base_Maestra_F1_{ts}.xlsx"
         self._log_message(f"Exportando Excel → {ruta} ...")
 
         def _export_worker():
             try:
                 from etl.mercado_pipeline import exportar_base_maestra_excel
-                from pathlib import Path
 
-                resultado = exportar_base_maestra_excel(ruta_salida=Path(ruta))
+                resultado = exportar_base_maestra_excel(ruta_salida=ruta)
 
                 def _ok():
                     self._log_message(f"✓ Excel generado: {resultado.name}")

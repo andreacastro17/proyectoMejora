@@ -18,12 +18,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from etl.config import OUTPUTS_DIR
+from etl.config import ARCHIVO_ESTUDIO_MERCADO, HISTORICO_ESTUDIO_MERCADO_DIR
 from etl.pipeline_logger import log_info, log_warning
 
 # ── Rutas ─────────────────────────────────────────────────────────────────────
-SNAPSHOTS_DIR = OUTPUTS_DIR / "historico" / "snapshots"
-ESTUDIO_PATH = OUTPUTS_DIR / "Estudio_Mercado_Colombia.xlsx"
+SNAPSHOTS_DIR = HISTORICO_ESTUDIO_MERCADO_DIR / "snapshots"
+ESTUDIO_PATH = ARCHIVO_ESTUDIO_MERCADO
 
 # Número de días que se conservan los snapshots. Snapshots más viejos se eliminan.
 SNAPSHOT_RETENTION_DAYS = 30
@@ -399,8 +399,14 @@ def _ajustar_totales(detalle: pd.DataFrame, total_nuevo: pd.DataFrame | None) ->
         .agg(
             _activos=("ACTIVO_PIPELINE", lambda s: s.astype(bool).sum()),
             _inactivos=("ACTIVO_PIPELINE", lambda s: (~s.astype(bool)).sum()),
-            _nuevos_snies=("nuevo_en_snies_3a", lambda s: s.astype(bool).sum()),
-            _nuevos_snap=("nuevo_vs_snapshot_anterior", lambda s: s.astype(bool).sum()),
+            _nuevos_snies=(
+                "nuevo_en_snies_3a",
+                lambda s: s.astype(bool).sum() if "nuevo_en_snies_3a" in detalle.columns else 0,
+            ),
+            _nuevos_snap=(
+                "nuevo_vs_snapshot_anterior",
+                lambda s: s.astype(bool).sum() if "nuevo_vs_snapshot_anterior" in detalle.columns else 0,
+            ),
         )
         .reset_index()
         .rename(columns={"CATEGORIA_FINAL": cat_col})
