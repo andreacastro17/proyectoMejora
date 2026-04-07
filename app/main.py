@@ -4700,6 +4700,12 @@ class MercadoPipelinePage(ttk.Frame):
             style="Muted.TLabel",
             wraplength=900,
         ).pack(anchor="w", pady=(4, 10))
+        self.var_force_recalc = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            seg_card,
+            text="Forzar recálculo completo (ignorar caché)",
+            variable=self.var_force_recalc,
+        ).pack(anchor="w", pady=(0, 6))
         btn_frame_seg = ttk.Frame(seg_card, style="Card.TFrame")
         btn_frame_seg.pack(anchor="w")
         self.btn_segmentos = ttk.Button(
@@ -4942,7 +4948,12 @@ class MercadoPipelinePage(ttk.Frame):
             sabana = pd.read_parquet(sabana_path)
             ag_nac = pd.read_parquet(ag_path)
 
-            resultados = run_segmentos_regionales(sabana, ag_nac, cancel_event=self.seg_cancel_event)
+            resultados = run_segmentos_regionales(
+                sabana,
+                ag_nac,
+                cancel_event=self.seg_cancel_event,
+                force_recalc=self.var_force_recalc.get(),
+            )
 
             self.root.after(0, self._on_segmentos_completed, resultados)
         except Exception as e:

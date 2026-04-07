@@ -543,6 +543,81 @@ def run_fase1() -> pd.DataFrame:
     return df_base
 
 
+def validar_archivos_entrada() -> tuple[bool, list[str]]:
+    """
+    Verifica que los archivos necesarios para el pipeline existan y tengan
+    el formato mínimo esperado. Retorna (ok, lista_de_errores).
+    Llamar antes de run_fase2() para dar feedback temprano al usuario.
+    """
+    from etl.config import ARCHIVO_PROGRAMAS, ARCHIVO_REFERENTE_CATEGORIAS, REF_DIR
+
+    errores: list[str] = []
+    advertencias: list[str] = []
+
+    # 1. Programas.xlsx (Fase 1)
+    if not ARCHIVO_PROGRAMAS.exists():
+        errores.append(f"No se encuentra Programas.xlsx en {ARCHIVO_PROGRAMAS.parent}")
+    else:
+        try:
+            xl = pd.ExcelFile(ARCHIVO_PROGRAMAS)
+            if not xl.sheet_names:
+                errores.append("Programas.xlsx no tiene hojas válidas.")
+        except Exception as e:
+            errores.append(f"No se pudo abrir Programas.xlsx: {e}")
+
+    # 2. Archivos de matrículas (Fase 2)
+    matriculas_dir = REF_DIR / "backup" / "matriculas"
+    if not matriculas_dir.exists():
+        errores.append(f"Carpeta de matrículas no existe: {matriculas_dir}")
+    else:
+        años_encontrados: list[int] = []
+        for f in matriculas_dir.glob("*.xlsx"):
+            for año in range(2019, 2026):
+                if str(año) in f.name:
+                    años_encontrados.append(año)
+                    break
+        años_encontrados = sorted(set(años_encontrados))
+        años_esperados = list(range(2019, 2025))
+        años_faltantes = [a for a in años_esperados if a not in años_encontrados]
+        if not años_encontrados:
+            errores.append(
+                f"No hay archivos de matrículas en {matriculas_dir}. "
+                "Coloque los Excels con el año en el nombre (ej. matriculados_2024.xlsx)."
+            )
+        elif años_faltantes:
+            advertencias.append(
+                f"Años de matrículas faltantes: {años_faltantes}. "
+                "Las categorías de esos años quedarán con matrícula 0."
+            )
+
+    # 3. OLE (opcional pero advertir si falta)
+    ole_candidates = [
+        REF_DIR / "backup" / "ole_indicadores.csv",
+        REF_DIR / "backup" / "ole_indicadores.xlsx",
+    ]
+    if not any(p.exists() for p in ole_candidates):
+        advertencias.append(
+            "No se encuentra ole_indicadores.csv/.xlsx en ref/backup/. "
+            "El salario promedio quedará como NaN (score 1) para todas las categorías."
+        )
+
+    # 4. Referente de categorías (Fase 1)
+    if not ARCHIVO_REFERENTE_CATEGORIAS.exists():
+        errores.append(f"No se encuentra el referente de categorías: {ARCHIVO_REFERENTE_CATEGORIAS}")
+
+    # Log resultados
+    for adv in advertencias:
+        log_warning(f"[Validación] ⚠ {adv}")
+    for err in errores:
+        log_error(f"[Validación] ✗ {err}")
+    if not errores and not advertencias:
+        log_info("[Validación] ✓ Todos los archivos de entrada verificados correctamente.")
+    elif not errores:
+        log_info(f"[Validación] ✓ Archivos OK con {len(advertencias)} advertencia(s). Continuando.")
+
+    return len(errores) == 0, errores
+
+
 def run_fase2() -> None:
     """
     Fase 2: Descarga de datos faltantes (matrículas históricas SNIES e indicadores OLE).
@@ -935,10 +1010,10 @@ def run_fase3() -> None:
         pass
     try:
         fechas = pd.to_datetime(base.get("FECHA_DE_REGISTRO_EN_SNIES", pd.Series()), errors="coerce")
-        base["es_programa_nuevo"] = fechas >= pd.Timestamp("2022-01-01")
+        base["nuevo_en_snies_3a"] = fechas >= pd.Timestamp("2022-01-01")
     except Exception:
-        base["es_programa_nuevo"] = False
-    base["es_programa_nuevo"] = base["es_programa_nuevo"].fillna(False)
+        base["nuevo_en_snies_3a"] = False
+    base["nuevo_en_snies_3a"] = base["nuevo_en_snies_3a"].fillna(False)
     mat_2024 = base.get("matricula_2024", pd.Series(0, index=base.index)).fillna(0)
     base["tiene_matricula_2024"] = (mat_2024 > 0).astype(bool)
 
@@ -1054,8 +1129,10 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
     if "es_activo" in df.columns:
         simple_agg["programas_activos"] = pd.NamedAgg(column="es_activo", aggfunc="sum")
         simple_agg["programas_inactivos"] = pd.NamedAgg(column="es_activo", aggfunc=_count_false)
-    if "es_programa_nuevo" in df.columns:
-        simple_agg["programas_nuevos_3a"] = pd.NamedAgg(column="es_programa_nuevo", aggfunc="sum")
+    if "nuevo_en_snies_3a" in df.columns:
+        simple_agg["programas_nuevos_3a"] = pd.NamedAgg(column="nuevo_en_snies_3a", aggfunc="sum")
+    if "nuevo_vs_snapshot_anterior" in df.columns:
+        simple_agg["nuevos_vs_snapshot"] = pd.NamedAgg(column="nuevo_vs_snapshot_anterior", aggfunc="sum")
 
     ag = grouped.agg(**simple_agg)
 
@@ -1120,7 +1197,7 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         cond_extinta = (m24 == 0) & (m19 > 0)
         cond_sin_act = (m19 == 0) & (m24 == 0)
 
-        tipo = pd.Series("NORMAL", index=ag.index, dtype="string")
+        tipo = pd.Series("NORMAL", index=ag.index, dtype=object)
         tipo[cond_pequena] = "BASE_PEQUENA"
         tipo[cond_nueva] = "CATEGORIA_NUEVA"
         tipo[cond_extinta] = "EXTINTA"
@@ -1305,6 +1382,7 @@ _BLOQUES_TOTAL = [
     ]),
     ("OFERTA", [
         "num_programas_2019", "num_programas_2024", "programas_activos", "programas_inactivos", "programas_nuevos_3a",
+        "nuevos_vs_snapshot",
         "var_programas", "pct_con_matricula", "prom_matricula_por_programa_2024",
     ]),
     ("COSTOS", ["costo_promedio", "distancia_costo_pct"]),
@@ -1949,6 +2027,7 @@ def run_segmentos_regionales(
     sabana: pd.DataFrame,
     ag_nacional: pd.DataFrame,
     cancel_event: threading.Event | None = None,
+    force_recalc: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """
     Genera un Excel independiente para cada segmento geográfico/modal.
@@ -1964,7 +2043,7 @@ def run_segmentos_regionales(
 
     Retorna dict {nombre_segmento: DataFrame_agregado} con los resultados.
     """
-    from etl.config import OUTPUTS_DIR
+    from etl.config import OUTPUTS_DIR, TEMP_DIR
 
     COL_DEPT = "DEPARTAMENTO_OFERTA_PROGRAMA"
     COL_MOD = "MODALIDAD"
@@ -2036,11 +2115,36 @@ def run_segmentos_regionales(
                 f"→ recalculando Fase 4..."
             )
 
-            try:
-                ag_seg = run_fase4_desde_sabana(df_seg)
-            except Exception as e:
-                log_error(f"[Segmento {nombre}] Fase 4 falló: {e}")
-                continue
+            cache_path = TEMP_DIR / f"agregado_{nombre}.parquet"
+            sabana_path_check = TEMP_DIR / "sabana_consolidada.parquet"
+
+            usar_cache = False
+            ag_seg: pd.DataFrame | None = None
+            if (
+                not force_recalc
+                and cache_path.exists()
+                and sabana_path_check.exists()
+                and cache_path.stat().st_mtime >= sabana_path_check.stat().st_mtime
+            ):
+                try:
+                    ag_seg = pd.read_parquet(cache_path)
+                    log_info(f"[Segmento {nombre}] Cargado desde caché (sábana sin cambios).")
+                    usar_cache = True
+                except Exception:
+                    ag_seg = None
+                    usar_cache = False
+
+            if not usar_cache:
+                try:
+                    ag_seg = run_fase4_desde_sabana(df_seg)
+                except Exception as e:
+                    log_error(f"[Segmento {nombre}] Fase 4 falló: {e}")
+                    continue
+                try:
+                    ag_seg.to_parquet(cache_path, index=False)
+                    log_info(f"[Segmento {nombre}] Caché guardado: {cache_path.name}")
+                except Exception as e:
+                    log_warning(f"[Segmento {nombre}] No se pudo guardar caché: {e}")
 
             if ag_seg is None or len(ag_seg) == 0:
                 log_warning(f"[Segmento {nombre}] Fase 4 sin resultados — omitido.")
@@ -2067,6 +2171,197 @@ def run_segmentos_regionales(
         f"{len(resultados)}/{len(SEGMENTOS)} segmentos exportados",
     )
     return resultados
+
+
+def _escribir_hoja_delta(
+    writer: pd.ExcelWriter,
+    ag_nuevo: pd.DataFrame,
+) -> None:
+    """
+    Genera hoja 'cambios_vs_anterior' comparando la calificación_final actual
+    contra la última ejecución guardada en agregado_categorias_anterior.parquet
+    bajo TEMP_DIR. Si no existe anterior, crea el snapshot y omite la hoja.
+    """
+    from etl.config import TEMP_DIR
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    snapshot_path = TEMP_DIR / "agregado_categorias_anterior.parquet"
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+    cols_snap = [
+        "CATEGORIA_FINAL",
+        "calificacion_final",
+        "suma_matricula_2024",
+        "AAGR_ROBUSTO",
+        "num_programas_2024",
+    ]
+    cols_pres = [c for c in cols_snap if c in ag_nuevo.columns]
+    if "CATEGORIA_FINAL" not in cols_pres:
+        log_warning("[Delta] ag_nuevo sin CATEGORIA_FINAL — omitiendo hoja de cambios.")
+        return
+
+    if not snapshot_path.exists():
+        try:
+            ag_nuevo[cols_pres].to_parquet(snapshot_path, index=False)
+            log_info("[Delta] Snapshot inicial guardado. La hoja de cambios aparecerá en la próxima ejecución.")
+        except Exception as e:
+            log_warning(f"[Delta] No se pudo guardar snapshot: {e}")
+        return
+
+    try:
+        ag_ant = pd.read_parquet(snapshot_path)
+    except Exception as e:
+        log_warning(f"[Delta] No se pudo leer snapshot anterior: {e}. Omitiendo hoja de cambios.")
+        return
+
+    try:
+        df_nuevo = ag_nuevo[[c for c in cols_snap if c in ag_nuevo.columns]].copy()
+        ant_cols = [c for c in cols_snap if c in ag_ant.columns]
+        if "CATEGORIA_FINAL" not in ant_cols:
+            log_warning("[Delta] Snapshot sin CATEGORIA_FINAL — omitiendo hoja.")
+            return
+        df_ant = ag_ant[ant_cols].copy()
+        df_ant = df_ant.rename(
+            columns={
+                "calificacion_final": "calif_anterior",
+                "suma_matricula_2024": "matricula_anterior",
+                "AAGR_ROBUSTO": "aagr_anterior",
+                "num_programas_2024": "programas_anterior",
+            }
+        )
+
+        merged = df_nuevo.merge(df_ant, on="CATEGORIA_FINAL", how="outer", indicator=True)
+
+        def _semaforo(v):
+            if pd.isna(v):
+                return "SIN DATO"
+            return "VERDE" if v >= 4.0 else ("AMARILLO" if v >= 3.0 else "ROJO")
+
+        merged["semaforo_nuevo"] = merged["calificacion_final"].apply(_semaforo)
+        merged["semaforo_anterior"] = merged["calif_anterior"].apply(_semaforo)
+        merged["delta_calif"] = merged["calificacion_final"] - merged["calif_anterior"]
+        merged["delta_matricula"] = merged["suma_matricula_2024"] - merged["matricula_anterior"]
+        merged["cambio_semaforo"] = merged["semaforo_nuevo"] != merged["semaforo_anterior"]
+
+        def _tipo(row):
+            if row["_merge"] == "left_only":
+                return "CATEGORÍA NUEVA"
+            if row["_merge"] == "right_only":
+                return "CATEGORÍA ELIMINADA"
+            if row["cambio_semaforo"]:
+                if row["semaforo_anterior"] in ("ROJO", "AMARILLO") and row["semaforo_nuevo"] == "VERDE":
+                    return "SUBIÓ A VERDE ▲"
+                if row["semaforo_anterior"] == "VERDE":
+                    return "BAJÓ DE VERDE ▼"
+                if row["semaforo_anterior"] == "ROJO" and row["semaforo_nuevo"] == "AMARILLO":
+                    return "MEJORÓ ▲"
+                if row["semaforo_anterior"] == "AMARILLO" and row["semaforo_nuevo"] == "ROJO":
+                    return "EMPEORÓ ▼"
+            dc = row.get("delta_calif")
+            if pd.notna(dc) and abs(float(dc)) >= 0.3:
+                return "CAMBIO SIGNIFICATIVO"
+            return "SIN CAMBIO RELEVANTE"
+
+        merged["tipo_cambio"] = merged.apply(_tipo, axis=1)
+
+        orden = {
+            "SUBIÓ A VERDE ▲": 0,
+            "BAJÓ DE VERDE ▼": 1,
+            "CATEGORÍA NUEVA": 2,
+            "EMPEORÓ ▼": 3,
+            "MEJORÓ ▲": 4,
+            "CAMBIO SIGNIFICATIVO": 5,
+            "CATEGORÍA ELIMINADA": 6,
+            "SIN CAMBIO RELEVANTE": 7,
+        }
+        merged["_ord"] = merged["tipo_cambio"].map(orden).fillna(99)
+        merged = merged.sort_values(["_ord", "delta_calif"], ascending=[True, True])
+        merged_stats = merged.copy()
+        merged = merged.drop(columns=["_merge", "_ord", "cambio_semaforo"])
+
+        cols_export = [
+            "CATEGORIA_FINAL",
+            "tipo_cambio",
+            "semaforo_nuevo",
+            "calificacion_final",
+            "semaforo_anterior",
+            "calif_anterior",
+            "delta_calif",
+            "suma_matricula_2024",
+            "matricula_anterior",
+            "delta_matricula",
+            "num_programas_2024",
+            "programas_anterior",
+        ]
+        cols_export = [c for c in cols_export if c in merged.columns]
+        merged[cols_export].to_excel(writer, sheet_name="cambios_vs_anterior", index=False)
+
+        wb = writer.book
+        ws = wb["cambios_vs_anterior"]
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+
+        AZUL = "000066"
+        VERDE_F = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+        AMAR_F = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+        ROJO_F = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+        GRIS_F = PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid")
+
+        for cell in ws[1]:
+            cell.font = Font(bold=True, color="FFFFFF", size=9)
+            cell.fill = PatternFill(start_color=AZUL, end_color=AZUL, fill_type="solid")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.row_dimensions[1].height = 30
+
+        sem_nuevo_idx = cols_export.index("semaforo_nuevo") + 1 if "semaforo_nuevo" in cols_export else None
+        sem_ant_idx = cols_export.index("semaforo_anterior") + 1 if "semaforo_anterior" in cols_export else None
+
+        n_cols = len(cols_export)
+        for ri in range(2, ws.max_row + 1):
+            zebra = GRIS_F if ri % 2 == 0 else None
+            for ci in range(1, n_cols + 1):
+                c = ws.cell(row=ri, column=ci)
+                if zebra:
+                    c.fill = zebra
+            if sem_nuevo_idx:
+                v = ws.cell(row=ri, column=sem_nuevo_idx).value
+                c = ws.cell(row=ri, column=sem_nuevo_idx)
+                if v == "VERDE":
+                    c.fill = VERDE_F
+                elif v == "AMARILLO":
+                    c.fill = AMAR_F
+                elif v == "ROJO":
+                    c.fill = ROJO_F
+            if sem_ant_idx:
+                v = ws.cell(row=ri, column=sem_ant_idx).value
+                c = ws.cell(row=ri, column=sem_ant_idx)
+                if v == "VERDE":
+                    c.fill = VERDE_F
+                elif v == "AMARILLO":
+                    c.fill = AMAR_F
+                elif v == "ROJO":
+                    c.fill = ROJO_F
+
+        ws.column_dimensions["A"].width = 38
+        ws.column_dimensions["B"].width = 26
+
+        n_subio = int((merged_stats["tipo_cambio"] == "SUBIÓ A VERDE ▲").sum())
+        n_bajo = int((merged_stats["tipo_cambio"] == "BAJÓ DE VERDE ▼").sum())
+        n_nuevas = int((merged_stats["tipo_cambio"] == "CATEGORÍA NUEVA").sum())
+        n_elim = int((merged_stats["tipo_cambio"] == "CATEGORÍA ELIMINADA").sum())
+        ws.cell(row=1, column=n_cols + 2).value = (
+            f"Resumen: +verde={n_subio} | -verde={n_bajo} | nuevas={n_nuevas} | eliminadas={n_elim}"
+        )
+
+        ag_nuevo[cols_pres].to_parquet(snapshot_path, index=False)
+
+        log_info(
+            f"[Delta] Hoja 'cambios_vs_anterior' generada: "
+            f"subió_verde={n_subio}, bajó_verde={n_bajo}, nuevas={n_nuevas}, eliminadas={n_elim}"
+        )
+
+    except Exception as e:
+        log_warning(f"[Delta] No se pudo generar hoja de cambios: {e}")
 
 
 def run_fase5(agregado_df: pd.DataFrame | None) -> None:
@@ -2137,6 +2432,11 @@ def run_fase5(agregado_df: pd.DataFrame | None) -> None:
                         idx = list(sabana_final.columns).index(col_name) + 1
                         ws_detalle.column_dimensions[get_column_letter(idx)].width = width
                 _aplicar_formato_total(wb["total"], col_order)
+
+                try:
+                    _escribir_hoja_delta(writer, total_final)
+                except Exception as e:
+                    log_warning(f"[Delta] Hoja de cambios omitida: {e}")
 
                 # ── Fase 6: EAFIT vs Mercado (opcional, no bloqueante) ──
                 try:
@@ -2989,6 +3289,11 @@ def run_pipeline(
     t0 = time.perf_counter()
     log_etapa_iniciada("Pipeline estudio de mercado Colombia")
 
+    ok, errores = validar_archivos_entrada()
+    if not ok:
+        log_error(f"Pipeline detenido: {len(errores)} error(es) en archivos de entrada.")
+        return
+
     def _ask(name: str) -> bool:
         if ask_reuse_checkpoint is not None:
             return ask_reuse_checkpoint(name)
@@ -3049,6 +3354,12 @@ def run_pipeline_mercado() -> None:
     """
     Ejecuta todas las fases del pipeline de mercado (sin preguntar checkpoints).
     """
+    log_etapa_iniciada("Pipeline estudio de mercado (modo automático)")
+    ok, errores = validar_archivos_entrada()
+    if not ok:
+        log_error(f"Pipeline detenido: {len(errores)} error(es) en archivos de entrada.")
+        return
+
     run_fase1()
     run_fase2()
     run_fase3()
