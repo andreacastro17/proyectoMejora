@@ -53,7 +53,8 @@ COLS_CALCULADAS = [
     "calificacion_final",
     # Flags derivados
     "ACTIVO_PIPELINE",
-    "ES_PROGRAMA_NUEVO",
+    "nuevo_en_snies_3a",
+    "nuevo_vs_snapshot_anterior",
     "PROBABILIDAD",
     "COSTO_MATRÍCULA_ESTUD_NUEVOS",
     "COSTO_IMPUTADO_MEDIANA",
@@ -152,8 +153,8 @@ def _calcular_activo_pipeline(df: pd.DataFrame) -> pd.Series:
     return (tiene_mat | estado_ok).astype(bool)
 
 
-def _calcular_es_nuevo(fecha_serie: pd.Series) -> pd.Series:
-    """ES_PROGRAMA_NUEVO = True si FECHA_PRIMERA_VEZ >= hoy - 3 años."""
+def _calcular_nuevo_en_snies_3a(fecha_serie: pd.Series) -> pd.Series:
+    """nuevo_en_snies_3a = True si FECHA_PRIMERA_VEZ >= hoy - 3 años."""
     hoy = pd.Timestamp.today().normalize()
     hace_3 = hoy - pd.DateOffset(years=3)
     return pd.to_datetime(fecha_serie, errors="coerce") >= hace_3
@@ -192,6 +193,9 @@ def merge_incremental(
 
     # 2. Normalizar ID en nuevo ────────────────────────────────────────────────
     nuevo = nuevo.copy()
+    # Renombres de columnas (compatibilidad + claridad semántica)
+    if "ES_PROGRAMA_NUEVO" in nuevo.columns and "nuevo_vs_snapshot_anterior" not in nuevo.columns:
+        nuevo = nuevo.rename(columns={"ES_PROGRAMA_NUEVO": "nuevo_vs_snapshot_anterior"})
     if ID_COL not in nuevo.columns:
         raise ValueError(f"[Merge] Falta columna ID '{ID_COL}' en DataFrame nuevo.")
     nuevo[ID_COL] = nuevo[ID_COL].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
@@ -215,6 +219,9 @@ def merge_incremental(
             existente[ID_COL] = (
                 existente[ID_COL].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
             )
+            # Renombres para Excel legado
+            if "ES_PROGRAMA_NUEVO" in existente.columns and "nuevo_vs_snapshot_anterior" not in existente.columns:
+                existente = existente.rename(columns={"ES_PROGRAMA_NUEVO": "nuevo_vs_snapshot_anterior"})
             log_info(f"[Merge] Excel existente: {len(existente):,} programas")
         except Exception as e:
             log_warning(f"[Merge] No se pudo leer Excel existente ({e}). Creando desde cero.")
@@ -230,7 +237,9 @@ def merge_incremental(
         ).fillna(hoy)
         nuevo["FECHA_ULTIMO_ACTIVO"] = hoy
         nuevo["ACTIVO_PIPELINE"] = _calcular_activo_pipeline(nuevo)
-        nuevo["ES_PROGRAMA_NUEVO"] = _calcular_es_nuevo(nuevo["FECHA_PRIMERA_VEZ"])
+        nuevo["nuevo_en_snies_3a"] = _calcular_nuevo_en_snies_3a(nuevo["FECHA_PRIMERA_VEZ"])
+        if "nuevo_vs_snapshot_anterior" not in nuevo.columns:
+            nuevo["nuevo_vs_snapshot_anterior"] = False
         total_final = _ajustar_totales(nuevo, nuevo_total)
         _log_resumen(nuevo)
         return {"programas_detalle": nuevo, "total": total_final}
@@ -251,7 +260,8 @@ def merge_incremental(
         ("FECHA_PRIMERA_VEZ", hoy),
         ("FECHA_ULTIMO_ACTIVO", hoy),
         ("ACTIVO_PIPELINE", True),
-        ("ES_PROGRAMA_NUEVO", False),
+        ("nuevo_en_snies_3a", False),
+        ("nuevo_vs_snapshot_anterior", False),
     ]:
         if col not in existente.columns:
             existente[col] = default
@@ -333,14 +343,18 @@ def merge_incremental(
         ).fillna(hoy)
         df_nuevos["FECHA_ULTIMO_ACTIVO"] = hoy
         df_nuevos["ACTIVO_PIPELINE"] = _calcular_activo_pipeline(df_nuevos)
-        df_nuevos["ES_PROGRAMA_NUEVO"] = True
+        df_nuevos["nuevo_en_snies_3a"] = True
+        if "nuevo_vs_snapshot_anterior" not in df_nuevos.columns:
+            df_nuevos["nuevo_vs_snapshot_anterior"] = True
         if "FUENTE_CATEGORIA" not in df_nuevos.columns:
             df_nuevos["FUENTE_CATEGORIA"] = "PIPELINE"
         existente = pd.concat([existente, df_nuevos], ignore_index=True)
         log_info(f"[Merge] {len(df_nuevos):,} programas nuevos agregados")
 
-    # 10. Recalcular ES_PROGRAMA_NUEVO para todos ──────────────────────────────
-    existente["ES_PROGRAMA_NUEVO"] = _calcular_es_nuevo(existente["FECHA_PRIMERA_VEZ"])
+    # 10. Recalcular nuevo_en_snies_3a para todos ──────────────────────────────
+    existente["nuevo_en_snies_3a"] = _calcular_nuevo_en_snies_3a(existente["FECHA_PRIMERA_VEZ"])
+    if "nuevo_vs_snapshot_anterior" not in existente.columns:
+        existente["nuevo_vs_snapshot_anterior"] = False
 
     # 11. Ajustar hoja total ───────────────────────────────────────────────────
     total_final = _ajustar_totales(existente, nuevo_total)
@@ -365,11 +379,13 @@ def _ajustar_totales(detalle: pd.DataFrame, total_nuevo: pd.DataFrame | None) ->
     if "ACTIVO_PIPELINE" not in detalle.columns or "CATEGORIA_FINAL" not in detalle.columns:
         return total_nuevo
 
-    # Validación defensiva: ES_PROGRAMA_NUEVO puede no existir en un Excel legado o en detalles parciales.
-    # Sin esta columna, la agregación por categoría fallaría.
-    if "ES_PROGRAMA_NUEVO" not in detalle.columns:
+    # Validación defensiva: columnas de "nuevos" pueden no existir en Excel legado o en detalles parciales.
+    if "nuevo_en_snies_3a" not in detalle.columns:
         detalle = detalle.copy()
-        detalle["ES_PROGRAMA_NUEVO"] = False
+        detalle["nuevo_en_snies_3a"] = False
+    if "nuevo_vs_snapshot_anterior" not in detalle.columns:
+        detalle = detalle.copy()
+        detalle["nuevo_vs_snapshot_anterior"] = False
 
     cat_col = str(total_nuevo.columns[0]) if len(total_nuevo.columns) else "CATEGORIA_FINAL"
     if cat_col not in total_nuevo.columns:
@@ -383,7 +399,8 @@ def _ajustar_totales(detalle: pd.DataFrame, total_nuevo: pd.DataFrame | None) ->
         .agg(
             _activos=("ACTIVO_PIPELINE", lambda s: s.astype(bool).sum()),
             _inactivos=("ACTIVO_PIPELINE", lambda s: (~s.astype(bool)).sum()),
-            _nuevos=("ES_PROGRAMA_NUEVO", lambda s: s.astype(bool).sum()),
+            _nuevos_snies=("nuevo_en_snies_3a", lambda s: s.astype(bool).sum()),
+            _nuevos_snap=("nuevo_vs_snapshot_anterior", lambda s: s.astype(bool).sum()),
         )
         .reset_index()
         .rename(columns={"CATEGORIA_FINAL": cat_col})
@@ -394,12 +411,16 @@ def _ajustar_totales(detalle: pd.DataFrame, total_nuevo: pd.DataFrame | None) ->
     for dest, src in [
         ("programas_activos", "_activos"),
         ("programas_inactivos", "_inactivos"),
-        ("programas_nuevos_3a", "_nuevos"),
+        ("programas_nuevos_3a", "_nuevos_snies"),
+        ("nuevos_vs_snapshot", "_nuevos_snap"),
     ]:
         if dest in total_upd.columns:
             total_upd[dest] = total_upd[src].fillna(0).astype(int)
 
-    return total_upd.drop(columns=["_activos", "_inactivos", "_nuevos"], errors="ignore")
+    return total_upd.drop(
+        columns=["_activos", "_inactivos", "_nuevos_snies", "_nuevos_snap"],
+        errors="ignore",
+    )
 
 
 def _log_resumen(df: pd.DataFrame) -> None:
@@ -409,7 +430,7 @@ def _log_resumen(df: pd.DataFrame) -> None:
     else:
         activos = -1
         inactivos = -1
-    nuevos = int(df["ES_PROGRAMA_NUEVO"].astype(bool).sum()) if "ES_PROGRAMA_NUEVO" in df.columns else -1
+    nuevos = int(df["nuevo_en_snies_3a"].astype(bool).sum()) if "nuevo_en_snies_3a" in df.columns else -1
     log_info(
         f"[Merge] Resultado final: {len(df):,} programas totales | "
         f"Activos={activos:,} | Inactivos={inactivos:,} | Nuevos (3a)={nuevos:,}"
