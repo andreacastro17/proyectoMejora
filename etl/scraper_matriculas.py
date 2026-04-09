@@ -1,9 +1,8 @@
 """
 Scraper de matrículas SNIES (Fase 2 pipeline mercado).
 
-Lectura local desde ref/backup/matriculas/. El usuario descarga manualmente
-los Excels de matriculados y los coloca en esa carpeta. Inscritos no se procesan
-desde Excel; la Fase 3 imputa desde el referente (INSCRITOS_2023, INSCRITOS_2024).
+Lectura local desde ref/backup/: matriculas/, inscritos/, primer_curso/, graduados/.
+Los Excels oficiales se colocan en esas carpetas; Fase 2 genera CSVs en outputs/historico/raw/.
 """
 
 from __future__ import annotations
@@ -25,12 +24,306 @@ def _empty_inscritos() -> pd.DataFrame:
     return pd.DataFrame(columns=["CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS", "SEMESTRE"])
 
 
+def _empty_primer_curso() -> pd.DataFrame:
+    return pd.DataFrame(columns=["CÓDIGO_SNIES_DEL_PROGRAMA", "PRIMER_CURSO", "SEMESTRE"])
+
+
+def _empty_graduados() -> pd.DataFrame:
+    return pd.DataFrame(columns=["CÓDIGO_SNIES_DEL_PROGRAMA", "GRADUADOS", "SEMESTRE"])
+
+
+def _strip_accents_upper(s: str) -> str:
+    s = str(s).replace("\n", " ").replace("\r", " ").strip()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return " ".join(s.split()).upper()
+
+
+def _detectar_hoja_datos(sheet_names: list[str]) -> str:
+    """
+    Devuelve el nombre de la primera hoja que no sea índice.
+    Normaliza tildes para comparar: ÍNDICE → INDICE.
+    """
+    for s in sheet_names:
+        s_norm = s.strip().upper().replace("Í", "I").replace("É", "E")
+        if "INDICE" not in s_norm and "INDEX" not in s_norm:
+            return s
+    return sheet_names[0]
+
+
+def _leer_inscritos_snies(path: Path, year: int, semestre: int) -> pd.DataFrame:
+    """
+    Lee un Excel oficial SNIES de inscritos con header dinámico.
+
+    Retorna un DataFrame con:
+      - CÓDIGO SNIES DEL PROGRAMA (str)
+      - INSCRITOS (int)
+    Filtra por el semestre indicado y agrega (suma) por programa.
+    """
+    try:
+        import openpyxl
+
+        # Encontrar hoja de datos (descartar hojas de índice)
+        wb_tmp = openpyxl.load_workbook(path, read_only=True)
+        sheet_names = wb_tmp.sheetnames
+        wb_tmp.close()
+
+        sheet_name = _detectar_hoja_datos(sheet_names)
+
+        # Detectar fila header: buscar la fila que contenga "CÓDIGO" y "SNIES"
+        preview = pd.read_excel(path, sheet_name=sheet_name, header=None, nrows=30, dtype=str)
+        header_idx = None
+        for idx in range(len(preview)):
+            row = preview.iloc[idx]
+            vals = [v for v in row.tolist() if pd.notna(v) and str(v).strip() != ""]
+            if not vals:
+                continue
+            first = _strip_accents_upper(vals[0])
+            any_has_snies = any("SNIES" in _strip_accents_upper(v) for v in vals)
+            if "CODIGO" in first and any_has_snies:
+                header_idx = idx
+                break
+        if header_idx is None:
+            raise ValueError("No se pudo detectar fila de encabezado (CÓDIGO SNIES DEL PROGRAMA).")
+
+        df = pd.read_excel(path, sheet_name=sheet_name, header=header_idx, dtype=str)
+        if df is None or len(df) == 0:
+            return pd.DataFrame(columns=["CÓDIGO SNIES DEL PROGRAMA", "INSCRITOS"])
+
+        # Normalizar nombres de columnas
+        df.columns = [str(c).strip() for c in df.columns]
+        cols_norm = {c: _strip_accents_upper(c) for c in df.columns}
+
+        col_snies = None
+        for c, cn in cols_norm.items():
+            if "SNIES" in cn and "PROGRAMA" in cn:
+                col_snies = c
+                break
+        if col_snies is None:
+            raise ValueError(f"No se encontró columna SNIES. Columnas: {list(df.columns)[:15]}")
+
+        col_ins = None
+        for c, cn in cols_norm.items():
+            if "INSCRITOS" in cn:
+                col_ins = c
+                break
+        if col_ins is None:
+            raise ValueError(f"No se encontró columna INSCRITOS. Columnas: {list(df.columns)[:15]}")
+
+        col_sem = None
+        for c, cn in cols_norm.items():
+            if cn == "SEMESTRE":
+                col_sem = c
+                break
+        if col_sem is None:
+            raise ValueError("No se encontró columna SEMESTRE.")
+
+        df = df[[col_snies, col_sem, col_ins]].copy()
+        df = df.rename(columns={col_snies: "CÓDIGO SNIES DEL PROGRAMA", col_sem: "SEMESTRE", col_ins: "INSCRITOS"})
+
+        df["SEMESTRE"] = df["SEMESTRE"].astype(str).str.strip()
+        df = df[df["SEMESTRE"] == str(int(semestre))].copy()
+
+        df["CÓDIGO SNIES DEL PROGRAMA"] = (
+            df["CÓDIGO SNIES DEL PROGRAMA"]
+            .astype(str)
+            .str.replace(r"\.0$", "", regex=True)
+            .str.strip()
+        )
+        df["INSCRITOS"] = pd.to_numeric(df["INSCRITOS"], errors="coerce").fillna(0).astype("int64")
+
+        out = (
+            df.groupby("CÓDIGO SNIES DEL PROGRAMA", as_index=False)["INSCRITOS"]
+            .sum()
+            .sort_values("INSCRITOS", ascending=False)
+        )
+        log_info(f"[Fase 2] Inscritos SNIES {year}-S{semestre}: {len(out):,} programas leídos desde {path.name}")
+        return out.reset_index(drop=True)
+    except Exception as e:
+        log_warning(f"[Fase 2] Inscritos {year}-S{semestre}: no se pudo leer {path.name}: {e}.")
+        return pd.DataFrame(columns=["CÓDIGO SNIES DEL PROGRAMA", "INSCRITOS"])
+
+
+def _leer_primer_curso_snies(path: Path, year: int, semestre: int) -> pd.DataFrame:
+    """
+    Lee Excel SNIES de primer curso (header dinámico, misma lógica que inscritos).
+    Retorna columnas CÓDIGO SNIES DEL PROGRAMA, PRIMER_CURSO (agregado por programa).
+    """
+    try:
+        import openpyxl
+
+        wb_tmp = openpyxl.load_workbook(path, read_only=True)
+        sheet_names = wb_tmp.sheetnames
+        wb_tmp.close()
+        sheet_name = _detectar_hoja_datos(sheet_names)
+
+        preview = pd.read_excel(path, sheet_name=sheet_name, header=None, nrows=30, dtype=str)
+        header_idx = None
+        for idx in range(len(preview)):
+            row = preview.iloc[idx]
+            vals = [v for v in row.tolist() if pd.notna(v) and str(v).strip() != ""]
+            if not vals:
+                continue
+            first = _strip_accents_upper(vals[0])
+            any_has_snies = any("SNIES" in _strip_accents_upper(v) for v in vals)
+            if "CODIGO" in first and any_has_snies:
+                header_idx = idx
+                break
+        if header_idx is None:
+            raise ValueError("No se pudo detectar fila de encabezado (CÓDIGO SNIES DEL PROGRAMA).")
+
+        df = pd.read_excel(path, sheet_name=sheet_name, header=header_idx, dtype=str)
+        if df is None or len(df) == 0:
+            return pd.DataFrame(columns=["CÓDIGO SNIES DEL PROGRAMA", "PRIMER_CURSO"])
+
+        df.columns = [str(c).strip() for c in df.columns]
+        cols_norm = {c: _strip_accents_upper(c) for c in df.columns}
+
+        col_snies = None
+        for c, cn in cols_norm.items():
+            if "SNIES" in cn and "PROGRAMA" in cn:
+                col_snies = c
+                break
+        if col_snies is None:
+            raise ValueError(f"No se encontró columna SNIES. Columnas: {list(df.columns)[:15]}")
+
+        col_pc = None
+        for c, cn in cols_norm.items():
+            if "PRIMER" in cn and "CURSO" in cn:
+                col_pc = c
+                break
+        if col_pc is None:
+            raise ValueError(f"No se encontró columna primer curso. Columnas: {list(df.columns)[:15]}")
+
+        col_sem = None
+        for c, cn in cols_norm.items():
+            if cn == "SEMESTRE":
+                col_sem = c
+                break
+        if col_sem is None:
+            raise ValueError("No se encontró columna SEMESTRE.")
+
+        df = df[[col_snies, col_sem, col_pc]].copy()
+        df = df.rename(
+            columns={col_snies: "CÓDIGO SNIES DEL PROGRAMA", col_sem: "SEMESTRE", col_pc: "PRIMER_CURSO"}
+        )
+
+        df["SEMESTRE"] = df["SEMESTRE"].astype(str).str.strip()
+        df = df[df["SEMESTRE"] == str(int(semestre))].copy()
+
+        df["CÓDIGO SNIES DEL PROGRAMA"] = (
+            df["CÓDIGO SNIES DEL PROGRAMA"]
+            .astype(str)
+            .str.replace(r"\.0$", "", regex=True)
+            .str.strip()
+        )
+        df["PRIMER_CURSO"] = pd.to_numeric(df["PRIMER_CURSO"], errors="coerce").fillna(0).astype("int64")
+
+        out = (
+            df.groupby("CÓDIGO SNIES DEL PROGRAMA", as_index=False)["PRIMER_CURSO"]
+            .sum()
+            .sort_values("PRIMER_CURSO", ascending=False)
+        )
+        log_info(f"[Fase 2] Primer curso SNIES {year}-S{semestre}: {len(out):,} programas leídos desde {path.name}")
+        return out.reset_index(drop=True)
+    except Exception as e:
+        log_warning(f"[Fase 2] Primer curso {year}-S{semestre}: no se pudo leer {path.name}: {e}.")
+        return pd.DataFrame(columns=["CÓDIGO SNIES DEL PROGRAMA", "PRIMER_CURSO"])
+
+
+def _leer_graduados_snies(path: Path, year: int, semestre: int) -> pd.DataFrame:
+    """
+    Lee Excel SNIES de graduados (header dinámico, misma lógica que inscritos).
+    Retorna columnas CÓDIGO SNIES DEL PROGRAMA, GRADUADOS (agregado por programa).
+    """
+    try:
+        import openpyxl
+
+        wb_tmp = openpyxl.load_workbook(path, read_only=True)
+        sheet_names = wb_tmp.sheetnames
+        wb_tmp.close()
+        sheet_name = _detectar_hoja_datos(sheet_names)
+
+        preview = pd.read_excel(path, sheet_name=sheet_name, header=None, nrows=30, dtype=str)
+        header_idx = None
+        for idx in range(len(preview)):
+            row = preview.iloc[idx]
+            vals = [v for v in row.tolist() if pd.notna(v) and str(v).strip() != ""]
+            if not vals:
+                continue
+            first = _strip_accents_upper(vals[0])
+            any_has_snies = any("SNIES" in _strip_accents_upper(v) for v in vals)
+            if "CODIGO" in first and any_has_snies:
+                header_idx = idx
+                break
+        if header_idx is None:
+            raise ValueError("No se pudo detectar fila de encabezado (CÓDIGO SNIES DEL PROGRAMA).")
+
+        df = pd.read_excel(path, sheet_name=sheet_name, header=header_idx, dtype=str)
+        if df is None or len(df) == 0:
+            return pd.DataFrame(columns=["CÓDIGO SNIES DEL PROGRAMA", "GRADUADOS"])
+
+        df.columns = [str(c).strip() for c in df.columns]
+        cols_norm = {c: _strip_accents_upper(c) for c in df.columns}
+
+        col_snies = None
+        for c, cn in cols_norm.items():
+            if "SNIES" in cn and "PROGRAMA" in cn:
+                col_snies = c
+                break
+        if col_snies is None:
+            raise ValueError(f"No se encontró columna SNIES. Columnas: {list(df.columns)[:15]}")
+
+        col_grad = None
+        for c, cn in cols_norm.items():
+            if cn == "GRADUADOS":
+                col_grad = c
+                break
+        if col_grad is None:
+            raise ValueError(f"No se encontró columna GRADUADOS. Columnas: {list(df.columns)[:15]}")
+
+        col_sem = None
+        for c, cn in cols_norm.items():
+            if cn == "SEMESTRE":
+                col_sem = c
+                break
+        if col_sem is None:
+            raise ValueError("No se encontró columna SEMESTRE.")
+
+        df = df[[col_snies, col_sem, col_grad]].copy()
+        df = df.rename(
+            columns={col_snies: "CÓDIGO SNIES DEL PROGRAMA", col_sem: "SEMESTRE", col_grad: "GRADUADOS"}
+        )
+
+        df["SEMESTRE"] = df["SEMESTRE"].astype(str).str.strip()
+        df = df[df["SEMESTRE"] == str(int(semestre))].copy()
+
+        df["CÓDIGO SNIES DEL PROGRAMA"] = (
+            df["CÓDIGO SNIES DEL PROGRAMA"]
+            .astype(str)
+            .str.replace(r"\.0$", "", regex=True)
+            .str.strip()
+        )
+        df["GRADUADOS"] = pd.to_numeric(df["GRADUADOS"], errors="coerce").fillna(0).astype("int64")
+
+        out = (
+            df.groupby("CÓDIGO SNIES DEL PROGRAMA", as_index=False)["GRADUADOS"]
+            .sum()
+            .sort_values("GRADUADOS", ascending=False)
+        )
+        log_info(f"[Fase 2] Graduados SNIES {year}-S{semestre}: {len(out):,} programas leídos desde {path.name}")
+        return out.reset_index(drop=True)
+    except Exception as e:
+        log_warning(f"[Fase 2] Graduados {year}-S{semestre}: no se pudo leer {path.name}: {e}.")
+        return pd.DataFrame(columns=["CÓDIGO SNIES DEL PROGRAMA", "GRADUADOS"])
+
+
 class SNIESMatriculasScraper:
     """
     Lee Excels de matrículas desde ref/backup/matriculas/ (descarga manual del usuario).
     Detecta dinámicamente la fila de encabezados (palabra 'snies' en las primeras 20 filas),
     divide por semestre y guarda CSVs en raw (outputs/historico/raw/).
-    Inscritos no se leen desde Excel; download_inscritos retorna DataFrame vacío.
+    Inscritos, primer curso y graduados se leen desde ref/backup/ cuando existan los Excels.
     """
 
     def __init__(self, raw_dir: Path | None = None) -> None:
@@ -304,7 +597,137 @@ class SNIESMatriculasScraper:
 
     def download_inscritos(self, year: int, semestre: int) -> pd.DataFrame:
         """
-        No se procesan inscritos desde Excels. Retorna DataFrame vacío con columnas esperadas.
-        La Fase 3 imputa inscritos_2023 e inscritos_2024 desde el referente (INSCRITOS_2023, INSCRITOS_2024).
+        Lee inscritos desde Excel oficial en ref/backup/inscritos/inscritos_{year}.xlsx.
+        Si no existe o falla, retorna DataFrame vacío con columnas esperadas (no bloquea el pipeline).
         """
-        return _empty_inscritos()
+        archivo = self.raw_dir / f"inscritos_{year}_{semestre}.csv"
+        cached = self._load_cached(archivo, {"CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS"})
+        if cached is not None:
+            # Si el Excel fuente es más nuevo, invalidar caché para este semestre
+            try:
+                src = REF_DIR / "backup" / "inscritos" / f"inscritos_{year}.xlsx"
+                if src.exists():
+                    if src.stat().st_mtime > archivo.stat().st_mtime:
+                        log_info(
+                            f"[Fase 2] Excel {src.name} fue modificado después del CSV en caché. "
+                            f"Reconstruyendo inscritos para {year}-S{semestre}..."
+                        )
+                        cached = None
+            except Exception:
+                pass
+            if cached is not None:
+                log_info(f"[Fase 2] Inscritos {year}-{semestre}: cargado desde disco ({len(cached):,} filas)")
+                return cached
+
+        src = REF_DIR / "backup" / "inscritos" / f"inscritos_{year}.xlsx"
+        if not src.exists():
+            log_warning(
+                f"[Fase 2] Inscritos {year}: no existe {src}. "
+                "Coloque el Excel oficial (inscritos_YYYY.xlsx) en ref/backup/inscritos/."
+            )
+            return _empty_inscritos()
+
+        df_in = _leer_inscritos_snies(src, year=year, semestre=int(semestre))
+        if df_in is None or len(df_in) == 0:
+            return _empty_inscritos()
+
+        out = df_in.rename(columns={"CÓDIGO SNIES DEL PROGRAMA": "CÓDIGO_SNIES_DEL_PROGRAMA"}).copy()
+        out["SEMESTRE"] = int(semestre)
+        out_path = self.raw_dir / f"inscritos_{year}_{semestre}.csv"
+        try:
+            out[["CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS", "SEMESTRE"]].to_csv(out_path, index=False, encoding="utf-8-sig")
+            log_info(f"[Fase 2] Inscritos {year}-{semestre}: guardado {out_path.name} ({len(out):,} filas)")
+        except Exception as e:
+            log_warning(f"[Fase 2] Inscritos {year}-{semestre}: no se pudo guardar CSV: {e}.")
+        return out[["CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS", "SEMESTRE"]].copy()
+
+    def download_primer_curso(self, year: int, semestre: int) -> pd.DataFrame:
+        """
+        Lee primer curso desde ref/backup/primer_curso/primer_curso_{year}.xlsx.
+        Si no existe o falla, retorna DataFrame vacío (no bloquea el pipeline).
+        """
+        archivo = self.raw_dir / f"primer_curso_{year}_{semestre}.csv"
+        cached = self._load_cached(archivo, {"CÓDIGO_SNIES_DEL_PROGRAMA", "PRIMER_CURSO"})
+        if cached is not None:
+            try:
+                src = REF_DIR / "backup" / "matriculas primer curso" / f"primer_curso_{year}.xlsx"
+                if src.exists() and src.stat().st_mtime > archivo.stat().st_mtime:
+                    log_info(
+                        f"[Fase 2] Excel {src.name} fue modificado después del CSV en caché. "
+                        f"Reconstruyendo primer curso para {year}-S{semestre}..."
+                    )
+                    cached = None
+            except Exception:
+                pass
+            if cached is not None:
+                log_info(f"[Fase 2] Primer curso {year}-{semestre}: cargado desde disco ({len(cached):,} filas)")
+                return cached
+
+        src = REF_DIR / "backup" / "matriculas primer curso" / f"primer_curso_{year}.xlsx"
+        if not src.exists():
+            log_warning(
+                f"[Fase 2] Primer curso {year}: no existe {src}. "
+                "Coloque el Excel en ref/backup/primer_curso/."
+            )
+            return _empty_primer_curso()
+
+        df_pc = _leer_primer_curso_snies(src, year=year, semestre=int(semestre))
+        if df_pc is None or len(df_pc) == 0:
+            return _empty_primer_curso()
+
+        out = df_pc.rename(columns={"CÓDIGO SNIES DEL PROGRAMA": "CÓDIGO_SNIES_DEL_PROGRAMA"}).copy()
+        out["SEMESTRE"] = int(semestre)
+        out_path = self.raw_dir / f"primer_curso_{year}_{semestre}.csv"
+        try:
+            out[["CÓDIGO_SNIES_DEL_PROGRAMA", "PRIMER_CURSO", "SEMESTRE"]].to_csv(
+                out_path, index=False, encoding="utf-8-sig"
+            )
+            log_info(f"[Fase 2] Primer curso {year}-{semestre}: guardado {out_path.name} ({len(out):,} filas)")
+        except Exception as e:
+            log_warning(f"[Fase 2] Primer curso {year}-{semestre}: no se pudo guardar CSV: {e}.")
+        return out[["CÓDIGO_SNIES_DEL_PROGRAMA", "PRIMER_CURSO", "SEMESTRE"]].copy()
+
+    def download_graduados(self, year: int, semestre: int) -> pd.DataFrame:
+        """
+        Lee graduados desde ref/backup/graduados/graduados_{year}.xlsx.
+        Si no existe o falla, retorna DataFrame vacío (no bloquea el pipeline).
+        """
+        archivo = self.raw_dir / f"graduados_{year}_{semestre}.csv"
+        cached = self._load_cached(archivo, {"CÓDIGO_SNIES_DEL_PROGRAMA", "GRADUADOS"})
+        if cached is not None:
+            try:
+                src = REF_DIR / "backup" / "graduados" / f"graduados_{year}.xlsx"
+                if src.exists() and src.stat().st_mtime > archivo.stat().st_mtime:
+                    log_info(
+                        f"[Fase 2] Excel {src.name} fue modificado después del CSV en caché. "
+                        f"Reconstruyendo graduados para {year}-S{semestre}..."
+                    )
+                    cached = None
+            except Exception:
+                pass
+            if cached is not None:
+                log_info(f"[Fase 2] Graduados {year}-{semestre}: cargado desde disco ({len(cached):,} filas)")
+                return cached
+
+        src = REF_DIR / "backup" / "graduados" / f"graduados_{year}.xlsx"
+        if not src.exists():
+            log_warning(
+                f"[Fase 2] Graduados {year}: no existe {src}. Coloque el Excel en ref/backup/graduados/."
+            )
+            return _empty_graduados()
+
+        df_g = _leer_graduados_snies(src, year=year, semestre=int(semestre))
+        if df_g is None or len(df_g) == 0:
+            return _empty_graduados()
+
+        out = df_g.rename(columns={"CÓDIGO SNIES DEL PROGRAMA": "CÓDIGO_SNIES_DEL_PROGRAMA"}).copy()
+        out["SEMESTRE"] = int(semestre)
+        out_path = self.raw_dir / f"graduados_{year}_{semestre}.csv"
+        try:
+            out[["CÓDIGO_SNIES_DEL_PROGRAMA", "GRADUADOS", "SEMESTRE"]].to_csv(
+                out_path, index=False, encoding="utf-8-sig"
+            )
+            log_info(f"[Fase 2] Graduados {year}-{semestre}: guardado {out_path.name} ({len(out):,} filas)")
+        except Exception as e:
+            log_warning(f"[Fase 2] Graduados {year}-{semestre}: no se pudo guardar CSV: {e}.")
+        return out[["CÓDIGO_SNIES_DEL_PROGRAMA", "GRADUADOS", "SEMESTRE"]].copy()
