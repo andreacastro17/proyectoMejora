@@ -37,6 +37,9 @@ COLS_CALCULADAS = [
     *[f"matricula_{y}_{s}" for y in range(2019, 2026) for s in (1, 2)],
     *[f"matricula_{y}" for y in range(2019, 2026)],
     *[f"inscritos_{y}" for y in range(2019, 2026)],
+    *[f"primer_curso_{y}" for y in range(2019, 2026)],
+    *[f"graduados_{y}" for y in range(2019, 2026)],
+    "ACREDITADA_ALTA_CALIDAD",
     "tiene_matricula_2024",
     # OLE
     "SALARIO_OLE",

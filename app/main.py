@@ -1802,6 +1802,24 @@ class RetrainPage(ttk.Frame):
         self._log(f"Archivo actual detectado: {self.file_path}")
         self._log("Tip: mantén label=1 para referentes confirmados (es lo que usa el entrenamiento).")
         self._update_version_list()
+
+    def _on_resize(self, w: int, h: int) -> None:
+        """Responsive: ajusta altura de tabla, wraplengths y log."""
+        try:
+            table_pixels = max(120, h - 380)
+            self.table.set_height_from_pixels(table_pixels)
+        except (tk.TclError, AttributeError):
+            pass
+        if hasattr(self, "subheader_label"):
+            try:
+                self.subheader_label.config(wraplength=max(400, w - 100))
+            except (tk.TclError, AttributeError):
+                pass
+        try:
+            log_lines = max(5, min(12, (h - 380) // 20))
+            self.msg.config(height=log_lines)
+        except (tk.TclError, AttributeError):
+            pass
     
     def _update_version_list(self):
         """Actualiza la lista de versiones disponibles en el combobox."""
@@ -3915,6 +3933,7 @@ class MainMenuGUI:
                 pass
         # Forzar un reajuste responsive al cambiar de página (tabla y wraplength)
         self.root.after(50, self._update_responsive)
+        self.root.after(200, self._update_responsive)  # segunda pasada tras layout completo
     
     def _show_menu(self):
         """Vuelve al menú principal, ocultando la página actual."""
@@ -4455,6 +4474,20 @@ class MercadoPipelinePage(ttk.Frame):
         self._setup_ui()
         self._check_checkpoints()
 
+    def _on_resize(self, w: int, h: int) -> None:
+        """Ajusta el área de log según altura disponible."""
+        try:
+            log_lines = max(6, min(16, (h - 400) // 20))
+            self.messages_text.config(height=log_lines)
+        except (tk.TclError, AttributeError):
+            pass
+        try:
+            wrap = max(500, w - 80)
+            if hasattr(self, "seg_desc_label"):
+                self.seg_desc_label.configure(wraplength=wrap)
+        except (tk.TclError, AttributeError):
+            pass
+
     def _setup_ui(self):
         # ── Contenedor raíz: header fijo arriba + área scrollable abajo ──────
         root_frame = ttk.Frame(self, style="Page.TFrame")
@@ -4691,7 +4724,7 @@ class MercadoPipelinePage(ttk.Frame):
             text="3. Reportes segmentados — Bogotá · Antioquia · Eje Cafetero · Virtual",
             style="SectionTitle.TLabel",
         ).pack(anchor="w")
-        ttk.Label(
+        self.seg_desc_label = ttk.Label(
             seg_card,
             text=(
                 "Recalcula scoring, AAGR y semáforos de calidad de forma independiente "
@@ -4699,7 +4732,8 @@ class MercadoPipelinePage(ttk.Frame):
             ),
             style="Muted.TLabel",
             wraplength=900,
-        ).pack(anchor="w", pady=(4, 10))
+        )
+        self.seg_desc_label.pack(anchor="w", pady=(4, 10))
         self.var_force_recalc = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             seg_card,
@@ -5424,6 +5458,20 @@ class EstudioMercadoResultsPage(ttk.Frame):
         }
         self._setup_ui()
         self._load()
+
+    def _on_resize(self, w: int, h: int) -> None:
+        """Ajusta tabla y área de mensajes según espacio disponible."""
+        try:
+            table_pixels = max(150, h - 340)
+            if self.table:
+                self.table.set_height_from_pixels(table_pixels)
+        except (tk.TclError, AttributeError):
+            pass
+        try:
+            log_lines = max(3, min(6, (h - 500) // 20))
+            self.msg.config(height=log_lines)
+        except (tk.TclError, AttributeError):
+            pass
 
     def _setup_ui(self):
         main_frame = ttk.Frame(self, padding=20, style="Page.TFrame")

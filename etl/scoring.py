@@ -13,24 +13,32 @@ import pandas as pd
 # Para "inverse" (menor es mejor), se usa score 5 para el rango más bajo.
 SCORING_CONFIG = [
     {
-        "col": "suma_matricula_2024",
+        "col": "prom_matricula_2024",
         "out": "score_matricula",
         "peso": 0.30,
-        # Distribución actual con umbrales anteriores: score2=14% score3=39% score4=41% score5=6%
-        # Problema: demasiado concentrado en scores 3-4, casi nadie llega a 5.
-        # Recalibrado con percentiles reales: p25=182, p50=515, p75=1350, p95=5317
-        # Resultado esperado: distribución más uniforme ~20% por score
-        "thresholds": [(0, 1), (200, 2), (600, 3), (2000, 4)],
+        # Umbrales validados contra Excel de referencia (Programas_para_valoración.xlsx)
+        # Evalúa el tamaño típico de un programa en la categoría, no el volumen total
+        # p25=17.6, p50=27.3, p75=40.5 del universo Esp+Maestría
+        "thresholds": [(0, 1), (20, 2), (50, 3), (80, 4)],
         "inverse": False,
     },
     {
         "col": "participacion_2024",
         "out": "score_participacion",
         "peso": 0.15,
-        # Distribución actual: score1=0% score2=6% score3=20% score4=33% score5=41%
-        # Problema: 41% de categorías en score 5, umbrales demasiado bajos.
-        # Recalibrado con percentiles reales: p25=0.046% p50=0.129% p75=0.339% p95=1.34%
-        "thresholds": [(0, 1), (0.0002, 2), (0.0008, 3), (0.003, 4)],
+        # Umbrales anclados a percentiles reales de participacion_2024
+        # (Colombia 2024, n=288 categorías). Umbrales fijos para que los scores
+        # sean comparables entre segmentos (Bogotá, Antioquia, Eje Cafetero, Virtual).
+        # Metodología: posición relativa en el mercado nacional de referencia.
+        #   Score 1: < p10 = 0.052%  → categoría marginal
+        #   Score 2: < p25 = 0.147%  → por debajo del primer cuartil
+        #   Score 3: < p50 = 0.269%  → mercado medio (mediana)
+        #   Score 4: < p75 = 0.425%  → mercado relevante
+        #   Score 5: > p75 = 0.425%  → top cuartil
+        # Distribución resultante: 10% / 15% / 25% / 25% / 25%
+        # Recalibrar cuando el universo de categorías cambie significativamente
+        # (>10% de variación en p50 o p75 respecto a los valores aquí documentados).
+        "thresholds": [(0.000522, 1), (0.001467, 2), (0.002689, 3), (0.004247, 4)],
         "inverse": False,
     },
     {
@@ -128,8 +136,8 @@ def apply_scoring(df: pd.DataFrame) -> pd.DataFrame:
     if abs(total_peso - 1.0) > 1e-9:
         raise ValueError(f"Los pesos en SCORING_CONFIG deben sumar 1.0, suman {total_peso}")
 
-    # Neutralizar NaN de pct_no_matriculados_2024 (categorías sin datos OLE comparables)
-    # para evitar que se vayan al peor score por ausencia de dato.
+    # Con inscritos SNIES (fuente primaria desde 2025), la cobertura es >80%.
+    # El fill de 0.25 aplica solo a programas nuevos o sin código SNIES válido.
     PCT_NAN_FILL = 0.25  # 0.25 cae en score 3 (neutro real) en vez de score 4
     if "pct_no_matriculados_2024" in out.columns:
         out["pct_no_matriculados_2024"] = out["pct_no_matriculados_2024"].fillna(PCT_NAN_FILL)

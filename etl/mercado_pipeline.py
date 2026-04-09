@@ -12,6 +12,7 @@ from pathlib import Path
 import threading
 from typing import Callable
 import re
+import unicodedata
 
 import joblib
 import numpy as np
@@ -646,6 +647,18 @@ def run_fase2() -> None:
                     any_matriculas = True
             except Exception as e:
                 log_warning(f"Inscritos {year}-{semestre}: {e}. Continuando.")
+            try:
+                df_pc = scraper_mat.download_primer_curso(year, semestre)
+                if df_pc is not None and len(df_pc) > 0:
+                    any_matriculas = True
+            except Exception as e:
+                log_warning(f"Primer curso {year}-{semestre}: {e}. Continuando.")
+            try:
+                df_grad = scraper_mat.download_graduados(year, semestre)
+                if df_grad is not None and len(df_grad) > 0:
+                    any_matriculas = True
+            except Exception as e:
+                log_warning(f"Graduados {year}-{semestre}: {e}. Continuando.")
 
     # Scraper B: indicadores OLE (lista SNIES desde checkpoint Fase 1)
     snies_list = []
@@ -767,6 +780,32 @@ def _cargar_ole_indicadores(raw_dir: Path, ref_dir: Path) -> tuple[pd.DataFrame,
     return pd.DataFrame(columns=COLS_OUT), "NONE"
 
 
+def _limpiar_raw_csv(raw_dir: Path) -> None:
+    """
+    Elimina los CSVs intermedios de matrículas, inscritos y OLE
+    que Fase 2 genera en outputs/historico/raw/.
+    Estos archivos ya quedaron incorporados en sabana_consolidada.parquet
+    y no tienen uso posterior; Fase 2 los regenera en la próxima ejecución.
+    """
+    patrones = [
+        "matriculados_*.csv",
+        "inscritos_*.csv",
+        "ole_indicadores.csv",
+        "primer_curso_*.csv",
+        "graduados_*.csv",
+    ]
+    eliminados = 0
+    for patron in patrones:
+        for f in raw_dir.glob(patron):
+            try:
+                f.unlink()
+                eliminados += 1
+            except Exception as e:
+                log_warning(f"[Fase 3] No se pudo eliminar CSV temporal {f.name}: {e}")
+    if eliminados:
+        log_info(f"[Fase 3] Limpieza: {eliminados} CSVs intermedios eliminados de raw/")
+
+
 def run_fase3() -> None:
     """
     Fase 3: Consolidación en sábana única.
@@ -783,12 +822,15 @@ def run_fase3() -> None:
         + [f"matricula_{y}_1" for y in range(2019, 2025)]
         + [f"matricula_{y}_2" for y in range(2019, 2025)]
         + [f"inscritos_{y}" for y in range(2019, 2025)]
+        + [f"primer_curso_{y}" for y in range(2019, 2025)]
+        + [f"graduados_{y}" for y in range(2019, 2025)]
     )
     cols_existentes = [c for c in cols_to_refresh if c in base.columns]
     if cols_existentes:
         base = base.drop(columns=cols_existentes)
         log_info(
-            f"[Fase 3] Idempotencia: eliminadas {len(cols_existentes)} columnas previas de matrículas/inscritos para recalcular."
+            f"[Fase 3] Idempotencia: eliminadas {len(cols_existentes)} columnas previas "
+            f"de matrículas/inscritos/primer_curso/graduados para recalcular."
         )
 
     # Normalizar código para joins
@@ -798,6 +840,8 @@ def run_fase3() -> None:
     matricula_cols = [f"matricula_{y}" for y in range(2019, 2025)]
     sem_cols = [f"matricula_{y}_{s}" for y in range(2019, 2025) for s in (1, 2)]
     inscritos_cols = [f"inscritos_{y}" for y in range(2019, 2025)]
+    primer_curso_cols = [f"primer_curso_{y}" for y in range(2019, 2025)]
+    graduados_cols = [f"graduados_{y}" for y in range(2019, 2025)]
 
     for year in range(2019, 2025):
         m1 = _cargar_csv_raw(raw_dir, f"matriculados_{year}_1.csv")
@@ -865,20 +909,146 @@ def run_fase3() -> None:
             base = base.drop(columns=[col_name_ins])
         base = base.merge(merge_i[["_codigo_norm", "inscritos"]].rename(columns={"inscritos": f"inscritos_{year}"}), on="_codigo_norm", how="left")
 
+    # 3.2b Primer curso por año y semestre (2019-2024)
+    for year in range(2019, 2025):
+        pc1 = _cargar_csv_raw(raw_dir, f"primer_curso_{year}_1.csv")
+        pc2 = _cargar_csv_raw(raw_dir, f"primer_curso_{year}_2.csv")
+        for df_pc in (pc1, pc2):
+            if (
+                len(df_pc) > 0
+                and "PRIMER_CURSO" in df_pc.columns
+                and codigo_col in df_pc.columns
+            ):
+                df_pc["_codigo_norm"] = _normalizar_codigo_snies(df_pc[codigo_col])
+        val_pc1 = (
+            pc1.groupby("_codigo_norm", as_index=False)["PRIMER_CURSO"].sum()
+            if len(pc1) > 0 and "PRIMER_CURSO" in pc1.columns and "_codigo_norm" in pc1.columns
+            else pd.DataFrame(columns=["_codigo_norm", "PRIMER_CURSO"])
+        )
+        val_pc2 = (
+            pc2.groupby("_codigo_norm", as_index=False)["PRIMER_CURSO"].sum()
+            if len(pc2) > 0 and "PRIMER_CURSO" in pc2.columns and "_codigo_norm" in pc2.columns
+            else pd.DataFrame(columns=["_codigo_norm", "PRIMER_CURSO"])
+        )
+        merge_pc = val_pc1.merge(val_pc2, on="_codigo_norm", how="outer", suffixes=("", "_2"))
+        merge_pc[f"primer_curso_{year}"] = merge_pc["PRIMER_CURSO"].fillna(0) + (
+            merge_pc["PRIMER_CURSO_2"].fillna(0) if "PRIMER_CURSO_2" in merge_pc.columns else 0
+        )
+        col_pc = f"primer_curso_{year}"
+        if col_pc in base.columns:
+            base = base.drop(columns=[col_pc])
+        base = base.merge(merge_pc[["_codigo_norm", col_pc]], on="_codigo_norm", how="left")
+
+    # 3.2c Graduados por año y semestre (2019-2024)
+    for year in range(2019, 2025):
+        g1 = _cargar_csv_raw(raw_dir, f"graduados_{year}_1.csv")
+        g2 = _cargar_csv_raw(raw_dir, f"graduados_{year}_2.csv")
+        for df_g in (g1, g2):
+            if len(df_g) > 0 and "GRADUADOS" in df_g.columns and codigo_col in df_g.columns:
+                df_g["_codigo_norm"] = _normalizar_codigo_snies(df_g[codigo_col])
+        val_g1 = (
+            g1.groupby("_codigo_norm", as_index=False)["GRADUADOS"].sum()
+            if len(g1) > 0 and "GRADUADOS" in g1.columns and "_codigo_norm" in g1.columns
+            else pd.DataFrame(columns=["_codigo_norm", "GRADUADOS"])
+        )
+        val_g2 = (
+            g2.groupby("_codigo_norm", as_index=False)["GRADUADOS"].sum()
+            if len(g2) > 0 and "GRADUADOS" in g2.columns and "_codigo_norm" in g2.columns
+            else pd.DataFrame(columns=["_codigo_norm", "GRADUADOS"])
+        )
+        merge_g = val_g1.merge(val_g2, on="_codigo_norm", how="outer", suffixes=("", "_2"))
+        merge_g[f"graduados_{year}"] = merge_g["GRADUADOS"].fillna(0) + (
+            merge_g["GRADUADOS_2"].fillna(0) if "GRADUADOS_2" in merge_g.columns else 0
+        )
+        col_g = f"graduados_{year}"
+        if col_g in base.columns:
+            base = base.drop(columns=[col_g])
+        base = base.merge(merge_g[["_codigo_norm", col_g]], on="_codigo_norm", how="left")
+
+    # 3.2d IES — añadir ACREDITADA_ALTA_CALIDAD (no CARÁCTER_ACADÉMICO ni SECTOR)
+    ies_path = REF_DIR / "backup" / "ies" / "Instituciones.xlsx"
+    if ies_path.exists():
+        try:
+            df_ies = pd.read_excel(ies_path, sheet_name="Instituciones", dtype=str)
+            df_ies.columns = [str(c).strip() for c in df_ies.columns]
+
+            def _norm_header(h: str) -> str:
+                s = unicodedata.normalize("NFD", str(h))
+                s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+                return s.upper()
+
+            col_cod_ies = None
+            for c in df_ies.columns:
+                cn = _norm_header(c)
+                if "CODIGO" in cn and "INSTITUCION" in cn:
+                    col_cod_ies = c
+                    break
+            if col_cod_ies and "ACREDITADA_ALTA_CALIDAD" in df_ies.columns:
+                df_ies["_cod_ies_norm"] = (
+                    df_ies[col_cod_ies].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+                )
+                df_ies_merge = df_ies[["_cod_ies_norm", "ACREDITADA_ALTA_CALIDAD"]].drop_duplicates(
+                    subset=["_cod_ies_norm"]
+                )
+                col_ies_sabana = None
+                for c in base.columns:
+                    cu = _norm_header(c)
+                    if (
+                        "CODIGO" in cu
+                        and "INSTITUCION" in cu
+                        and "SNIES" not in cu
+                        and "PADRE" not in cu
+                    ):
+                        col_ies_sabana = c
+                        break
+                if col_ies_sabana:
+                    if "ACREDITADA_ALTA_CALIDAD" in base.columns:
+                        base = base.drop(columns=["ACREDITADA_ALTA_CALIDAD"])
+                    base["_cod_ies_norm"] = (
+                        base[col_ies_sabana].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+                    )
+                    base = base.merge(df_ies_merge, on="_cod_ies_norm", how="left")
+                    base = base.drop(columns=["_cod_ies_norm"])
+                    n_acred = base["ACREDITADA_ALTA_CALIDAD"].notna().sum()
+                    log_info(f"[Fase 3] IES: ACREDITADA_ALTA_CALIDAD añadida ({n_acred:,} programas con dato)")
+                else:
+                    log_warning("[Fase 3] IES: no se encontró CÓDIGO_INSTITUCIÓN en la sábana.")
+            else:
+                log_warning(
+                    f"[Fase 3] IES: columnas clave no encontradas. Cols: {list(df_ies.columns)[:10]}"
+                )
+        except Exception as e:
+            log_warning(f"[Fase 3] No se pudo leer Instituciones.xlsx: {e}")
+
     # Rellenar nulos de matrícula (anual + semestral) e inscritos con 0
     for col in matricula_cols + sem_cols + inscritos_cols:
         if col in base.columns:
             base[col] = base[col].fillna(0)
 
-    # Fallback: si inscritos del scraper están en 0 pero el referente trae INSCRITOS_2023/2024, usar esos valores
-    for year in (2023, 2024):
+    # Rellenar nulos de primer_curso y graduados con 0
+    for col in primer_curso_cols + graduados_cols:
+        if col in base.columns:
+            base[col] = base[col].fillna(0)
+
+    # Cobertura de inscritos (fuente primaria: SNIES por código; los CSVs vienen de Fase 2)
+    for year in (2019, 2020, 2021, 2022, 2023, 2024):
         col_ins = f"inscritos_{year}"
-        col_ref = f"INSCRITOS_{year}"
-        if col_ins not in base.columns:
-            continue
-        if base[col_ins].sum() == 0 and col_ref in base.columns:
-            base[col_ins] = base[col_ref].fillna(0)
-            log_info(f"[Fase 3] Fallback: {col_ins} rellenado desde referente ({col_ref})")
+        if col_ins in base.columns:
+            n_con_datos = int((base[col_ins] > 0).sum())
+            n_total = len(base)
+            pct = (n_con_datos / n_total) if n_total else 0
+            log_info(f"[Fase 3] {col_ins}: {n_con_datos:,} programas con dato real de {n_total:,} ({pct:.0%})")
+
+    # Cobertura de primer curso y graduados
+    for col in (
+        [f"primer_curso_{y}" for y in (2023, 2024)]
+        + [f"graduados_{y}" for y in (2022, 2023)]
+    ):
+        if col in base.columns:
+            n_con_datos = int((base[col] > 0).sum())
+            n_total = len(base)
+            pct = (n_con_datos / n_total) if n_total else 0
+            log_info(f"[Fase 3] {col}: {n_con_datos:,} programas con dato real de {n_total:,} ({pct:.0%})")
 
     # 3.2 OLE en cascada: REFERENTE → SCRAPER → IMPUTADO (mediana por CATEGORIA_FINAL)
     if "FUENTE_OLE" not in base.columns:
@@ -1066,6 +1236,10 @@ def run_fase3() -> None:
     log_resultado(f"% programas con matricula_2024 > 0: {pct_mat24:.1f}%")
     log_resultado(f"% programas con datos OLE reales (no imputados): {pct_ole:.1f}%")
     log_resultado(f"% programas con costo de matrícula disponible: {pct_costo:.1f}%")
+
+    # Limpiar CSVs intermedios (ya incorporados en sabana_consolidada.parquet)
+    _limpiar_raw_csv(raw_dir)
+
     log_etapa_completada("Fase 3: Consolidación en sábana única", f"{n} filas")
 
 
@@ -1122,6 +1296,18 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         if c in df.columns:
             simple_agg[f"inscritos_{y}_suma"] = pd.NamedAgg(column=c, aggfunc="sum")
             simple_agg[f"inscritos_{y}_prom"] = pd.NamedAgg(column=c, aggfunc="mean")
+
+    for y in range(2019, 2025):
+        c = f"primer_curso_{y}"
+        if c in df.columns:
+            simple_agg[f"suma_primer_curso_{y}"] = pd.NamedAgg(column=c, aggfunc="sum")
+            simple_agg[f"prom_primer_curso_{y}"] = pd.NamedAgg(column=c, aggfunc="mean")
+
+    for y in range(2019, 2025):
+        c = f"graduados_{y}"
+        if c in df.columns:
+            simple_agg[f"graduados_{y}_suma"] = pd.NamedAgg(column=c, aggfunc="sum")
+
     if "SALARIO_OLE" in df.columns:
         simple_agg["salario_promedio"] = pd.NamedAgg(column="SALARIO_OLE", aggfunc="mean")
     if "COSTO_MATRÍCULA_ESTUD_NUEVOS" in df.columns:
@@ -1147,6 +1333,28 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
 
     ag = ag.reset_index()
 
+    for y in range(2020, 2025):
+        c_curr = f"suma_primer_curso_{y}"
+        c_prev = f"suma_primer_curso_{y-1}"
+        if c_curr in ag.columns and c_prev in ag.columns:
+            den = ag[c_prev].replace(0, np.nan)
+            ag[f"var_primer_curso_{y}"] = (ag[c_curr] - ag[c_prev]) / den
+
+    var_pc_cols = [
+        f"var_primer_curso_{y}" for y in range(2020, 2025) if f"var_primer_curso_{y}" in ag.columns
+    ]
+    if var_pc_cols:
+        ag["AAGR_primer_curso"] = ag[var_pc_cols].mean(axis=1)
+    else:
+        ag["AAGR_primer_curso"] = np.nan
+
+    if "graduados_2023_suma" in ag.columns and "suma_matricula_2022" in ag.columns:
+        den_grad = ag["suma_matricula_2022"].replace(0, np.nan)
+        ag["tasa_graduacion"] = (ag["graduados_2023_suma"] / den_grad).clip(0, 2)
+
+    if "suma_primer_curso_2024" in ag.columns:
+        ag["tiene_primer_curso_real"] = ag["suma_primer_curso_2024"] > 0
+
     # var_suma y var_prom (2020-2024)
     for y in range(2020, 2025):
         s_curr = ag.get(f"suma_matricula_{y}", pd.Series(dtype=float))
@@ -1160,14 +1368,17 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
             den_p = p_prev.replace(0, np.nan)
             ag[f"var_prom_{y}"] = (p_curr - p_prev) / den_p
 
-    total_2019 = ag["suma_matricula_2019"].sum() if "suma_matricula_2019" in ag.columns else 0
-    total_2024 = ag["suma_matricula_2024"].sum() if "suma_matricula_2024" in ag.columns else 0
-    if total_2019 and total_2019 != 0:
-        ag["participacion_2019"] = ag["suma_matricula_2019"] / total_2019
+    # Participación = promedio de matrícula de la categoría / suma de promedios de todas las categorías
+    # Validado contra Excel de referencia (Programas_para_valoración.xlsx)
+    # Refleja el peso relativo del programa típico de cada categoría en el mercado
+    total_prom_2019 = ag["prom_matricula_2019"].sum() if "prom_matricula_2019" in ag.columns else 0
+    total_prom_2024 = ag["prom_matricula_2024"].sum() if "prom_matricula_2024" in ag.columns else 0
+    if total_prom_2019 and total_prom_2019 != 0:
+        ag["participacion_2019"] = ag["prom_matricula_2019"] / total_prom_2019
     else:
         ag["participacion_2019"] = np.nan
-    if total_2024 and total_2024 != 0:
-        ag["participacion_2024"] = ag["suma_matricula_2024"] / total_2024
+    if total_prom_2024 and total_prom_2024 != 0:
+        ag["participacion_2024"] = ag["prom_matricula_2024"] / total_prom_2024
     else:
         ag["participacion_2024"] = np.nan
 
@@ -1226,16 +1437,17 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
     if "inscritos_2023_suma" in ag.columns and "suma_matricula_2023" in ag.columns:
         den = ag["inscritos_2023_suma"].replace(0, np.nan)
         pct_raw = (ag["inscritos_2023_suma"] - ag["suma_matricula_2023"]) / den
-        # Clip a [0, 1]: cuando inscritos < matrícula (datos de distinta escala),
-        # el valor negativo es un artefacto — se trata como "todos matriculados" (pct=0).
-        # Cuando inscritos = 0 (sin datos), se deja NaN para que scoring use fill neutral.
-        ag["pct_no_matriculados_2023"] = pct_raw.clip(lower=0, upper=1)
+        # where(>=0): cuando inscritos < matrícula (dato inconsistente), se deja NaN
+        # para que scoring aplique fill neutral (0.25 → score 3 neutro).
+        # clip(upper=1): limitar máximo a 100% de no matriculados.
+        # Cuando inscritos = 0 (sin datos), también queda NaN → fill neutral.
+        ag["pct_no_matriculados_2023"] = pct_raw.where(pct_raw >= 0).clip(upper=1)
     else:
         ag["pct_no_matriculados_2023"] = np.nan
     if "inscritos_2024_suma" in ag.columns and "suma_matricula_2024" in ag.columns:
         den4 = ag["inscritos_2024_suma"].replace(0, np.nan)
         pct_raw = (ag["inscritos_2024_suma"] - ag["suma_matricula_2024"]) / den4
-        ag["pct_no_matriculados_2024"] = pct_raw.clip(lower=0, upper=1)
+        ag["pct_no_matriculados_2024"] = pct_raw.where(pct_raw >= 0).clip(upper=1)
     else:
         ag["pct_no_matriculados_2024"] = np.nan
     # Columna de transparencia: indica si el score_pct_no_matriculados
@@ -1374,6 +1586,18 @@ _BLOQUES_TOTAL = [
         "var_prom_2020", "var_prom_2021", "var_prom_2022", "var_prom_2023", "var_prom_2024",
         "participacion_2019", "participacion_2024", "AAGR_suma", "CAGR_suma", "AAGR_prom",
         "AAGR_ROBUSTO", "TIPO_CRECIMIENTO",
+    ]),
+    ("DEMANDA NUEVA", [
+        "suma_primer_curso_2019", "suma_primer_curso_2020", "suma_primer_curso_2021",
+        "suma_primer_curso_2022", "suma_primer_curso_2023", "suma_primer_curso_2024",
+        "prom_primer_curso_2019", "prom_primer_curso_2024",
+        "AAGR_primer_curso",
+        "tiene_primer_curso_real",
+    ]),
+    ("GRADUADOS", [
+        "graduados_2019_suma", "graduados_2020_suma", "graduados_2021_suma",
+        "graduados_2022_suma", "graduados_2023_suma", "graduados_2024_suma",
+        "tasa_graduacion",
     ]),
     ("OLE", [
         "salario_promedio", "salario_proyectado_pesos_hoy", "inscritos_2023_suma", "inscritos_2024_suma", "inscritos_2023_prom", "inscritos_2024_prom",
@@ -2838,6 +3062,8 @@ def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
         "score_matricula",
         "score_AAGR",
         "score_salario",
+        "AAGR_primer_curso",
+        "tasa_graduacion",
     ]
     cols_ok = [c for c in COLS_MERCADO if c in ag.columns]
     if "CATEGORIA_FINAL" in cols_ok:
@@ -2859,6 +3085,10 @@ def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
         df_result["salario_promedio"] = pd.to_numeric(df_result["salario_promedio"], errors="coerce")
     if "costo_promedio" in df_result.columns:
         df_result["costo_promedio"] = pd.to_numeric(df_result["costo_promedio"], errors="coerce")
+    if "AAGR_primer_curso" in df_result.columns:
+        df_result["AAGR_primer_curso"] = pd.to_numeric(df_result["AAGR_primer_curso"], errors="coerce")
+    if "tasa_graduacion" in df_result.columns:
+        df_result["tasa_graduacion"] = pd.to_numeric(df_result["tasa_graduacion"], errors="coerce")
 
     # Columnas derivadas
     def _semaforo(c) -> str:
@@ -2909,6 +3139,8 @@ def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
         "salario_promedio",
         "num_programas_2024",
         "costo_promedio",
+        "AAGR_primer_curso",
+        "tasa_graduacion",
     ]
     cols_final = [c for c in COLS_SALIDA if c in df_result.columns]
     df_result = df_result[cols_final].copy()
