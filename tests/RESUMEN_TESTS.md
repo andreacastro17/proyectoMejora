@@ -110,7 +110,14 @@ pytest tests/test_filtros_simple.py -v  # Tests rápidos de filtros
 pytest tests/test_filtros_ajuste_manual.py -v  # Tests con GUI (lentos)
 pytest tests/test_limpieza_historicos.py -v
 pytest tests/test_clasificacion_completa.py -v
+pytest tests/test_mercado_pipeline_e2e.py -v
+pytest tests/test_mercado_pipeline_robust.py -v
 ```
+
+### Pipeline estudio de mercado
+
+- **`test_mercado_pipeline_e2e.py`**: flujo e2e (revisa condiciones y fixtures dentro del archivo).
+- **`test_mercado_pipeline_robust.py`**: robustez ante datos o entornos parciales.
 
 ## Cobertura de Tests
 
@@ -126,6 +133,7 @@ Los tests cubren:
 ✅ **Histórico**: Verifica la actualización del histórico
 ✅ **Descarga**: Verifica la descarga transaccional
 ✅ **Schema**: Verifica la validación de schema
+✅ **Estudio de mercado**: e2e y casos robustos (`test_mercado_*`)
 
 ## Notas
 

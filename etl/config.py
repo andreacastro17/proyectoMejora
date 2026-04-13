@@ -223,13 +223,18 @@ SNIES_URLS = {
 OLE_URLS = {"url": "", "selectors": {}}
 
 # Fase 4: scoring y comparación de costos por nivel de formación
-# Cada nivel tiene su propio benchmark; se sobrescriben desde config.json
-BENCHMARK_COSTO_PREGRADO = 10_000_000
-BENCHMARK_COSTO_ESPECIALIZACION = 13_400_000
-BENCHMARK_COSTO_MAESTRIA = 18_000_000
-BENCHMARK_COSTO_DOCTORADO = 25_000_000
+# Cada nivel tiene su propio benchmark; se sobrescriben desde config.json.
+# Especialización / maestría calibrados con p75 de costos reales (SNIES, Esp+Maestría).
+BENCHMARK_COSTO_PREGRADO = 10_000_000  # sin datos suficientes en pipeline — sin cambio
+BENCHMARK_COSTO_ESPECIALIZACION = 11_910_000  # p75 real Esp (antes 13_400_000)
+BENCHMARK_COSTO_MAESTRIA = 13_686_800  # p75 real Maestría (antes 18_000_000)
+BENCHMARK_COSTO_DOCTORADO = 25_000_000  # sin datos en pipeline — sin cambio
+# Sub-niveles de especialización con mercados de costo muy distinto:
+BENCHMARK_COSTO_ESP_MEDICO_QUIRURGICA = 31_895_490  # p75 real Esp. Médico Quirúrgica
+BENCHMARK_COSTO_ESP_TECNOLOGICA = 5_336_000  # p75 real Esp. Tecnológica
+BENCHMARK_COSTO_ESP_TECNICO_PROF = 5_433_677  # p75 real Esp. Técnico Profesional
 # Valor genérico (fallback para niveles no clasificados)
-BENCHMARK_COSTO = 13_400_000
+BENCHMARK_COSTO = 11_910_000  # alineado con Especialización
 SMLMV = 1_300_000  # O el valor dinámico que tenga
 
 # ── Filtro de niveles de formación ──────────────────────────────────────────
@@ -262,6 +267,12 @@ try:
         BENCHMARK_COSTO_MAESTRIA = float(_cfg["BENCHMARK_COSTO_MAESTRIA"])
     if isinstance(_cfg.get("BENCHMARK_COSTO_DOCTORADO"), (int, float)) and _cfg["BENCHMARK_COSTO_DOCTORADO"] > 0:
         BENCHMARK_COSTO_DOCTORADO = float(_cfg["BENCHMARK_COSTO_DOCTORADO"])
+    if isinstance(_cfg.get("BENCHMARK_COSTO_ESP_MEDICO_QUIRURGICA"), (int, float)) and _cfg["BENCHMARK_COSTO_ESP_MEDICO_QUIRURGICA"] > 0:
+        BENCHMARK_COSTO_ESP_MEDICO_QUIRURGICA = float(_cfg["BENCHMARK_COSTO_ESP_MEDICO_QUIRURGICA"])
+    if isinstance(_cfg.get("BENCHMARK_COSTO_ESP_TECNOLOGICA"), (int, float)) and _cfg["BENCHMARK_COSTO_ESP_TECNOLOGICA"] > 0:
+        BENCHMARK_COSTO_ESP_TECNOLOGICA = float(_cfg["BENCHMARK_COSTO_ESP_TECNOLOGICA"])
+    if isinstance(_cfg.get("BENCHMARK_COSTO_ESP_TECNICO_PROF"), (int, float)) and _cfg["BENCHMARK_COSTO_ESP_TECNICO_PROF"] > 0:
+        BENCHMARK_COSTO_ESP_TECNICO_PROF = float(_cfg["BENCHMARK_COSTO_ESP_TECNICO_PROF"])
     # Fallback genérico (mantener compatibilidad)
     if isinstance(_cfg.get("BENCHMARK_COSTO"), (int, float)) and _cfg["BENCHMARK_COSTO"] > 0:
         BENCHMARK_COSTO = float(_cfg["BENCHMARK_COSTO"])
@@ -587,6 +598,14 @@ def set_last_success(iso_timestamp: str, duration_minutes: float) -> bool:
 
 def get_benchmark_costo(nivel: str = "general") -> float:
     nivel_norm = str(nivel).lower().strip()
+    # Sub-niveles de especialización — detectar ANTES de "especial" genérico
+    if "médico" in nivel_norm or "medico" in nivel_norm or "quirúrg" in nivel_norm or "quirurg" in nivel_norm:
+        return BENCHMARK_COSTO_ESP_MEDICO_QUIRURGICA
+    if "tecnológ" in nivel_norm or "tecnolog" in nivel_norm:
+        return BENCHMARK_COSTO_ESP_TECNOLOGICA
+    if "técnico" in nivel_norm or "tecnico" in nivel_norm:
+        return BENCHMARK_COSTO_ESP_TECNICO_PROF
+    # Niveles principales
     if "especial" in nivel_norm:
         return BENCHMARK_COSTO_ESPECIALIZACION
     if "maestr" in nivel_norm or "magist" in nivel_norm:
@@ -601,10 +620,21 @@ def get_benchmark_costo(nivel: str = "general") -> float:
 def set_benchmark_costo(valor: float, nivel: str = "general") -> bool:
     global BENCHMARK_COSTO, BENCHMARK_COSTO_PREGRADO, BENCHMARK_COSTO_ESPECIALIZACION
     global BENCHMARK_COSTO_MAESTRIA, BENCHMARK_COSTO_DOCTORADO
+    global BENCHMARK_COSTO_ESP_MEDICO_QUIRURGICA, BENCHMARK_COSTO_ESP_TECNOLOGICA, BENCHMARK_COSTO_ESP_TECNICO_PROF
     try:
         c = _load_config()
         nivel_norm = str(nivel).lower().strip()
-        if "especial" in nivel_norm:
+        # Sub-niveles de especialización — detectar ANTES del genérico
+        if "médico" in nivel_norm or "medico" in nivel_norm or "quirúrg" in nivel_norm or "quirurg" in nivel_norm:
+            c["BENCHMARK_COSTO_ESP_MEDICO_QUIRURGICA"] = float(valor)
+            BENCHMARK_COSTO_ESP_MEDICO_QUIRURGICA = float(valor)
+        elif "tecnológ" in nivel_norm or "tecnolog" in nivel_norm:
+            c["BENCHMARK_COSTO_ESP_TECNOLOGICA"] = float(valor)
+            BENCHMARK_COSTO_ESP_TECNOLOGICA = float(valor)
+        elif "técnico" in nivel_norm or "tecnico" in nivel_norm:
+            c["BENCHMARK_COSTO_ESP_TECNICO_PROF"] = float(valor)
+            BENCHMARK_COSTO_ESP_TECNICO_PROF = float(valor)
+        elif "especial" in nivel_norm:
             c["BENCHMARK_COSTO_ESPECIALIZACION"] = float(valor)
             BENCHMARK_COSTO_ESPECIALIZACION = float(valor)
         elif "maestr" in nivel_norm or "magist" in nivel_norm:
@@ -631,6 +661,9 @@ def get_todos_benchmarks() -> dict[str, float]:
         "especializacion": BENCHMARK_COSTO_ESPECIALIZACION,
         "maestria": BENCHMARK_COSTO_MAESTRIA,
         "doctorado": BENCHMARK_COSTO_DOCTORADO,
+        "esp_medico_quirurgica": BENCHMARK_COSTO_ESP_MEDICO_QUIRURGICA,
+        "esp_tecnologica": BENCHMARK_COSTO_ESP_TECNOLOGICA,
+        "esp_tecnico_prof": BENCHMARK_COSTO_ESP_TECNICO_PROF,
     }
 
 # ========= INFORMACIÓN DE DEBUG =========

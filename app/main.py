@@ -4461,6 +4461,79 @@ class PipelinePage(ttk.Frame):
             messagebox.showerror("Error", f"Error durante la ejecución:\n\n{error_msg}", parent=self.root)
 
 
+# Diagnóstico visual en MercadoPipelinePage (ref/backup + insumos clave)
+_MERCADO_BACKUP_CHECKS: list[tuple[str, str | None, str]] = [
+    ("Matrículas 2019-2024", "backup/matriculas", "6 archivos matriculados_{año}.xlsx"),
+    ("Primer Curso 2019-2024", "backup/matriculas primer curso", "6 archivos primer_curso_{año}.xlsx"),
+    ("Graduados 2019-2024", "backup/graduados", "6 archivos graduados_{año}.xlsx"),
+    ("Inscritos SNIES", "backup/inscritos", "Archivos inscritos_{año}.xlsx"),
+    ("OLE Indicadores", "backup", "ole_indicadores.csv o .xlsx"),
+    ("Instituciones IES", "backup/ies", "Instituciones.xlsx"),
+    ("Programas SNIES", None, "Programas.xlsx"),
+    ("Referente Categorías", "backup", "Referente_Categorias.xlsx"),
+]
+
+
+def _check_backup_source(ref_dir: Path, ruta_rel: str | None, etiqueta: str) -> tuple[str, str]:
+    """
+    Valida disponibilidad de insumos del estudio de mercado (ref/backup/, ref/, outputs/).
+    Retorna (estado, detalle) donde estado es 'ok', 'parcial' o 'falta'.
+    Usa comparaciones exactas de etiqueta para evitar matches accidentales.
+    """
+    if etiqueta == "Programas SNIES":
+        try:
+            from etl.config import OUTPUTS_DIR
+
+            ok = (OUTPUTS_DIR / "Programas.xlsx").exists()
+        except Exception:
+            ok = False
+        return ("ok" if ok else "falta", "Programas.xlsx")
+
+    carpeta = ref_dir / ruta_rel if ruta_rel else ref_dir
+
+    if etiqueta == "OLE Indicadores":
+        ok = (carpeta / "ole_indicadores.csv").exists() or (carpeta / "ole_indicadores.xlsx").exists()
+        return ("ok" if ok else "falta", "ole_indicadores.csv/.xlsx")
+
+    if etiqueta == "Referente Categorías":
+        ok = (carpeta / "Referente_Categorias.xlsx").exists()
+        return ("ok" if ok else "falta", "Referente_Categorias.xlsx")
+
+    if etiqueta == "Instituciones IES":
+        ok = (carpeta / "Instituciones.xlsx").exists()
+        return ("ok" if ok else "falta", "Instituciones.xlsx")
+
+    if etiqueta == "Inscritos SNIES":
+        if not carpeta.exists():
+            return ("falta", "Carpeta no encontrada")
+        archivos = list(carpeta.glob("inscritos_*.xlsx")) + list(carpeta.glob("inscritos_*.xls"))
+        n = len(archivos)
+        if n >= 6:
+            return ("ok", f"{n} archivos encontrados")
+        if n > 0:
+            return ("parcial", f"Solo {n}/6 archivos")
+        return ("falta", "Sin archivos inscritos_*.xlsx")
+
+    if not carpeta.exists():
+        return ("falta", "Carpeta no encontrada")
+
+    years_ok: list[int] = []
+    years_missing: list[int] = []
+    for y in range(2019, 2025):
+        hits = list(carpeta.glob(f"*{y}*.xlsx")) + list(carpeta.glob(f"*{y}*.xls"))
+        if hits:
+            years_ok.append(y)
+        else:
+            years_missing.append(y)
+
+    if len(years_ok) == 6:
+        return ("ok", "6/6 años disponibles (2019-2024)")
+    if years_ok:
+        faltantes = ", ".join(str(y) for y in years_missing)
+        return ("parcial", f"{len(years_ok)}/6 años — faltan: {faltantes}")
+    return ("falta", "Sin archivos encontrados")
+
+
 class MercadoPipelinePage(ttk.Frame):
     """Página dedicada al pipeline de estudio de mercado Colombia, con progreso en tiempo real."""
 
@@ -4487,6 +4560,72 @@ class MercadoPipelinePage(ttk.Frame):
                 self.seg_desc_label.configure(wraplength=wrap)
         except (tk.TclError, AttributeError):
             pass
+
+    def _populate_diagnostico_content(self, diag_card: ttk.Frame, ref_dir: Path | None) -> None:
+        """Añade filas de semáforo y botón refrescar (asume título + subtítulo ya empaquetados)."""
+        for w in diag_card.winfo_children()[2:]:
+            w.destroy()
+
+        _color_ok = EAFIT["success"]
+        _color_parcial = EAFIT["warning"]
+        _color_falta = EAFIT["danger"]
+        _bg_ok = EAFIT["success_light"]
+        _bg_parcial = EAFIT["warning_light"]
+        _bg_falta = EAFIT["danger_light"]
+        _icon_ok = "✅"
+        _icon_parcial = "⚠️"
+        _icon_falta = "❌"
+        detail_bg = EAFIT["card_bg"]
+
+        for etiqueta, ruta_rel, _desc in _MERCADO_BACKUP_CHECKS:
+            fila = ttk.Frame(diag_card, style="Card.TFrame")
+            fila.pack(fill=tk.X, pady=(0, 4))
+
+            if ref_dir is None:
+                estado, detalle = "falta", "REF_DIR no disponible"
+            else:
+                estado, detalle = _check_backup_source(ref_dir, ruta_rel, etiqueta)
+
+            if estado == "ok":
+                icon, fg, bg = _icon_ok, _color_ok, _bg_ok
+            elif estado == "parcial":
+                icon, fg, bg = _icon_parcial, _color_parcial, _bg_parcial
+            else:
+                icon, fg, bg = _icon_falta, _color_falta, _bg_falta
+
+            tk.Label(
+                fila,
+                text=f" {icon} {etiqueta} ",
+                bg=bg,
+                fg=fg,
+                font=("Segoe UI", 9, "bold"),
+                padx=6,
+                pady=2,
+            ).pack(side=tk.LEFT)
+
+            tk.Label(
+                fila,
+                text=f" — {detalle}",
+                bg=detail_bg,
+                fg=EAFIT["text_muted"],
+                font=("Segoe UI", 9),
+            ).pack(side=tk.LEFT)
+
+        ttk.Button(
+            diag_card,
+            text="↻  Refrescar diagnóstico",
+            command=self._refresh_diagnostico,
+            style="Secondary.TButton",
+        ).pack(anchor="w", pady=(8, 0))
+
+    def _refresh_diagnostico(self) -> None:
+        try:
+            from etl.config import REF_DIR as _ref
+
+            self._diag_ref_dir = _ref
+        except Exception:
+            self._diag_ref_dir = None
+        self._populate_diagnostico_content(self._diag_card, self._diag_ref_dir)
 
     def _setup_ui(self):
         # ── Contenedor raíz: header fijo arriba + área scrollable abajo ──────
@@ -4548,6 +4687,28 @@ class MercadoPipelinePage(ttk.Frame):
             self._scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         self._scroll_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # ── Card: Diagnóstico de datos disponibles ───────────────────────────
+        diag_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
+        diag_card.pack(fill=tk.X, pady=(0, 14))
+        ttk.Label(
+            diag_card,
+            text="🔍 Diagnóstico de datos disponibles",
+            style="SectionTitle.TLabel",
+        ).pack(anchor="w")
+        ttk.Label(
+            diag_card,
+            text="Estado de los archivos en ref/backup/ antes de ejecutar el pipeline.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(4, 10))
+        try:
+            from etl.config import REF_DIR as _ref_dir_diag, OUTPUTS_DIR as _outputs_dir_diag
+        except Exception:
+            _ref_dir_diag = None
+            _outputs_dir_diag = None
+        self._diag_card = diag_card
+        self._diag_ref_dir = _ref_dir_diag
+        self._populate_diagnostico_content(diag_card, _ref_dir_diag)
 
         # ── Card: Checkpoints ────────────────────────────────────────────────
         cp_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")

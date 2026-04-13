@@ -1,289 +1,89 @@
-# Guía Completa de Empaquetado y Distribución
+# Guía de empaquetado y distribución (PyInstaller)
 
-## 📋 Resumen
+Resume cómo generar el ejecutable **SniesManager** para usuarios sin Python. Detalle de producto y rutas: **`README.md`**. Instrucciones breves de distribución: **`INSTRUCCIONES_EMPAQUETADO.md`**.
 
-Esta guía explica cómo convertir el proyecto de Python en una aplicación ejecutable (.exe) con interfaz gráfica para usuarios no técnicos.
+## Objetivo
 
----
+Obtener **`SniesManager.exe`** que:
 
-## 🎯 Objetivo
+- Ejecute la GUI (`app/main.py`) sin instalar Python en el equipo destino.
+- Use rutas relativas a la **raíz del proyecto** o a rutas definidas en **`config.json`** (`etl/config.py`).
+- Permita tanto el **pipeline SNIES / referentes** como el **estudio de mercado** si se distribuyen los insumos en `ref/` y `ref/backup/`.
 
-Crear un archivo `app.exe` que:
-- ✅ Funcione sin Python instalado
-- ✅ Funcione sin instalar dependencias
-- ✅ Tenga una interfaz gráfica simple
-- ✅ Configure automáticamente las rutas del proyecto
-- ✅ Sea fácil de usar para usuarios no técnicos
-
----
-
-## 📁 Estructura del Proyecto
-
-Antes de empaquetar, asegúrese de que su proyecto tenga esta estructura:
+## Estructura esperada del repositorio (antes de empaquetar)
 
 ```
-proyectoMejora2/
+proyectoMejora/
 ├── app/
-│   └── main.py              # Archivo principal con GUI
-├── etl/                     # Módulos del pipeline
-├── ref/                     # Archivos de referencia
-│   ├── referentesUnificados.xlsx
-│   └── catalogoOfertasEAFIT.xlsx
-├── models/                  # Modelos de ML
-├── docs/                    # Documentación
-│   └── normalizacionFinal.xlsx
-├── requirements.txt
-└── build_exe.py            # Script de empaquetado
+│   └── main.py
+├── etl/
+├── ref/
+│   ├── referentesUnificados.csv   (u .xlsx)
+│   ├── catalogoOfertasEAFIT.csv
+│   ├── Referente_Categorias.*     (mercado Fase 1)
+│   └── backup/                    (insumos SNIES/OLE para mercado)
+├── models/
+├── docs/                          (opcional, según tu build)
+├── build_exe.py
+└── requirements.txt
 ```
 
----
-
-## 🔧 Paso 1: Preparar el Entorno
-
-### 1.1 Instalar Python (solo para desarrollo)
-
-Si aún no tiene Python instalado, descárguelo desde [python.org](https://www.python.org/).
-
-### 1.2 Instalar Dependencias
-
-Abra una terminal en la carpeta del proyecto y ejecute:
+## Preparar el entorno (solo máquina de desarrollo)
 
 ```bash
+python -m venv env
+env\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Esto instalará todas las dependencias necesarias, incluyendo PyInstaller.
-
----
-
-## 📦 Paso 2: Empaquetar la Aplicación
-
-### 2.1 Ejecutar el Script de Empaquetado
-
-En la terminal, ejecute:
+## Empaquetar
 
 ```bash
 python build_exe.py
 ```
 
-Este script:
-1. Verifica que PyInstaller esté instalado
-2. Limpia builds anteriores
-3. Crea un archivo `.spec` personalizado
-4. Ejecuta PyInstaller
-5. Copia las carpetas necesarias (ref/, models/, docs/)
-6. Genera instrucciones de uso
+- Salida típica: **`dist/SniesManager.exe`**.
+- En modo **onedir**, PyInstaller crea también **`_internal/`**: debe distribuirse **junto** al `.exe`.
+- `build_exe.py` puede copiar el ejecutable a la raíz del proyecto para pruebas locales; revisa la consola al final del script.
 
-**Tiempo estimado:** 5-15 minutos (dependiendo de la velocidad de su PC)
+## Distribuir a usuarios finales
 
-### 2.2 Resultado
+Copiar como mínimo:
 
-Después de completarse, encontrará en la carpeta `dist/`:
+1. `SniesManager.exe` + `_internal/` (si existe).
+2. Carpetas **`ref/`** (completa, incluida **`ref/backup/`** si usarán estudio de mercado).
+3. **`models/`** con los `.pkl` entrenados.
+4. Opcional: **`docs/`**, **`config.json`**.
 
-```
-dist/
-├── app.exe                 # El ejecutable principal
-├── ref/                    # Copia de ref/
-├── models/                 # Copia de models/
-├── docs/                   # Copia de docs/
-└── INSTRUCCIONES.txt       # Instrucciones de uso
-```
+**Chrome** debe estar instalado en el PC destino para la descarga SNIES.
 
----
+Los artefactos generados aparecerán en **`outputs/`**, **`outputs/estudio_de_mercado/`** y **`outputs/temp/`** según los flujos ejecutados desde el menú.
 
-## 🚀 Paso 3: Distribuir la Aplicación
+## Comportamiento de rutas (`config.py`)
 
-### 3.1 Preparar para Distribución
+- En desarrollo, la base suele ser la carpeta del repositorio.
+- Con **`.exe`** dentro de **`dist/`**, la configuración intenta usar el **padre de `dist/`** como raíz para que `outputs/`, `ref/` y `models/` coincidan con el proyecto y no con una copia aislada dentro de `dist/`.
+- Personalización: **`config.json`** (`base_dir`, `outputs_dir`, `ref_dir`, `umbral_referente`, etc.).
 
-Para distribuir la aplicación, debe copiar **todo el contenido** de la carpeta `dist/`:
+## Prueba en equipo limpio
 
-```
-CarpetaDeDistribucion/
-├── app.exe
-├── ref/
-│   ├── referentesUnificados.xlsx
-│   └── catalogoOfertasEAFIT.xlsx
-├── models/
-│   └── (archivos .pkl)
-└── docs/
-    └── normalizacionFinal.xlsx
-```
+- Windows actualizado, **Chrome** instalado.
+- Copiar el paquete completo (`exe`, `_internal`, `ref`, `models`, …).
+- Ejecutar `SniesManager.exe` y probar un flujo desde el menú; revisar **`logs/pipeline.log`** ante errores.
 
-**IMPORTANTE:** Todos los archivos deben estar en la misma carpeta.
+## Problemas frecuentes
 
-### 3.2 Opciones de Distribución
+| Problema | Acción |
+|----------|--------|
+| `ModuleNotFoundError` al ejecutar el .exe | Añadir el módulo a `hiddenimports` / datos en `build_exe.py` y recompilar |
+| Ejecutable muy grande | Esperado (Python embebido, sklearn, sentence-transformers, etc.) |
+| Falla la descarga SNIES | Red, portal SNIES, Chrome; revisar `descargaSNIES.py` / logs |
+| Mercado sin datos | Completar `ref/backup/` según `README.md` |
 
-- **USB/Disco externo:** Copie la carpeta completa
-- **Carpeta compartida:** Comparta la carpeta en la red
-- **OneDrive/Google Drive:** Suba la carpeta completa
+## Checklist rápido
 
----
-
-## 👥 Paso 4: Uso por el Usuario Final
-
-### 4.1 Primera Ejecución
-
-1. El usuario hace doble clic en `app.exe`
-2. Se abre una ventana con la interfaz gráfica
-3. La aplicación solicita seleccionar la **carpeta raíz del proyecto**
-   - Esta debe ser la carpeta que contiene: `ref/`, `models/`, `docs/`
-   - Ejemplo: `C:\Users\usuario\OneDrive - Universidad EAFIT\trabajo\proyectoMejora`
-4. El usuario selecciona la carpeta y presiona "Aceptar"
-5. La configuración se guarda automáticamente
-
-### 4.2 Ejecuciones Posteriores
-
-1. El usuario hace doble clic en `app.exe`
-2. Se abre la ventana con la interfaz
-3. Presiona el botón **"Ejecutar Pipeline"**
-4. Espera a que termine (puede tardar varios minutos)
-5. Los archivos se guardan automáticamente en `outputs/`
-
-### 4.3 Resultados
-
-Los archivos generados se guardan en:
-- `outputs/HistoricoProgramasNuevos.xlsx` (archivo principal)
-- `outputs/historico/Programas_YYYYMMDD_HHMMSS.xlsx` (histórico con fecha)
-
----
-
-## 🧪 Paso 5: Probar en un Equipo Limpio
-
-### 5.1 Requisitos del Equipo de Prueba
-
-- ✅ Windows 10 o superior
-- ✅ Google Chrome instalado
-- ❌ **NO necesita Python**
-- ❌ **NO necesita instalar dependencias**
-
-### 5.2 Pasos de Prueba
-
-1. **Copiar archivos:**
-   - Copie todo el contenido de `dist/` a una carpeta temporal en el equipo de prueba
-   - Asegúrese de que todas las subcarpetas (ref/, models/, docs/) estén incluidas
-
-2. **Primera ejecución:**
-   - Haga doble clic en `app.exe`
-   - Debe aparecer la ventana de la aplicación
-   - Seleccione la carpeta raíz del proyecto
-
-3. **Ejecutar pipeline:**
-   - Presione "Ejecutar Pipeline"
-   - Verifique que el proceso se ejecute correctamente
-   - Verifique que se generen los archivos en `outputs/`
-
-4. **Verificar resultados:**
-   - Revise que exista `outputs/HistoricoProgramasNuevos.xlsx`
-   - Revise que exista al menos un archivo en `outputs/historico/`
-
-### 5.3 Problemas Comunes
-
-| Problema | Solución |
-|----------|----------|
-| "Chrome no encontrado" | Instalar Google Chrome |
-| Error al seleccionar carpeta | Verificar que la carpeta contenga ref/, models/, docs/ |
-| Error de permisos | Ejecutar como administrador o cambiar permisos de la carpeta |
-| La aplicación no inicia | Verificar que ref/, models/, docs/ estén en la misma carpeta que app.exe |
-
----
-
-## 🔍 Solución de Problemas
-
-### Problema: PyInstaller no encuentra módulos
-
-**Solución:** Verifique que todas las dependencias estén en `requirements.txt` y ejecute:
-```bash
-pip install --upgrade -r requirements.txt
-```
-
-### Problema: El ejecutable es muy grande (>500MB)
-
-**Es normal.** El ejecutable incluye:
-- Python completo
-- Todas las dependencias
-- Modelos de ML (sentence-transformers puede ser grande)
-- Librerías de Selenium
-
-### Problema: Error "ModuleNotFoundError" al ejecutar
-
-**Solución:** Agregue el módulo faltante a `hiddenimports` en `build_exe.py`.
-
-### Problema: Chrome no se encuentra al ejecutar
-
-**Solución:** 
-1. Instale Google Chrome en el equipo destino
-2. O modifique el código para usar una ruta específica a Chrome
-
----
-
-## 📝 Notas Importantes
-
-### Rutas del Proyecto
-
-- **NO** se usan rutas absolutas hardcodeadas
-- La aplicación pide al usuario seleccionar la carpeta raíz
-- Todas las rutas se construyen relativas a esa carpeta raíz
-- La configuración se guarda en `config.json` junto al ejecutable
-
-### Configuración Automática
-
-- La primera vez que se ejecuta, pide la carpeta raíz
-- La configuración se guarda automáticamente
-- En ejecuciones posteriores, no se vuelve a pedir
-- El usuario puede cambiar la carpeta usando el botón "Cambiar Carpeta"
-
-### Archivos Generados
-
-- Los outputs siempre se guardan en `outputs/` dentro de la carpeta raíz
-- No se pide al usuario dónde guardar los resultados
-- Los archivos históricos tienen fecha y hora en el nombre
-
----
-
-## 🎓 Arquitectura Técnica
-
-### Flujo de Ejecución
-
-1. **Inicio:** `app/main.py` inicia la GUI con tkinter
-2. **Configuración:** Lee `config.json` o solicita la carpeta raíz
-3. **Actualización de rutas:** Llama a `update_paths_for_base_dir()`
-4. **Ejecución:** Ejecuta `run_pipeline()` en un hilo separado
-5. **Pipeline:** Ejecuta todos los pasos del ETL
-6. **Resultados:** Muestra mensajes de estado y resultados en la GUI
-
-### Componentes Principales
-
-- **`app/main.py`:** GUI con tkinter y lógica de ejecución
-- **`etl/config.py`:** Gestión de rutas y configuración
-- **`build_exe.py`:** Script de empaquetado con PyInstaller
-
----
-
-## 📞 Soporte
-
-Si tiene problemas:
-
-1. Revise los logs en `logs/pipeline.log`
-2. Revise los mensajes en la ventana de la aplicación
-3. Verifique que todas las carpetas (ref/, models/, docs/) estén presentes
-4. Verifique que Google Chrome esté instalado
-
----
-
-## ✅ Checklist de Empaquetado
-
-Antes de distribuir, verifique:
-
-- [ ] PyInstaller está instalado
-- [ ] Todas las dependencias están en requirements.txt
-- [ ] El script build_exe.py se ejecutó sin errores
-- [ ] La carpeta dist/ contiene app.exe y las carpetas ref/, models/, docs/
-- [ ] Se probó en un equipo limpio (sin Python)
-- [ ] La primera ejecución solicita la carpeta raíz correctamente
-- [ ] El pipeline se ejecuta correctamente
-- [ ] Los archivos se generan en outputs/
-
----
-
-¡Listo! Ahora tiene una aplicación ejecutable lista para distribuir. 🎉
-
+- [ ] `pip install -r requirements.txt` sin errores
+- [ ] `python build_exe.py` finaliza correctamente
+- [ ] Existe `dist/SniesManager.exe` (y `_internal/` si aplica)
+- [ ] Paquete de distribución incluye `ref/`, `models/`, y opcionalmente `ref/backup/`
+- [ ] Prueba en un PC sin Python

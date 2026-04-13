@@ -36,6 +36,27 @@
 4. Entrenar modelo ML
 ```
 
+### 4. Pipeline Estudio de Mercado (`etl/mercado_pipeline.py` + páginas en `app/main.py`)
+
+Flujo de alto nivel (desde la GUI: Fases 1 a 6 y, aparte, reportes segmentados):
+
+```
+1. Validación de archivos de entrada (validar_archivos_entrada) — errores bloqueantes antes de Fase 2
+2. Fase 1: Programas.xlsx + Referente_Categorias → base_maestra.parquet
+3. Fase 2: lectura ref/backup/ + scrapers → CSV en outputs/historico/raw/
+4. Fase 3: sábana consolidada → sabana_consolidada.parquet; limpieza de CSV intermedios
+5. Fase 4: agregación por categoría + métricas + scoring → agregado (parquet)
+6. Fase 5: Excel nacional (Estudio_Mercado_Colombia.xlsx) + hoja cambios_vs_anterior vs snapshot
+7. Fase 6 (opcional): hoja eafit_vs_mercado; segmentos regionales → Excels independientes + contexto_nacional
+```
+
+**Puntos sensibles a errores (alineados con el resto del documento):**
+
+- **Excel abierto** al escribir `Estudio_Mercado_*.xlsx` o segmentos: `PermissionError` — cerrar archivo; en hilos de fondo no usar Tkinter para diálogos (evitar cuelgues en Windows).
+- **Insumos SNIES faltantes** en `ref/backup/`: no deben tumbar todo el proceso; warnings y métricas con ceros/NaN.
+- **Excels SNIES con hoja ÍNDICE**: la lectura debe apuntar a la hoja de datos (ya contemplado en `scraper_matriculas.py` con detección de hoja).
+- **Parquets / caché desactualizados**: si la sábana cambia y persisten `agregado_*.parquet` viejos, puede haber resultados incoherentes; la UI ofrece forzar recálculo en segmentos.
+
 ---
 
 ## Puntos Críticos de Manejo de Excepciones
