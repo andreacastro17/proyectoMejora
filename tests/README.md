@@ -31,6 +31,10 @@ pytest tests/test_limpieza_historicos.py -v
 
 # Tests de clasificación
 pytest tests/test_clasificacion_completa.py -v
+
+# Pipeline estudio de mercado (e2e / robustez)
+pytest tests/test_mercado_pipeline_e2e.py -v
+pytest tests/test_mercado_pipeline_robust.py -v
 ```
 
 > Nota: Si corres `pytest` con el Python del sistema (sin el `.venv`), pueden faltar librerías como `unidecode`.
@@ -68,6 +72,8 @@ pytest -q -m "not gui" --skip-slow
 - `test_descarga_commit.py`: Tests para la descarga transaccional
 - `test_app_schema.py`: Tests para validación de schema
 - `test_gui_smoke_optional.py`: Tests opcionales de GUI
+- `test_mercado_pipeline_e2e.py`: Flujo e2e del pipeline de mercado (requiere insumos/acceso según el test)
+- `test_mercado_pipeline_robust.py`: Casos de robustez del pipeline de mercado
 
 ## Notas
 

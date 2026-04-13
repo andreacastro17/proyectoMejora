@@ -1,19 +1,23 @@
-# Instrucciones para Empaquetar y Distribuir el Proyecto
+# Instrucciones para empaquetar y distribuir el proyecto
 
-## 📦 Empaquetar en .EXE
+El script `build_exe.py` genera **`SniesManager.exe`** con PyInstaller (no `PipelineSNIES.exe`). La documentación general del producto está en `README.md`.
+
+## Empaquetar en .exe
 
 ### Paso 1: Preparar el entorno
 
-1. Asegúrate de tener todas las dependencias instaladas:
+1. Instalar dependencias:
+
    ```bash
    pip install -r requirements.txt
    ```
 
-2. Verifica que todos los archivos necesarios estén presentes:
-   - `ref/referentesUnificados.xlsx`
-   - `ref/catalogoOfertasEAFIT.xlsx`
-   - `docs/normalizacionFinal.xlsx`
-   - `models/*.pkl` (si existen modelos entrenados)
+2. Verificar insumos mínimos en **`ref/`** (nombres típicos; el código acepta `.csv` o `.xlsx` según existan):
+
+   - `referentesUnificados` + `catalogoOfertasEAFIT` — pipeline SNIES / ML.
+   - Para **estudio de mercado**: `Referente_Categorias` y la carpeta **`ref/backup/`** (matrículas, inscritos, primer curso, graduados, IES, OLE según uses).
+
+3. Opcional: `models/*.pkl` entrenados; `docs/` si tu build los incluye (p. ej. reglas de normalización).
 
 ### Paso 2: Ejecutar el script de empaquetado
 
@@ -21,26 +25,17 @@
 python build_exe.py
 ```
 
-Este script:
-- Instalará PyInstaller si no está disponible
-- Limpiará builds anteriores
-- Creará el ejecutable `PipelineSNIES.exe` en la carpeta `dist/`
-- Generará un archivo de instrucciones
+El script puede dejar el ejecutable en `dist/SniesManager.exe` y, según el modo PyInstaller, la carpeta **`_internal/`** junto al `.exe` **debe** acompañar al binario (modo onedir).
 
-### Paso 3: Distribuir el ejecutable
+### Paso 3: Distribuir
 
-El ejecutable se encuentra en `dist/PipelineSNIES.exe`. Para distribuirlo:
+1. Copiar **`SniesManager.exe`** y, si aplica, **`_internal/`** completos.
+2. Copiar **`ref/`** (incluida **`ref/backup/`** si usarán estudio de mercado), **`models/`**, **`docs/`** si los necesitas.
+3. Opcional: **`config.json`** junto al `.exe` para `base_dir`, `outputs_dir`, `umbral_referente`, etc. (ver `etl/config.py`).
 
-1. **Copia el ejecutable** a la ubicación deseada
-2. **Copia las carpetas necesarias** junto al ejecutable:
-   - `ref/` (con todos sus archivos)
-   - `models/` (si existen modelos entrenados)
-   - `docs/` (con `normalizacionFinal.xlsx`)
-3. **Crea un archivo `config.json`** (opcional) si necesitas rutas personalizadas
+## Configuración para carpeta compartida
 
-## 🔧 Configuración de Rutas para Carpeta Compartida
-
-Si quieres que los outputs se guarden en una carpeta compartida, crea un archivo `config.json` en la misma carpeta que el ejecutable:
+Crear `config.json` en la misma carpeta que el ejecutable (o en la raíz configurada), por ejemplo:
 
 ```json
 {
@@ -54,49 +49,39 @@ Si quieres que los outputs se guarden en una carpeta compartida, crea un archivo
 }
 ```
 
-### Ejemplo de estructura para distribución:
+Rutas vacías se resuelven respecto al directorio base del proyecto (`base_dir` o la carpeta del `.exe` según `config.py`).
+
+### Estructura de ejemplo para distribución
 
 ```
 CarpetaDistribucion/
-├── PipelineSNIES.exe
-├── config.json (opcional)
+├── SniesManager.exe
+├── _internal/          (si PyInstaller la generó — no separar del .exe)
+├── config.json         (opcional)
 ├── ref/
-│   ├── referentesUnificados.xlsx
-│   └── catalogoOfertasEAFIT.xlsx
+│   ├── referentesUnificados.csv
+│   ├── catalogoOfertasEAFIT.csv
+│   ├── Referente_Categorias.xlsx
+│   └── backup/
+│       ├── matriculas/
+│       ├── inscritos/
+│       ├── matriculas primer curso/
+│       ├── graduados/
+│       └── ies/
 ├── models/
-│   ├── clasificador_referentes.pkl
-│   ├── modelo_embeddings.pkl
-│   └── encoder_programas_eafit.pkl
-└── docs/
-    └── normalizacionFinal.xlsx
+│   └── *.pkl
+└── docs/               (opcional)
 ```
 
-## 📝 Notas Importantes
+## Uso del ejecutable
 
-1. **Rutas relativas vs absolutas**:
-   - Si dejas una ruta vacía en `config.json`, se usará la ruta relativa al ejecutable
-   - Si especificas una ruta absoluta, se usará esa ruta (útil para carpetas compartidas)
+1. Colocar `SniesManager.exe`, `_internal/` (si existe), `ref/`, `models/`, etc., según la convención de tu despliegue.
+2. Ajustar `config.json` si las salidas deben ir a otra unidad o red.
+3. Ejecutar **`SniesManager.exe`**. Los resultados irán a `outputs/` (y `outputs/estudio_de_mercado/` para el pipeline de mercado) salvo que redes config.
 
-2. **Carpeta compartida**:
-   - Asegúrate de que todos los usuarios tengan permisos de lectura/escritura
-   - Usa rutas UNC para carpetas compartidas (ej: `\\servidor\carpeta`)
-   - El programa creará automáticamente las subcarpetas necesarias
+## Solución de problemas
 
-3. **Primera ejecución**:
-   - El programa creará automáticamente las carpetas `outputs/` y `logs/` si no existen
-   - Si usas una carpeta compartida, asegúrate de que la ruta sea accesible
-
-## 🚀 Uso del Ejecutable
-
-1. Coloca el ejecutable y las carpetas necesarias en la ubicación deseada
-2. (Opcional) Crea y edita `config.json` para personalizar rutas
-3. Ejecuta `PipelineSNIES.exe` haciendo doble clic o desde la línea de comandos
-4. Los resultados se guardarán en la carpeta configurada (o `outputs/` por defecto)
-
-## ⚠️ Solución de Problemas
-
-- **Error "Chrome no encontrado"**: El ejecutable necesita Google Chrome instalado en el sistema
-- **Error de permisos**: Verifica que tengas permisos de escritura en las carpetas de salida
-- **Error de rutas**: Revisa que las rutas en `config.json` sean correctas y accesibles
-- **Archivos no encontrados**: Asegúrate de que todas las carpetas (`ref/`, `models/`, `docs/`) estén junto al ejecutable
-
+- **Chrome no instalado:** necesario para la descarga SNIES (Selenium).
+- **Permisos:** la carpeta de `outputs_dir` debe ser escribible.
+- **Archivo Excel en uso:** cerrar el libro antes de reprocesar.
+- **Faltan datos de mercado:** revisar `ref/backup/` y `logs/pipeline.log`.

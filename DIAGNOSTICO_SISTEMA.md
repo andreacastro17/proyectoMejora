@@ -1,11 +1,11 @@
-# DIAGNÓSTICO DEL SISTEMA SNIES MANAGER
+# Diagnóstico del sistema SniesManager
 
-**Fecha:** 10 de Febrero, 2026  
-**Versión del Sistema:** Última actualización
+**Fecha del informe original:** 10 de febrero de 2026  
+**Nota:** Este archivo es un **informe puntual** (no se actualiza en cada commit). La descripción vigente del producto, rutas y pipelines está en **`README.md`**, **`ARCHIVOS_PROYECTO.md`** y **`etl/config.py`**.
 
-## RESUMEN EJECUTIVO
+## Resumen ejecutivo
 
-El sistema SNIES Manager ha sido diagnosticado y está **funcionalmente correcto** con algunas advertencias menores sobre dependencias que pueden necesitar instalación.
+El sistema **SniesManager** combina el pipeline **SNIES / referentes EAFIT** con el **estudio de mercado** (Fases 1–6 y reportes segmentados). El diagnóstico histórico indicaba el código **funcionalmente correcto** salvo advertencias de dependencias en el entorno donde se ejecutó la herramienta de diagnóstico.
 
 ## RESULTADOS DEL DIAGNÓSTICO
 
@@ -33,11 +33,10 @@ El sistema SNIES Manager ha sido diagnosticado y está **funcionalmente correcto
    - ✅ Solo existe un archivo histórico (no hay duplicados)
    - ✅ La función de consolidación está implementada para manejar duplicados automáticamente
 
-5. **Archivos de Referencia**
+5. **Archivos de referencia**
    - ✅ Directorio `ref/` existe
-   - ✅ Se encontraron archivos de referencia en `ref/backup/`:
-     - `referentesUnificados.csv`
-     - `catalogoOfertasEAFIT.csv`
+   - Los archivos **referentesUnificados** y **catalogoOfertasEAFIT** suelen estar en **`ref/`** (p. ej. `.csv`)
+   - **`ref/backup/`** agrupa insumos **locales** del estudio de mercado (matrículas, inscritos, OLE, etc.); no sustituye a los CSV/XLSX de referentes en `ref/`
 
 6. **Sintaxis de Archivos Python**
    - ✅ Todos los archivos Python críticos tienen sintaxis correcta:
@@ -62,13 +61,12 @@ El sistema SNIES Manager ha sido diagnosticado y está **funcionalmente correcto
    - El archivo histórico existe y está configurado correctamente
    - La hoja se llama "ProgramasNuevos" (configurado en `HOJA_HISTORICO`)
 
-### 🔧 CONFIGURACIÓN ACTUAL
+### Configuración de rutas (referencia)
 
 - **ARCHIVO_HISTORICO:** `outputs/HistoricoProgramasNuevos .xlsx` (con espacio al final)
 - **ARCHIVO_PROGRAMAS:** `outputs/Programas.xlsx`
-- **OUTPUTS_DIR:** `outputs/`
-- **REF_DIR:** `ref/`
-- **Archivos de Referencia:** Ubicados en `ref/backup/`
+- **OUTPUTS_DIR / REF_DIR / TEMP_DIR / ESTUDIO_MERCADO_DIR:** ver `etl/config.py`
+- **Mercado:** salidas bajo `outputs/estudio_de_mercado/` y parquets en `outputs/temp/`
 
 ### 📋 FUNCIONALIDADES VERIFICADAS
 
@@ -91,11 +89,12 @@ El sistema SNIES Manager ha sido diagnosticado y está **funcionalmente correcto
 
 El sistema está **listo para usar** después de instalar las dependencias faltantes. Todos los componentes críticos están presentes y funcionando correctamente. La configuración del archivo histórico está correcta y el sistema manejará automáticamente cualquier duplicación de archivos históricos.
 
-### Próximos Pasos Recomendados
+### Próximos pasos recomendados
 
-1. Instalar dependencias faltantes: `pip install -r requirements.txt`
-2. Verificar que el archivo histórico contiene los datos esperados
-3. Ejecutar una prueba del pipeline completo para validar el flujo end-to-end
+1. Instalar dependencias: `pip install -r requirements.txt`
+2. Verificar el archivo histórico y `outputs/Programas.xlsx` según el uso
+3. Probar el **pipeline SNIES** y, si aplica, el **estudio de mercado** desde la GUI
+4. Comprobar insumos en **`ref/backup/`** para el mercado (ver `README.md`)
 
 ---
 

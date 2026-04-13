@@ -2,6 +2,8 @@
 
 Este documento resume un análisis del sistema actual (app, ETL, configuración, logs y pruebas) y propone mejoras concretas priorizadas por impacto y esfuerzo.
 
+> **Alcance del código hoy:** además del pipeline SNIES y referentes EAFIT, el repositorio incluye el **estudio de mercado** (`etl/mercado_pipeline.py`, Fases 1–6 y segmentos). Varios ítems de rendimiento / I-O abajo se centraron en el flujo `Programas.xlsx`; conviene evaluar impacto equivalente en el mercado (lectura de Excels grandes, parquets, cachés).
+
 ---
 
 ## 1. Eficiencia del pipeline (rendimiento)
