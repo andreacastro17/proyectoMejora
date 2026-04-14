@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 # Configurar sys.path para permitir ejecución directa del script
@@ -159,21 +160,22 @@ def aplicar_normalizacion_final(df: pd.DataFrame | None = None, archivo: Path | 
             log_info(f"  -> Usando columna '{COLUMNA_ID_INSTITUCION}' para mapeo por ID")
             
         else:
-            # Para las demás columnas, mapear el texto directamente
-            # Guardar referencia a columna original (para conteo y restauración)
+            # Para las demás columnas, mapear el texto directamente.
+            # IMPORTANTE: aplicar el mapeo SOLO sobre valores no nulos para evitar
+            # que NaN se convierta en la cadena "nan" y cause cruces fantasma.
             columna_original = df[nombre_columna]
-            # Crear máscara de NaN antes de conversión para preservarlos
             mask_nan_original = columna_original.isna()
-            
-            # Convertir a string, limpiar espacios y aplicar mapeo (vectorizado)
-            valores_mapeados = columna_original.astype(str).str.strip().map(mapeo)
-            
-            # Restaurar valores originales donde no hay mapeo (eficiente)
-            df[nombre_columna] = valores_mapeados.fillna(columna_original)
-            
-            # Restaurar NaN originales solo donde era necesario (optimizado)
+
+            serie_no_nula = columna_original[~mask_nan_original].astype(str).str.strip()
+            valores_mapeados = serie_no_nula.map(mapeo)
+
+            df[nombre_columna] = columna_original.copy()
+            mask_mapeado = valores_mapeados.notna()
+            if mask_mapeado.any():
+                df.loc[valores_mapeados[mask_mapeado].index, nombre_columna] = valores_mapeados[mask_mapeado]
+
             if mask_nan_original.any():
-                df.loc[mask_nan_original, nombre_columna] = pd.NA
+                df.loc[mask_nan_original, nombre_columna] = np.nan
         
         # Contar reemplazos de forma optimizada (común para ambos casos)
         # Comparar solo donde ambos tienen valores (evita comparaciones innecesarias)

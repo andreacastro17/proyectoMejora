@@ -309,7 +309,8 @@ def get_smlmv_sesion() -> float:
     """
     Obtiene el SMLMV efectivo desde config.json (clave 'SMLMV').
 
-    Si no existe la clave o el archivo, retorna 1_300_000.0 como valor por defecto.
+    Si no existe la clave o el archivo, retorna el valor vigente según el año
+    actual (usando obtener_smlmv_vigente()).
     """
     try:
         c = _load_config()
@@ -318,7 +319,7 @@ def get_smlmv_sesion() -> float:
             return float(val)
     except Exception:
         pass
-    return 1_300_000.0
+    return float(obtener_smlmv_vigente())
 
 # Fase 5: exportación estudio de mercado
 ARCHIVO_ESTUDIO_MERCADO = ESTUDIO_MERCADO_DIR / "Estudio_Mercado_Colombia.xlsx"

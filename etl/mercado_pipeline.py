@@ -30,6 +30,7 @@ from etl.config import (
     ARCHIVO_REFERENTE_CATEGORIAS,
     BENCHMARK_COSTO,
     CHECKPOINT_BASE_MAESTRA,
+    HISTORICO_ESTUDIO_MERCADO_DIR,
     HOJA_PROGRAMAS,
     HOJA_REFERENTE_CATEGORIAS,
     MODELO_CLASIFICADOR_MERCADO,
@@ -1760,11 +1761,18 @@ def _escribir_resumen_ejecutivo(
         else:
             tiene_matricula_2024_sum = int(pd.to_numeric(sabana.get("matricula_2024", 0), errors="coerce").fillna(0).gt(0).sum())
 
-        calif = pd.to_numeric(ag.get("calificacion_final", np.nan), errors="coerce") if isinstance(ag, pd.DataFrame) else pd.Series(dtype=float)
-        categorias_verdes = int((calif >= 4.0).sum())
-        categorias_amarillo = int(((calif >= 3.0) & (calif < 4.0)).sum())
-        categorias_rojas = int((calif < 3.0).sum())
-        calif_promedio = float(calif.mean()) if len(calif) else 0.0
+        # Usar el mismo DF que termina en la hoja 'total' para consistencia.
+        # (En run_fase5, este corresponde a total_final post merge_incremental.)
+        total_final = ag
+        _calif_total = pd.to_numeric(
+            total_final.get("calificacion_final", pd.Series(dtype=float))
+            if isinstance(total_final, pd.DataFrame) else pd.Series(dtype=float),
+            errors="coerce",
+        )
+        categorias_verdes = int((_calif_total >= 4.0).sum())
+        categorias_amarillo = int(((_calif_total >= 3.0) & (_calif_total < 4.0)).sum())
+        categorias_rojas = int((_calif_total < 3.0).sum())
+        calif_promedio = float(_calif_total.mean()) if len(_calif_total) else 0.0
 
         fuente = sabana.get("FUENTE_CATEGORIA", pd.Series([], dtype=object))
         cruce_snies = int(fuente.astype(str).str.upper().str.strip().eq("CRUCE_SNIES").sum())
@@ -2165,8 +2173,31 @@ def _exportar_estudio_segmento(
     nac_merge = ag_nacional[nac_cols_use].rename(columns={k: NAC_COLS[k] for k in keys})
     ag_con_nac = ag_seg.merge(nac_merge, on="CATEGORIA_FINAL", how="left")
 
+    import shutil
+    from datetime import date, datetime
+
+    if ruta.exists():
+        snap_dir = HISTORICO_ESTUDIO_MERCADO_DIR / "snapshots"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        fecha = date.today().isoformat()
+        nombre_base = ruta.stem
+        dest = snap_dir / f"{nombre_base}_{fecha}.xlsx"
+        if dest.exists():
+            hora = datetime.now().strftime("%H%M")
+            dest = snap_dir / f"{nombre_base}_{fecha}_{hora}.xlsx"
+        shutil.copy2(ruta, dest)
+        log_info(f"[Segmento] Snapshot guardado: {dest.name}")
+
     while True:
         try:
+            import datetime as _dt
+
+            _fecha_eje = _dt.date.today().isoformat()
+            sabana_seg = sabana_seg.copy()
+            sabana_seg["FECHA_EJECUCION"] = _fecha_eje
+            ag_seg = ag_seg.copy()
+            ag_seg["FECHA_EJECUCION"] = _fecha_eje
+
             with pd.ExcelWriter(ruta, engine="openpyxl") as writer:
                 try:
                     _escribir_resumen_ejecutivo(writer, sabana_seg, ag_seg)
@@ -2641,6 +2672,14 @@ def run_fase5(agregado_df: pd.DataFrame | None) -> None:
                 sabana_final = sabana
                 total_final = agregado_df
 
+            import datetime as _dt
+
+            _fecha_eje = _dt.date.today().isoformat()
+            sabana_final = sabana_final.copy()
+            total_final = total_final.copy()
+            sabana_final["FECHA_EJECUCION"] = _fecha_eje
+            total_final["FECHA_EJECUCION"] = _fecha_eje
+
             with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
                 # Generar hoja de resumen ejecutivo (primera hoja)
                 _escribir_resumen_ejecutivo(writer, sabana_final, total_final)
@@ -3032,12 +3071,12 @@ def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
             + "\n".join(f"    - {p}" for p in muestras)
         )
 
-    # Extraer nivel de formación (heurística por keywords)
+    # Extraer nivel de formación (heurística por prefijo del nombre)
     def _nivel(nombre: str) -> str:
-        n = str(nombre).lower()
-        if any(k in n for k in ("maestría", "maestria", "master", "msc")):
+        n = str(nombre).strip().lower()
+        if n.startswith(("maestría", "maestria", "master", "msc")):
             return "Maestría"
-        if any(k in n for k in ("pregrado", "ingeniería de", "ingenieria de", "licenciatura")):
+        if n.startswith(("pregrado", "licenciatura")):
             return "Pregrado"
         return "Especialización"
 

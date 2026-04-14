@@ -26,7 +26,7 @@ SNAPSHOTS_DIR = HISTORICO_ESTUDIO_MERCADO_DIR / "snapshots"
 ESTUDIO_PATH = ARCHIVO_ESTUDIO_MERCADO
 
 # Número de días que se conservan los snapshots. Snapshots más viejos se eliminan.
-SNAPSHOT_RETENTION_DAYS = 30
+SNAPSHOT_RETENTION_DAYS = 365
 
 # ── Identificador único de programa ───────────────────────────────────────────
 ID_COL = "CÓDIGO_SNIES_DEL_PROGRAMA"
