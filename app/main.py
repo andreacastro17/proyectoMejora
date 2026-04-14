@@ -2132,9 +2132,18 @@ class RetrainPage(ttk.Frame):
                 df_completo.update(df_gui_indexed)
                 df_completo = df_completo.reset_index()
             else:
-                # Fallback: sobrescribir con lo que tiene la GUI pero advertir
-                self._log("⚠️ No se encontró clave de match. Guardando solo columnas de la tabla.")
-                df_completo = df_gui
+                # PROTECCIÓN CRÍTICA: si las llaves no coinciden, bloquear el guardado.
+                # df_gui solo tiene las columnas visibles — sobrescribir sería pérdida de datos.
+                safe_messagebox_error(
+                    "Error de integridad",
+                    "No se encontró la clave de emparejamiento (NOMBRE_DEL_PROGRAMA + "
+                    "NombrePrograma EAFIT) entre la tabla y el archivo en disco.\n\n"
+                    "No se guardaron cambios para proteger la integridad del archivo de referentes.\n\n"
+                    "Recarga el archivo y vuelve a intentar.",
+                    parent=self,
+                )
+                self._log("✗ Guardado cancelado: clave de match no encontrada. Archivo sin modificar.")
+                return
 
         try:
             if self.file_path.suffix.lower() == ".csv":
