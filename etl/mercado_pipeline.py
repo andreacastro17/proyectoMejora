@@ -1445,19 +1445,36 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         ag["pct_no_matriculados_2023"] = pct_raw.where(pct_raw >= 0).clip(upper=1)
     else:
         ag["pct_no_matriculados_2023"] = np.nan
-    if "inscritos_2024_suma" in ag.columns and "suma_matricula_2024" in ag.columns:
-        den4 = ag["inscritos_2024_suma"].replace(0, np.nan)
-        pct_raw = (ag["inscritos_2024_suma"] - ag["suma_matricula_2024"]) / den4
-        ag["pct_no_matriculados_2024"] = pct_raw.where(pct_raw >= 0).clip(upper=1)
-    else:
-        ag["pct_no_matriculados_2024"] = np.nan
-    # Columna de transparencia: indica si el score_pct_no_matriculados
-    # se basa en datos reales de inscritos o en el valor de relleno (0.20).
-    # True = dato real del SNIES | False = imputado (no hay datos de inscritos).
-    if "inscritos_2024_suma" in ag.columns:
-        ag["tiene_inscritos_reales"] = ag["inscritos_2024_suma"].fillna(0) > 0
-    else:
-        ag["tiene_inscritos_reales"] = False
+    # pct_no_matriculados_2024: inscritos que no se matricularon
+    # El SNIES de posgrado tiene inscritos < matriculados frecuentemente
+    # (no hay fase de inscripción separada). Estrategia de fallback por año:
+    #   1. Usar 2024 si inscritos_2024 >= matricula_2024 (dato coherente)
+    #   2. Fallback a 2023 si el de 2024 es inconsistente y el de 2023 es coherente
+    #   3. NaN (fill 0.25 en scoring) si ambos son inconsistentes
+
+    def _calc_pct(ins_col, mat_col):
+        """Devuelve la tasa solo cuando ins >= mat, NaN si inconsistente."""
+        den = ag[ins_col].replace(0, np.nan)
+        raw = (ag[ins_col] - ag[mat_col]) / den
+        return raw.where(raw >= 0).clip(upper=1)
+
+    pct_2024 = _calc_pct("inscritos_2024_suma", "suma_matricula_2024") \
+        if "inscritos_2024_suma" in ag.columns and "suma_matricula_2024" in ag.columns \
+        else pd.Series(np.nan, index=ag.index)
+
+    pct_2023 = _calc_pct("inscritos_2023_suma", "suma_matricula_2023") \
+        if "inscritos_2023_suma" in ag.columns and "suma_matricula_2023" in ag.columns \
+        else pd.Series(np.nan, index=ag.index)
+
+    # Combinar: prioridad 2024, fallback 2023
+    ag["pct_no_matriculados_2024"] = pct_2024.combine_first(pct_2023)
+
+    # Columna de transparencia: indica la fuente del dato
+    ag["FUENTE_PCT_NO_MAT"] = "SIN_DATOS"
+    ag.loc[pct_2024.notna(), "FUENTE_PCT_NO_MAT"] = "INSCRITOS_2024"
+    ag.loc[pct_2024.isna() & pct_2023.notna(), "FUENTE_PCT_NO_MAT"] = "INSCRITOS_2023_FALLBACK"
+
+    ag["tiene_inscritos_reales"] = ag["pct_no_matriculados_2024"].notna()
     if "inscritos_2023_suma" in ag.columns and "inscritos_2024_suma" in ag.columns:
         den_i = ag["inscritos_2023_suma"].replace(0, np.nan)
         ag["var_inscritos"] = (ag["inscritos_2024_suma"] - ag["inscritos_2023_suma"]) / den_i
@@ -1603,6 +1620,7 @@ _BLOQUES_TOTAL = [
     ("OLE", [
         "salario_promedio", "salario_proyectado_pesos_hoy", "inscritos_2023_suma", "inscritos_2024_suma", "inscritos_2023_prom", "inscritos_2024_prom",
         "pct_no_matriculados_2023", "pct_no_matriculados_2024", "var_inscritos",
+        "FUENTE_PCT_NO_MAT",
         "tiene_inscritos_reales",
     ]),
     ("OFERTA", [
@@ -1629,7 +1647,12 @@ ROJO = "FFC7CE"
 
 
 def _escribir_resumen_ejecutivo(
-    writer: pd.ExcelWriter, sabana: pd.DataFrame, ag: pd.DataFrame
+    writer: pd.ExcelWriter,
+    sabana: pd.DataFrame,
+    ag: pd.DataFrame,
+    _sem_verde: int | None = None,
+    _sem_amarillo: int | None = None,
+    _sem_rojo: int | None = None,
 ) -> None:
     """
     Genera hoja "resumen_ejecutivo" (primera) con KPIs globales, rankings y calidad.
@@ -1761,18 +1784,11 @@ def _escribir_resumen_ejecutivo(
         else:
             tiene_matricula_2024_sum = int(pd.to_numeric(sabana.get("matricula_2024", 0), errors="coerce").fillna(0).gt(0).sum())
 
-        # Usar el mismo DF que termina en la hoja 'total' para consistencia.
-        # (En run_fase5, este corresponde a total_final post merge_incremental.)
-        total_final = ag
-        _calif_total = pd.to_numeric(
-            total_final.get("calificacion_final", pd.Series(dtype=float))
-            if isinstance(total_final, pd.DataFrame) else pd.Series(dtype=float),
-            errors="coerce",
-        )
-        categorias_verdes = int((_calif_total >= 4.0).sum())
-        categorias_amarillo = int(((_calif_total >= 3.0) & (_calif_total < 4.0)).sum())
-        categorias_rojas = int((_calif_total < 3.0).sum())
-        calif_promedio = float(_calif_total.mean()) if len(_calif_total) else 0.0
+        calif = pd.to_numeric(ag.get("calificacion_final", np.nan), errors="coerce") if isinstance(ag, pd.DataFrame) else pd.Series(dtype=float)
+        categorias_verdes   = _sem_verde    if _sem_verde    is not None else int((calif >= 4.0).sum())
+        categorias_amarillo = _sem_amarillo if _sem_amarillo is not None else int(((calif >= 3.0) & (calif < 4.0)).sum())
+        categorias_rojas    = _sem_rojo     if _sem_rojo     is not None else int((calif < 3.0).sum())
+        calif_promedio = float(calif.mean()) if len(calif) else 0.0
 
         fuente = sabana.get("FUENTE_CATEGORIA", pd.Series([], dtype=object))
         cruce_snies = int(fuente.astype(str).str.upper().str.strip().eq("CRUCE_SNIES").sum())
@@ -2198,9 +2214,22 @@ def _exportar_estudio_segmento(
             ag_seg = ag_seg.copy()
             ag_seg["FECHA_EJECUCION"] = _fecha_eje
 
+            _sf_col_seg = pd.to_numeric(
+                ag_seg["calificacion_final"]
+                if "calificacion_final" in ag_seg.columns
+                else pd.Series(dtype=float),
+                errors="coerce",
+            ).fillna(0.0)
+            _sem_verde_seg = int((_sf_col_seg >= 4.0).sum())
+            _sem_amarillo_seg = int(((_sf_col_seg >= 3.0) & (_sf_col_seg < 4.0)).sum())
+            _sem_rojo_seg = int((_sf_col_seg < 3.0).sum())
+
             with pd.ExcelWriter(ruta, engine="openpyxl") as writer:
                 try:
-                    _escribir_resumen_ejecutivo(writer, sabana_seg, ag_seg)
+                    _escribir_resumen_ejecutivo(
+                        writer, sabana_seg, ag_seg,
+                        _sem_verde_seg, _sem_amarillo_seg, _sem_rojo_seg,
+                    )
                 except Exception as e:
                     log_warning(f"[Segmento {etiqueta}] Resumen ejecutivo: {e}")
 
@@ -2680,9 +2709,24 @@ def run_fase5(agregado_df: pd.DataFrame | None) -> None:
             sabana_final["FECHA_EJECUCION"] = _fecha_eje
             total_final["FECHA_EJECUCION"] = _fecha_eje
 
+            # Semáforos calculados desde total_final ya procesado — antes de entrar al writer
+            # para garantizar que el resumen y la hoja total muestren exactamente lo mismo.
+            _sf_col = pd.to_numeric(
+                total_final["calificacion_final"]
+                if "calificacion_final" in total_final.columns
+                else pd.Series(dtype=float),
+                errors="coerce",
+            ).fillna(0.0)
+            _sem_verde = int((_sf_col >= 4.0).sum())
+            _sem_amarillo = int(((_sf_col >= 3.0) & (_sf_col < 4.0)).sum())
+            _sem_rojo = int((_sf_col < 3.0).sum())
+
             with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
                 # Generar hoja de resumen ejecutivo (primera hoja)
-                _escribir_resumen_ejecutivo(writer, sabana_final, total_final)
+                _escribir_resumen_ejecutivo(
+                    writer, sabana_final, total_final,
+                    _sem_verde, _sem_amarillo, _sem_rojo,
+                )
                 sabana_final.to_excel(writer, sheet_name="programas_detalle", index=False)
                 col_order = _escribir_hoja_total(writer, total_final)
                 wb = writer.book

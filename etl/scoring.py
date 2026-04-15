@@ -156,5 +156,5 @@ def apply_scoring(df: pd.DataFrame) -> pd.DataFrame:
     out["calificacion_final"] = 0.0
     for cfg in SCORING_CONFIG:
         out["calificacion_final"] += out[cfg["out"]] * cfg["peso"]
-    out["calificacion_final"] = out["calificacion_final"].clip(1.0, 5.0)
+    out["calificacion_final"] = out["calificacion_final"].clip(1.0, 5.0).round(4)
     return out
