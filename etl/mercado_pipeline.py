@@ -1434,6 +1434,52 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         ag["AAGR_ROBUSTO"] = ag.get("AAGR_suma", pd.Series(np.nan, index=ag.index))
         ag["TIPO_CRECIMIENTO"] = "SIN_DATOS"
 
+    # ── MOMENTUM YoY: crecimiento del último año vs. tendencia histórica ──────────
+    # var_yoy_2024: variación real del último año (2023→2024)
+    # diferencial_tendencia: cuánto se desvía el YoY del AAGR histórico
+    # SEÑAL_TENDENCIA: etiqueta legible para el analista
+    if "suma_matricula_2023" in ag.columns and "suma_matricula_2024" in ag.columns:
+        m23 = pd.to_numeric(ag["suma_matricula_2023"], errors="coerce").fillna(0)
+        m24 = pd.to_numeric(ag["suma_matricula_2024"], errors="coerce").fillna(0)
+        den_yoy = m23.replace(0, np.nan)
+        ag["var_yoy_2024"] = (m24 - m23) / den_yoy
+
+        if "AAGR_ROBUSTO" in ag.columns:
+            ag["diferencial_tendencia"] = ag["var_yoy_2024"] - pd.to_numeric(ag["AAGR_ROBUSTO"], errors="coerce")
+        else:
+            ag["diferencial_tendencia"] = np.nan
+
+        # SEÑAL_TENDENCIA: combina YoY y diferencial para una etiqueta accionable
+        def _señal(row: pd.Series) -> str:
+            yoy = row.get("var_yoy_2024", np.nan)
+            dif = row.get("diferencial_tendencia", np.nan)
+            if pd.isna(yoy):
+                return "SIN_DATO"
+            if yoy >= 0.10 and (pd.isna(dif) or dif >= -0.05):
+                return "ACELERANDO"     # Crece bien y no hay desaceleración significativa
+            if yoy >= 0.00 and not pd.isna(dif) and dif < -0.10:
+                return "DESACELERANDO"  # Sigue creciendo pero mucho menos que antes
+            if yoy >= 0.00:
+                return "ESTABLE"        # Crecimiento positivo o nulo sin señal de alarma
+            if yoy < 0.00 and not pd.isna(dif) and dif < -0.10:
+                return "EN_DECLIVE"     # Cae y peor que su promedio histórico
+            return "CONTRACCION"        # Cae pero dentro de lo esperable por su historia
+
+        ag["SEÑAL_TENDENCIA"] = ag.apply(_señal, axis=1)
+        log_info(
+            "Momentum YoY calculado. Señales: "
+            + ", ".join(
+                f"{s}={int((ag['SEÑAL_TENDENCIA'] == s).sum())}"
+                for s in ["ACELERANDO", "ESTABLE", "DESACELERANDO", "EN_DECLIVE", "CONTRACCION", "SIN_DATO"]
+                if (ag["SEÑAL_TENDENCIA"] == s).any()
+            )
+        )
+    else:
+        ag["var_yoy_2024"] = np.nan
+        ag["diferencial_tendencia"] = np.nan
+        ag["SEÑAL_TENDENCIA"] = "SIN_DATO"
+        log_info("Momentum YoY: no se encontraron columnas suma_matricula_2023/2024.")
+
     # Bloque B: pct_no_matriculados y var_inscritos
     if "inscritos_2023_suma" in ag.columns and "suma_matricula_2023" in ag.columns:
         den = ag["inscritos_2023_suma"].replace(0, np.nan)
@@ -1613,6 +1659,7 @@ _BLOQUES_TOTAL = [
         "participacion_2019", "participacion_2024",
         "AAGR_suma", "AAGR_prom", "CAGR_suma",
         "AAGR_ROBUSTO", "TIPO_CRECIMIENTO",
+        "var_yoy_2024", "diferencial_tendencia", "SEÑAL_TENDENCIA",
     ]),
     # ── 5. SALARIO (OLE) ──────────────────────────────────────────────────
     ("SALARIO", [
@@ -2822,6 +2869,22 @@ def run_fase5(agregado_df: pd.DataFrame | None) -> None:
                 except Exception as e:
                     log_warning(f"[Fase 6] No se pudo generar hoja eafit_vs_mercado: {e}")
 
+                # ── Gap de Oportunidad: Océanos Azules (opcional, no bloqueante) ──
+                try:
+                    df_gap = run_gap_oportunidades(total_final, log_info)
+                    if df_gap is not None and len(df_gap) > 0:
+                        df_gap.to_excel(
+                            writer,
+                            sheet_name="oportunidades_expansion",
+                            index=False,
+                        )
+                        _formatear_hoja_gap(writer, df_gap)
+                        log_info(f"✓ Hoja 'oportunidades_expansion' añadida: {len(df_gap)} categorías.")
+                    else:
+                        log_warning("⚠ Gap omitido — sin oportunidades disponibles.")
+                except Exception as e:
+                    log_warning(f"[Gap] No se pudo generar hoja oportunidades_expansion: {e}")
+
                 # ── Análisis regional: una hoja por región ───────────────────
                 try:
                     df_regional = run_analisis_regional(sabana_final, total_final)
@@ -3106,6 +3169,119 @@ def _formatear_hoja_eafit(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         return
 
 
+def run_gap_oportunidades(ag: pd.DataFrame, log) -> pd.DataFrame:
+    """
+    Gap de Oportunidad (Océanos Azules) — análisis complementario a Fase 6.
+
+    Identifica categorías de mercado atractivas donde EAFIT no tiene
+    presencia actual. Son los 'espacios en blanco' del portafolio.
+
+    Criterio de inclusión: categorías con calificacion_final >= 3.0
+    que NO están cubiertas por ningún programa del MAPEO_PROGRAMAS_EAFIT.
+
+    Retorna DataFrame listo para escribir como hoja 'oportunidades_expansion'.
+    """
+    log("━━━ Gap de Oportunidad — Océanos Azules ━━━")
+
+    if ag is None or len(ag) == 0:
+        log("⚠ Gap: DataFrame 'ag' vacío. Se omite hoja.")
+        return pd.DataFrame()
+
+    if "CATEGORIA_FINAL" not in ag.columns:
+        log("⚠ Gap: columna CATEGORIA_FINAL no encontrada. Se omite hoja.")
+        return pd.DataFrame()
+
+    # Categorías ya cubiertas por EAFIT (valores únicos del mapeo)
+    cats_eafit = {str(v).strip().upper() for v in MAPEO_PROGRAMAS_EAFIT.values() if v}
+
+    # Normalizar nombres del agregado para comparación case-insensitive
+    ag_work = ag.copy()
+    ag_work["_cat_norm"] = ag_work["CATEGORIA_FINAL"].astype(str).str.strip().str.upper()
+
+    # Filtrar: sin presencia EAFIT + calificación mínima 3.0
+    col_cal = "calificacion_final"
+    if col_cal not in ag_work.columns:
+        log("⚠ Gap: columna calificacion_final no encontrada. Se omite hoja.")
+        return pd.DataFrame()
+
+    ag_work[col_cal] = pd.to_numeric(ag_work[col_cal], errors="coerce")
+    mask_sin_eafit = ~ag_work["_cat_norm"].isin(cats_eafit)
+    mask_cal_min = ag_work[col_cal] >= 3.0
+
+    df_gap = ag_work[mask_sin_eafit & mask_cal_min].copy()
+    df_gap = df_gap.drop(columns=["_cat_norm"], errors="ignore")
+
+    if len(df_gap) == 0:
+        log("⚠ Gap: no se encontraron oportunidades con calificación ≥ 3.0.")
+        return pd.DataFrame()
+
+    # Columnas a incluir en la hoja de salida
+    COLS_GAP = [
+        "CATEGORIA_FINAL",
+        "calificacion_final",
+        "AAGR_ROBUSTO",
+        "suma_matricula_2024",
+        "var_yoy_2024",
+        "diferencial_tendencia",
+        "SEÑAL_TENDENCIA",
+        "salario_promedio",
+        "num_programas_2024",
+        "prom_matricula_por_programa_2024",
+        "costo_promedio",
+        "distancia_costo_pct",
+        "tasa_graduacion",
+        "TIPO_CRECIMIENTO",
+    ]
+    cols_ok = [c for c in COLS_GAP if c in df_gap.columns]
+    df_gap = df_gap[cols_ok].copy()
+
+    # Columna de semáforo
+    df_gap["SEMAFORO"] = df_gap["calificacion_final"].apply(
+        lambda c: "VERDE" if c >= 4.0 else ("AMARILLO" if c >= 3.0 else "ROJO")
+    )
+
+    # Prioridad estratégica combinando calificación + señal de tendencia + matrícula
+    def _prioridad(row) -> str:
+        cal = row.get("calificacion_final", 0) or 0
+        senal = str(row.get("SEÑAL_TENDENCIA", "")).strip()
+        mat = row.get("suma_matricula_2024", 0) or 0
+        if cal >= 4.0 and senal in ("ACELERANDO", "ESTABLE"):
+            return "1 - ALTA"
+        if cal >= 4.0 and senal == "DESACELERANDO":
+            return "2 - ALTA CON CAUTELA"
+        if cal >= 3.5 and senal in ("ACELERANDO", "ESTABLE"):
+            return "3 - MEDIA-ALTA"
+        if cal >= 4.0 and senal in ("EN_DECLIVE", "CONTRACCION"):
+            return "4 - REVISAR MOMENTUM"
+        if cal >= 3.5 and senal in ("DESACELERANDO", "EN_DECLIVE"):
+            return "5 - MEDIA CON CAUTELA"
+        return "6 - MONITOREAR"
+
+    df_gap["PRIORIDAD_ESTRATEGICA"] = df_gap.apply(_prioridad, axis=1)
+
+    # Ordenar: primero por prioridad, luego por calificación descendente
+    df_gap = df_gap.sort_values(
+        ["PRIORIDAD_ESTRATEGICA", "calificacion_final"],
+        ascending=[True, False]
+    ).reset_index(drop=True)
+
+    # Reordenar columnas: CATEGORIA_FINAL + SEMAFORO + PRIORIDAD primero
+    cols_primeras = ["CATEGORIA_FINAL", "SEMAFORO", "PRIORIDAD_ESTRATEGICA", "calificacion_final"]
+    cols_resto = [c for c in df_gap.columns if c not in cols_primeras]
+    df_gap = df_gap[cols_primeras + cols_resto]
+
+    # Log de resumen
+    verdes = int((df_gap["SEMAFORO"] == "VERDE").sum())
+    amarillos = int((df_gap["SEMAFORO"] == "AMARILLO").sum())
+    alta = int((df_gap["PRIORIDAD_ESTRATEGICA"] == "1 - ALTA").sum())
+    log(
+        f"✓ Gap completado: {len(df_gap)} oportunidades | "
+        f"🟢 Verde: {verdes} | 🟡 Amarillo: {amarillos} | "
+        f"⭐ Prioridad ALTA: {alta}"
+    )
+    return df_gap
+
+
 def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
     """
     Fase 6 — Análisis EAFIT vs Mercado (opcional, no bloqueante).
@@ -3300,6 +3476,158 @@ def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
     return df_result
 
 
+def _formatear_hoja_gap(writer: pd.ExcelWriter, df_gap: pd.DataFrame) -> None:
+    """Aplica formato visual a la hoja oportunidades_expansion."""
+    from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    ws = writer.sheets.get("oportunidades_expansion")
+    if ws is None:
+        return
+
+    AZUL = "000066"
+    BLANCO = "FFFFFF"
+    GRIS_ALT = "F5F5F5"
+
+    # Colores de semáforo para filas
+    FILA_FILLS = {
+        "VERDE": "EBF9EE",
+        "AMARILLO": "FFFDE7",
+        "ROJO": "FFF0F0",
+    }
+
+    # Colores de prioridad para la celda PRIORIDAD_ESTRATEGICA
+    PRIOR_FILLS = {
+        "1 - ALTA": ("1F7A3C", "FFFFFF"),  # verde oscuro, texto blanco
+        "2 - ALTA CON CAUTELA": ("FFD966", "7D4800"),  # ámbar, texto café
+        "3 - MEDIA-ALTA": ("C6EFCE", "1A5C2A"),  # verde suave, texto verde
+        "4 - REVISAR MOMENTUM": ("FF7043", "FFFFFF"),  # naranja, texto blanco
+        "5 - MEDIA CON CAUTELA": ("FFD9B3", "7D3800"),  # naranja suave, texto café
+        "6 - MONITOREAR": ("EEEEEE", "555555"),  # gris, texto gris
+    }
+
+    SENAL_FILLS = {
+        "▲ ACELERANDO": ("1F7A3C", "FFFFFF"),
+        "→ ESTABLE": ("C6EFCE", "1A5C2A"),
+        "▼ DESACELERANDO": ("FFD966", "7D4800"),
+        "↓ EN DECLIVE": ("FF7043", "FFFFFF"),
+        "↓↓ CONTRACCION": ("C62828", "FFFFFF"),
+        "— SIN DATO": ("EEEEEE", "888888"),
+    }
+
+    thin = Side(style="thin", color="D9D9D9")
+    borde = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    cols = [cell.value for cell in ws[1]]
+
+    # Fila 1: encabezados
+    for ci, header in enumerate(cols, start=1):
+        cell = ws.cell(row=1, column=ci)
+        cell.value = header
+        cell.font = Font(bold=True, color=BLANCO, name="Arial", size=10)
+        cell.fill = PatternFill("solid", fgColor=AZUL)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = borde
+
+    ws.row_dimensions[1].height = 36
+
+    # Datos
+    for ri in range(2, ws.max_row + 1):
+        # Color base de fila según semáforo
+        sem_val = ""
+        if "SEMAFORO" in cols:
+            sem_val = str(ws.cell(row=ri, column=cols.index("SEMAFORO") + 1).value or "")
+        base_fill = PatternFill("solid", fgColor=FILA_FILLS.get(sem_val, GRIS_ALT))
+
+        for ci, col_name in enumerate(cols, start=1):
+            cell = ws.cell(row=ri, column=ci)
+            cell.border = borde
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+            # Color y formato por columna
+            if col_name == "SEMAFORO":
+                sem = str(cell.value or "")
+                color_map = {"VERDE": "1F7A3C", "AMARILLO": "B8860B", "ROJO": "C62828"}
+                emoji_map = {"VERDE": "🟢 VERDE", "AMARILLO": "🟡 AMARILLO", "ROJO": "🔴 ROJO"}
+                cell.value = emoji_map.get(sem, sem)
+                cell.fill = base_fill
+                cell.font = Font(bold=True, color=color_map.get(sem, "000000"), name="Arial", size=10)
+
+            elif col_name == "PRIORIDAD_ESTRATEGICA":
+                val = str(cell.value or "")
+                fg, fc = PRIOR_FILLS.get(val, ("EEEEEE", "555555"))
+                cell.fill = PatternFill("solid", fgColor=fg)
+                cell.font = Font(bold=True, color=fc, name="Arial", size=10)
+
+            elif col_name == "SEÑAL_TENDENCIA":
+                val = str(cell.value or "")
+                fg, fc = SENAL_FILLS.get(val, ("EEEEEE", "888888"))
+                cell.fill = PatternFill("solid", fgColor=fg)
+                cell.font = Font(bold=True, color=fc, name="Arial", size=10)
+
+            elif col_name == "calificacion_final":
+                cell.fill = base_fill
+                cell.number_format = "0.00"
+                try:
+                    v = float(cell.value)
+                    fc = "1A5C2A" if v >= 4.0 else ("7D4800" if v >= 3.0 else "9C0006")
+                    cell.font = Font(bold=True, color=fc, name="Arial", size=10)
+                except (TypeError, ValueError):
+                    pass
+
+            elif col_name in ("AAGR_ROBUSTO", "var_yoy_2024", "diferencial_tendencia",
+                              "distancia_costo_pct", "tasa_graduacion"):
+                cell.fill = base_fill
+                cell.number_format = "0.0%"
+                cell.font = Font(name="Arial", size=10)
+
+            elif col_name in ("suma_matricula_2024", "num_programas_2024",
+                              "prom_matricula_por_programa_2024"):
+                cell.fill = base_fill
+                cell.number_format = "#,##0"
+                cell.font = Font(name="Arial", size=10)
+
+            elif col_name in ("salario_promedio",):
+                cell.fill = base_fill
+                cell.number_format = "0.00"
+                cell.font = Font(name="Arial", size=10)
+
+            elif col_name in ("costo_promedio",):
+                cell.fill = base_fill
+                cell.number_format = "#,##0"
+                cell.font = Font(name="Arial", size=10)
+
+            else:
+                cell.fill = base_fill
+                cell.font = Font(name="Arial", size=10)
+
+    # Anchos de columna
+    anchos = {
+        "CATEGORIA_FINAL": 38,
+        "SEMAFORO": 16,
+        "PRIORIDAD_ESTRATEGICA": 22,
+        "calificacion_final": 14,
+        "AAGR_ROBUSTO": 13,
+        "suma_matricula_2024": 16,
+        "var_yoy_2024": 13,
+        "diferencial_tendencia": 18,
+        "SEÑAL_TENDENCIA": 20,
+        "salario_promedio": 14,
+        "num_programas_2024": 14,
+        "prom_matricula_por_programa_2024": 18,
+        "costo_promedio": 14,
+        "distancia_costo_pct": 15,
+        "tasa_graduacion": 14,
+        "TIPO_CRECIMIENTO": 16,
+    }
+    for ci, col_name in enumerate(cols, start=1):
+        if col_name in anchos:
+            ws.column_dimensions[get_column_letter(ci)].width = anchos[col_name]
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+
 def _escribir_hoja_total(writer: pd.ExcelWriter, ag: pd.DataFrame) -> list[str]:
     """Escribe la hoja 'total' con fila 1 = bloques, fila 2 = nombres de columnas. Retorna orden de columnas."""
     from openpyxl.styles import Alignment as _Al
@@ -3422,6 +3750,33 @@ def _aplicar_formato_total(ws, col_order: list[str]) -> None:
         "score_costo",
     }
 
+    # Paleta de colores para SEÑAL_TENDENCIA
+    SENAL_FILLS = {
+        "ACELERANDO":    PatternFill("solid", fgColor="1F7A3C"),  # verde oscuro
+        "ESTABLE":       PatternFill("solid", fgColor="C6EFCE"),  # verde suave
+        "DESACELERANDO": PatternFill("solid", fgColor="FFD966"),  # amarillo ámbar
+        "EN_DECLIVE":    PatternFill("solid", fgColor="FF7043"),  # naranja-rojo
+        "CONTRACCION":   PatternFill("solid", fgColor="C62828"),  # rojo oscuro
+        "SIN_DATO":      PatternFill("solid", fgColor="EEEEEE"),  # gris neutro
+    }
+    SENAL_FONTS = {
+        "ACELERANDO":    {"bold": True,  "color": "FFFFFF"},
+        "ESTABLE":       {"bold": False, "color": "1A5C2A"},
+        "DESACELERANDO": {"bold": True,  "color": "7D4800"},
+        "EN_DECLIVE":    {"bold": True,  "color": "FFFFFF"},
+        "CONTRACCION":   {"bold": True,  "color": "FFFFFF"},
+        "SIN_DATO":      {"bold": False, "color": "888888"},
+    }
+    # Texto con emoji para que sea legible sin necesidad de leyenda
+    SENAL_LABELS = {
+        "ACELERANDO":    "▲ ACELERANDO",
+        "ESTABLE":       "→ ESTABLE",
+        "DESACELERANDO": "▼ DESACELERANDO",
+        "EN_DECLIVE":    "↓ EN DECLIVE",
+        "CONTRACCION":   "↓↓ CONTRACCION",
+        "SIN_DATO":      "— SIN DATO",
+    }
+
     for r in range(3, ws.max_row + 1):
         calif = ws.cell(row=r, column=col_calif + 1).value if col_calif is not None else None
         try:
@@ -3463,6 +3818,64 @@ def _aplicar_formato_total(ws, col_order: list[str]) -> None:
                 cell.number_format = score_fmt
             elif col_name == "calificacion_final":
                 cell.number_format = calif_fmt
+            elif col_name == "SEÑAL_TENDENCIA":
+                raw_val = str(cell.value).strip() if cell.value is not None else "SIN_DATO"
+                senal = raw_val if raw_val in SENAL_FILLS else "SIN_DATO"
+                cell.value = SENAL_LABELS.get(senal, senal)
+                cell.fill = SENAL_FILLS[senal]
+                fnt_cfg = SENAL_FONTS[senal]
+                from openpyxl.styles import Font as _Font
+                cell.font = _Font(
+                    bold=fnt_cfg["bold"],
+                    color=fnt_cfg["color"],
+                    name="Arial",
+                    size=10,
+                )
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            elif col_name == "var_yoy_2024":
+                cell.number_format = "0.0%"
+                # Color degradado según magnitud: rojo si cae, verde si sube fuerte
+                try:
+                    v = float(cell.value) if cell.value is not None else None
+                    if v is None:
+                        pass
+                    elif v >= 0.20:
+                        cell.fill = PatternFill("solid", fgColor="1F7A3C")
+                        from openpyxl.styles import Font as _Font
+                        cell.font = _Font(bold=True, color="FFFFFF", name="Arial", size=10)
+                    elif v >= 0.05:
+                        cell.fill = PatternFill("solid", fgColor="C6EFCE")
+                    elif v >= 0.00:
+                        cell.fill = PatternFill("solid", fgColor="FFFDE7")
+                    elif v >= -0.10:
+                        cell.fill = PatternFill("solid", fgColor="FFD9B3")
+                    else:
+                        cell.fill = PatternFill("solid", fgColor="FFC7CE")
+                        from openpyxl.styles import Font as _Font
+                        cell.font = _Font(bold=True, color="9C0006", name="Arial", size=10)
+                except (TypeError, ValueError):
+                    pass
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            elif col_name == "diferencial_tendencia":
+                cell.number_format = "0.0%"
+                # Rojo si diferencial muy negativo (mercado frenando), verde si positivo
+                try:
+                    v = float(cell.value) if cell.value is not None else None
+                    if v is None:
+                        pass
+                    elif v >= 0.05:
+                        cell.fill = PatternFill("solid", fgColor="C6EFCE")
+                    elif v >= -0.10:
+                        cell.fill = PatternFill("solid", fgColor="FFFDE7")
+                    elif v >= -0.25:
+                        cell.fill = PatternFill("solid", fgColor="FFD9B3")
+                    else:
+                        cell.fill = PatternFill("solid", fgColor="FFC7CE")
+                        from openpyxl.styles import Font as _Font
+                        cell.font = _Font(bold=True, color="9C0006", name="Arial", size=10)
+                except (TypeError, ValueError):
+                    pass
+                cell.alignment = Alignment(horizontal="center", vertical="center")
 
     ws.freeze_panes = "B3"
     ws.auto_filter.ref = ws.dimensions
