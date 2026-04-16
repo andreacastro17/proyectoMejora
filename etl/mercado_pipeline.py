@@ -1589,7 +1589,71 @@ def run_fase4() -> pd.DataFrame | None:
 
 # Bloques para hoja "total" (encabezado fila 1)
 _BLOQUES_TOTAL = [
-    ("MATRÍCULAS SEMESTRAL", [
+    # ── 1. MATRÍCULAS: SUMA ANUAL ─────────────────────────────────────────
+    ("MATRÍCULA SUMA", [
+        "suma_matricula_2019", "suma_matricula_2020", "suma_matricula_2021",
+        "suma_matricula_2022", "suma_matricula_2023", "suma_matricula_2024",
+    ]),
+    # ── 2. MATRÍCULAS: PROMEDIO POR PROGRAMA ─────────────────────────────
+    ("MATRÍCULA PROMEDIO", [
+        "prom_matricula_2019", "prom_matricula_2020", "prom_matricula_2021",
+        "prom_matricula_2022", "prom_matricula_2023", "prom_matricula_2024",
+    ]),
+    # ── 3. MATRÍCULAS: VARIACIÓN AÑO A AÑO ───────────────────────────────
+    ("VARIACIÓN SUMA", [
+        "var_suma_2020", "var_suma_2021", "var_suma_2022",
+        "var_suma_2023", "var_suma_2024",
+    ]),
+    ("VARIACIÓN PROMEDIO", [
+        "var_prom_2020", "var_prom_2021", "var_prom_2022",
+        "var_prom_2023", "var_prom_2024",
+    ]),
+    # ── 4. PARTICIPACIÓN Y CRECIMIENTO ────────────────────────────────────
+    ("PARTICIPACIÓN Y CRECIMIENTO", [
+        "participacion_2019", "participacion_2024",
+        "AAGR_suma", "AAGR_prom", "CAGR_suma",
+        "AAGR_ROBUSTO", "TIPO_CRECIMIENTO",
+    ]),
+    # ── 5. SALARIO (OLE) ──────────────────────────────────────────────────
+    ("SALARIO", [
+        "salario_promedio",
+        "salario_proyectado_pesos_hoy",
+    ]),
+    # ── 6. INSCRITOS Y % NO MATRICULADOS ─────────────────────────────────
+    ("INSCRITOS", [
+        "inscritos_2023_suma", "inscritos_2024_suma",
+        "pct_no_matriculados_2023", "pct_no_matriculados_2024",
+        "FUENTE_PCT_NO_MAT",
+        "inscritos_2023_prom", "inscritos_2024_prom",
+        "var_inscritos",
+        "tiene_inscritos_reales",
+    ]),
+    # ── 7. OFERTA DE PROGRAMAS ────────────────────────────────────────────
+    ("OFERTA", [
+        "num_programas_2019", "num_programas_2024",
+        "programas_activos", "programas_inactivos",
+        "programas_nuevos_3a", "nuevos_vs_snapshot",
+        "var_programas", "pct_con_matricula",
+    ]),
+    # ── 8. COSTO ──────────────────────────────────────────────────────────
+    ("COSTO", [
+        "costo_promedio",
+        "distancia_costo_pct",
+    ]),
+    # ── 9. DEMANDA NUEVA Y GRADUADOS ──────────────────────────────────────
+    ("DEMANDA NUEVA", [
+        "suma_primer_curso_2019", "suma_primer_curso_2020", "suma_primer_curso_2021",
+        "suma_primer_curso_2022", "suma_primer_curso_2023", "suma_primer_curso_2024",
+        "prom_primer_curso_2019", "prom_primer_curso_2024",
+        "AAGR_primer_curso", "tiene_primer_curso_real",
+    ]),
+    ("GRADUADOS", [
+        "graduados_2019_suma", "graduados_2020_suma", "graduados_2021_suma",
+        "graduados_2022_suma", "graduados_2023_suma", "graduados_2024_suma",
+        "tasa_graduacion",
+    ]),
+    # ── 10. MATRÍCULAS SEMESTRALES (dato granular, al fondo) ──────────────
+    ("MATRÍCULAS SEMESTRALES", [
         "suma_matricula_2019_1", "suma_matricula_2019_2",
         "suma_matricula_2020_1", "suma_matricula_2020_2",
         "suma_matricula_2021_1", "suma_matricula_2021_2",
@@ -1597,41 +1661,20 @@ _BLOQUES_TOTAL = [
         "suma_matricula_2023_1", "suma_matricula_2023_2",
         "suma_matricula_2024_1", "suma_matricula_2024_2",
     ]),
-    ("MATRÍCULAS", [
-        "suma_matricula_2019", "suma_matricula_2020", "suma_matricula_2021", "suma_matricula_2022", "suma_matricula_2023", "suma_matricula_2024",
-        "prom_matricula_2019", "prom_matricula_2020", "prom_matricula_2021", "prom_matricula_2022", "prom_matricula_2023", "prom_matricula_2024",
-        "var_suma_2020", "var_suma_2021", "var_suma_2022", "var_suma_2023", "var_suma_2024",
-        "var_prom_2020", "var_prom_2021", "var_prom_2022", "var_prom_2023", "var_prom_2024",
-        "participacion_2019", "participacion_2024", "AAGR_suma", "CAGR_suma", "AAGR_prom",
-        "AAGR_ROBUSTO", "TIPO_CRECIMIENTO",
-    ]),
-    ("DEMANDA NUEVA", [
-        "suma_primer_curso_2019", "suma_primer_curso_2020", "suma_primer_curso_2021",
-        "suma_primer_curso_2022", "suma_primer_curso_2023", "suma_primer_curso_2024",
-        "prom_primer_curso_2019", "prom_primer_curso_2024",
-        "AAGR_primer_curso",
-        "tiene_primer_curso_real",
-    ]),
-    ("GRADUADOS", [
-        "graduados_2019_suma", "graduados_2020_suma", "graduados_2021_suma",
-        "graduados_2022_suma", "graduados_2023_suma", "graduados_2024_suma",
-        "tasa_graduacion",
-    ]),
-    ("OLE", [
-        "salario_promedio", "salario_proyectado_pesos_hoy", "inscritos_2023_suma", "inscritos_2024_suma", "inscritos_2023_prom", "inscritos_2024_prom",
-        "pct_no_matriculados_2023", "pct_no_matriculados_2024", "var_inscritos",
-        "FUENTE_PCT_NO_MAT",
-        "tiene_inscritos_reales",
-    ]),
-    ("OFERTA", [
-        "num_programas_2019", "num_programas_2024", "programas_activos", "programas_inactivos", "programas_nuevos_3a",
-        "nuevos_vs_snapshot",
-        "var_programas", "pct_con_matricula", "prom_matricula_por_programa_2024",
-    ]),
-    ("COSTOS", ["costo_promedio", "distancia_costo_pct"]),
+    # ── 11. BLOQUE SCORING: valor | score lado a lado (igual que referente) ─
     ("SCORING", [
-        "score_matricula", "score_participacion", "score_AAGR", "score_salario", "score_pct_no_matriculados",
-        "score_num_programas", "score_costo", "calificacion_final",
+        "prom_matricula_por_programa_2024", "score_matricula",
+        "participacion_2024", "score_participacion",
+        "AAGR_ROBUSTO", "score_AAGR",
+        "salario_promedio", "score_salario",
+        "pct_no_matriculados_2024", "score_pct_no_matriculados",
+        "num_programas_2024", "score_num_programas",
+        "costo_promedio", "score_costo",
+    ]),
+    # ── 12. CALIFICACIÓN FINAL (extremo derecho, como en el referente) ────
+    ("CALIFICACIÓN", [
+        "calificacion_final",
+        "FECHA_EJECUCION",
     ]),
 ]
 
@@ -1653,6 +1696,7 @@ def _escribir_resumen_ejecutivo(
     _sem_verde: int | None = None,
     _sem_amarillo: int | None = None,
     _sem_rojo: int | None = None,
+    titulo: str = "COLOMBIA",
 ) -> None:
     """
     Genera hoja "resumen_ejecutivo" (primera) con KPIs globales, rankings y calidad.
@@ -1803,7 +1847,7 @@ def _escribir_resumen_ejecutivo(
         if "REQUIERE_REVISION" in sabana.columns:
             req_revision = int(sabana["REQUIERE_REVISION"].fillna(False).astype(bool).sum())
 
-        ws["A1"].value = "ESTUDIO DE MERCADO — COLOMBIA"
+        ws["A1"].value = f"ESTUDIO DE MERCADO — {titulo.upper()}"
         ws["A1"].font = title_font
 
         generado_dt = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
@@ -2225,18 +2269,34 @@ def _exportar_estudio_segmento(
             _sem_rojo_seg = int((_sf_col_seg < 3.0).sum())
 
             with pd.ExcelWriter(ruta, engine="openpyxl") as writer:
-                try:
-                    _escribir_resumen_ejecutivo(
-                        writer, sabana_seg, ag_seg,
-                        _sem_verde_seg, _sem_amarillo_seg, _sem_rojo_seg,
-                    )
-                except Exception as e:
-                    log_warning(f"[Segmento {etiqueta}] Resumen ejecutivo: {e}")
-
+                # Filtrar por niveles de mercado ANTES de calcular KPIs del resumen,
+                # para que matrículas y certeza sean consistentes con programas_detalle.
                 col_nivel = "NIVEL_DE_FORMACIÓN"
                 sabana_export = sabana_seg.copy()
                 if col_nivel in sabana_export.columns and NIVELES_MERCADO:
                     sabana_export = sabana_export[sabana_export[col_nivel].isin(NIVELES_MERCADO)]
+
+                try:
+                    _escribir_resumen_ejecutivo(
+                        writer, sabana_export, ag_seg,
+                        _sem_verde_seg, _sem_amarillo_seg, _sem_rojo_seg,
+                        titulo=etiqueta,
+                    )
+                except Exception as e:
+                    log_warning(f"[Segmento {etiqueta}] Resumen ejecutivo: {e}")
+
+                # Eliminar columnas de tracking del pipeline global que no aplican
+                # a los segmentos regionales para mantener consistencia de estructura.
+                COLS_TRACKING_GLOBAL = [
+                    "ACTIVO_PIPELINE",
+                    "FECHA_PRIMERA_VEZ",
+                    "FECHA_ULTIMO_ACTIVO",
+                    "nuevo_vs_snapshot_anterior",
+                ]
+                cols_a_drop = [c for c in COLS_TRACKING_GLOBAL if c in sabana_export.columns]
+                if cols_a_drop:
+                    sabana_export = sabana_export.drop(columns=cols_a_drop)
+
                 sabana_export.to_excel(writer, sheet_name="programas_detalle", index=False)
 
                 col_order = _escribir_hoja_total(writer, ag_seg)
@@ -2726,6 +2786,7 @@ def run_fase5(agregado_df: pd.DataFrame | None) -> None:
                 _escribir_resumen_ejecutivo(
                     writer, sabana_final, total_final,
                     _sem_verde, _sem_amarillo, _sem_rojo,
+                    titulo="COLOMBIA",
                 )
                 sabana_final.to_excel(writer, sheet_name="programas_detalle", index=False)
                 col_order = _escribir_hoja_total(writer, total_final)
@@ -3241,6 +3302,52 @@ def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
 
 def _escribir_hoja_total(writer: pd.ExcelWriter, ag: pd.DataFrame) -> list[str]:
     """Escribe la hoja 'total' con fila 1 = bloques, fila 2 = nombres de columnas. Retorna orden de columnas."""
+    from openpyxl.styles import Alignment as _Al
+    from openpyxl.styles import Font as _Ft
+    from openpyxl.styles import PatternFill as _PF
+
+    NOMBRES_LEGIBLES = {
+        "calificacion_final": "Calificación",
+        "TIPO_CRECIMIENTO": "Tipo Crecim.",
+        "prom_matricula_2024": "Prom. Mat. 2024",
+        "participacion_2024": "Participación",
+        "AAGR_ROBUSTO": "AAGR Robusto",
+        "salario_promedio": "Salario (SMLMV)",
+        "pct_no_matriculados_2024": "% No Matr. 2024",
+        "FUENTE_PCT_NO_MAT": "Fuente % No Matr.",
+        "num_programas_2024": "N° Programas",
+        "distancia_costo_pct": "Dist. Costo %",
+        "score_matricula": "S. Mat",
+        "score_participacion": "S. Part",
+        "score_AAGR": "S. AAGR",
+        "score_salario": "S. Sal",
+        "score_pct_no_matriculados": "S. No-Mat",
+        "score_num_programas": "S. Prog",
+        "score_costo": "S. Costo",
+        "suma_matricula_2024": "Matr. 2024",
+        "suma_matricula_2019": "Matr. 2019",
+        "AAGR_suma": "AAGR Suma",
+        "CAGR_suma": "CAGR Suma",
+        "tasa_graduacion": "Tasa Grad.",
+        "salario_proyectado_pesos_hoy": "Salario (Pesos)",
+        "costo_promedio": "Costo Prom.",
+        "num_programas_2019": "N° Prog. 2019",
+        "programas_activos": "Prog. Activos",
+        "programas_inactivos": "Prog. Inactivos",
+        "programas_nuevos_3a": "Prog. Nuevos 3a",
+        "pct_con_matricula": "% Con Matr.",
+    }
+
+    COLORES_BLOQUES = {
+        "RESUMEN DECISIÓN": "000066",
+        "OFERTA": "2E4057",
+        "MATRÍCULAS ANUALES": "546E7A",
+        "MATRÍCULAS SEMESTRALES": "78909C",
+        "DEMANDA NUEVA": "2E7D32",
+        "GRADUADOS": "388E3C",
+        "INSCRITOS": "E65100",
+        "METADATA": "9E9E9E",
+    }
     wb = writer.book
     ws = wb.create_sheet("total", 1)
     col_order = ["CATEGORIA_FINAL"]
@@ -3254,11 +3361,26 @@ def _escribir_hoja_total(writer: pd.ExcelWriter, ag: pd.DataFrame) -> list[str]:
             continue
         start = col_idx
         for c in present:
-            ws.cell(row=2, column=col_idx, value=c)
+            nombre_header = NOMBRES_LEGIBLES.get(c, c)
+            ws.cell(row=2, column=col_idx, value=nombre_header)
             col_order.append(c)
             col_idx += 1
         ws.cell(row=1, column=start, value=block_name)
         ws.merge_cells(start_row=1, start_column=start, end_row=1, end_column=col_idx - 1)
+        bg = COLORES_BLOQUES.get(block_name, "455A64")
+        for col_b in range(start, col_idx):
+            cell_b = ws.cell(row=1, column=col_b)
+            cell_b.fill = _PF("solid", fgColor=bg)
+            cell_b.font = _Ft(bold=True, color="FFFFFF", name="Arial", size=9)
+            cell_b.alignment = _Al(horizontal="center", vertical="center", wrap_text=True)
+
+    ws.row_dimensions[1].height = 18
+    ws.row_dimensions[2].height = 28
+
+    for c in range(1, ws.max_column + 1):
+        cell_h = ws.cell(row=2, column=c)
+        cell_h.font = _Ft(bold=True, name="Arial", size=9)
+        cell_h.alignment = _Al(horizontal="center", vertical="center", wrap_text=True)
     for r_idx, row in enumerate(ag.itertuples(index=False), start=3):
         ws.cell(row=r_idx, column=1, value=getattr(row, "CATEGORIA_FINAL", ""))
         c_idx = 2
@@ -3273,7 +3395,7 @@ def _escribir_hoja_total(writer: pd.ExcelWriter, ag: pd.DataFrame) -> list[str]:
 
 def _aplicar_formato_total(ws, col_order: list[str]) -> None:
     """Aplica formatos de número y color de fila según calificacion_final. col_order es el orden de columnas en la hoja."""
-    from openpyxl.styles import PatternFill
+    from openpyxl.styles import Alignment, PatternFill
     pct_fmt = "0.0%"
     moneda_fmt = "#,##0"
     score_fmt = "0"
@@ -3283,6 +3405,23 @@ def _aplicar_formato_total(ws, col_order: list[str]) -> None:
         if col == "calificacion_final":
             col_calif = j
             break
+    SCORE_FILLS = {
+        1: PatternFill("solid", fgColor="FFC7CE"),  # rojo
+        2: PatternFill("solid", fgColor="FFD9B3"),  # naranja
+        3: PatternFill("solid", fgColor="FFEB9C"),  # amarillo
+        4: PatternFill("solid", fgColor="C6EFCE"),  # verde claro
+        5: PatternFill("solid", fgColor="4CAF50"),  # verde fuerte
+    }
+    SCORE_COLS_SET = {
+        "score_matricula",
+        "score_participacion",
+        "score_AAGR",
+        "score_salario",
+        "score_pct_no_matriculados",
+        "score_num_programas",
+        "score_costo",
+    }
+
     for r in range(3, ws.max_row + 1):
         calif = ws.cell(row=r, column=col_calif + 1).value if col_calif is not None else None
         try:
@@ -3290,17 +3429,32 @@ def _aplicar_formato_total(ws, col_order: list[str]) -> None:
         except (TypeError, ValueError):
             calif_f = 0.0
         if calif_f >= 4.0:
-            fill = PatternFill(start_color=VERDE, end_color=VERDE, fill_type="solid")
+            fill = PatternFill("solid", fgColor="EBF9EE")  # verde muy suave
         elif calif_f >= 3.0:
-            fill = PatternFill(start_color=AMARILLO, end_color=AMARILLO, fill_type="solid")
+            fill = PatternFill("solid", fgColor="FFFDE7")  # amarillo muy suave
         else:
-            fill = PatternFill(start_color=ROJO, end_color=ROJO, fill_type="solid")
+            fill = PatternFill("solid", fgColor="FFF0F0")  # rojo muy suave
         for c in range(1, ws.max_column + 1):
             cell = ws.cell(row=r, column=c)
             cell.fill = fill
             if c == 1:
                 continue
             col_name = col_order[c - 1] if c - 1 < len(col_order) else None
+            if col_name in SCORE_COLS_SET:
+                try:
+                    sv = int(float(cell.value)) if cell.value is not None else 0
+                except (TypeError, ValueError):
+                    sv = 0
+                if sv in SCORE_FILLS:
+                    cell.fill = SCORE_FILLS[sv]
+                    from openpyxl.styles import Font as _Font
+                    if sv == 5:
+                        cell.font = _Font(bold=True, color="FFFFFF", name="Arial", size=10)
+                    elif sv == 1:
+                        cell.font = _Font(bold=True, color="9C0006", name="Arial", size=10)
+                    else:
+                        cell.font = _Font(name="Arial", size=10)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
             if col_name and ("participacion" in col_name or "pct_" in col_name or "var_" in col_name or "AAGR" in col_name or "CAGR" in col_name):
                 cell.number_format = pct_fmt
             elif col_name and ("costo" in col_name or "salario" in col_name):
@@ -3309,6 +3463,9 @@ def _aplicar_formato_total(ws, col_order: list[str]) -> None:
                 cell.number_format = score_fmt
             elif col_name == "calificacion_final":
                 cell.number_format = calif_fmt
+
+    ws.freeze_panes = "B3"
+    ws.auto_filter.ref = ws.dimensions
 
 
 def exportar_base_maestra_excel(ruta_salida: Path | None = None) -> Path:
