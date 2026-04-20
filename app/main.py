@@ -200,74 +200,55 @@ def validate_programas_schema(path_xlsx: Path) -> tuple[bool, str]:
 
 def get_configured_base_dir() -> Path | None:
     """
-    Lee el base_dir configurado (si existe) sin mostrar diálogos.
-    Retorna None si no hay configuración válida.
+    Devuelve el directorio base del proyecto calculado automáticamente
+    desde la ubicación del ejecutable. No lee config.json para evitar
+    que rutas absolutas de otros usuarios rompan la detección.
     """
     try:
         base_dir = get_base_dir()
+        if base_dir and base_dir.exists() and base_dir.is_dir():
+            return base_dir
     except Exception:
-        base_dir = None
-
-    config_file = _get_config_file_for_gui()
-    if config_file.exists():
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            base_dir_str = str(config.get("base_dir", "")).strip()
-            if base_dir_str:
-                p = Path(base_dir_str)
-                if p.exists() and p.is_dir():
-                    base_dir = p
-        except Exception:
-            pass
-
-    if base_dir and base_dir.exists() and base_dir.is_dir():
-        return base_dir
+        pass
     return None
 
 
 def ensure_base_dir(parent_window: tk.Misc | None = None, prompt_if_missing: bool = True) -> Path | None:
     """
-    Asegura que exista un base_dir configurado. Si no, solicita una carpeta al usuario.
-    Retorna el base_dir o None si el usuario cancela.
+    Devuelve el directorio base del proyecto detectado automáticamente
+    desde la ubicación del ejecutable. No muestra diálogos de selección
+    de carpeta — el programa se configura solo para cualquier usuario
+    que ejecute el .exe desde la carpeta correcta del proyecto en OneDrive.
+
+    Si no se puede detectar la carpeta, muestra un error claro explicando
+    que el exe no está en el lugar correcto.
     """
     base_dir = get_configured_base_dir()
 
-    # Si no hay base_dir válido, pedirlo (solo si está permitido)
     if not base_dir:
-        if not prompt_if_missing:
-            return None
         if parent_window is not None:
-            messagebox.showinfo(
-                "Configuración Inicial",
-                "Seleccione la carpeta raíz del proyecto.\n\n"
-                "Debe contener (o poder contener):\n"
-                "- outputs/\n- ref/\n- models/\n- docs/\n",
+            messagebox.showerror(
+                "Error de configuración",
+                "No se pudo detectar la carpeta del proyecto.\n\n"
+                "Verifique que SniesManager.exe esté en la carpeta raíz "
+                "del proyecto, junto a las carpetas:\n"
+                "  - ref/\n  - outputs/\n  - models/\n  - docs/\n\n"
+                "No mueva el ejecutable fuera de esa carpeta.\n"
+                "Si el problema persiste, use el botón 'Cambiar carpeta' "
+                "en la pantalla principal.",
                 parent=parent_window,
             )
-        selected_dir = filedialog.askdirectory(
-            title="Seleccionar carpeta raíz del proyecto",
-            initialdir=str(Path.home()),
-            parent=parent_window,
-        )
-        if not selected_dir:
-            return None
-        base_dir = Path(selected_dir)
-        if not base_dir.exists() or not base_dir.is_dir():
-            messagebox.showerror("Error", "La carpeta seleccionada no es válida.", parent=parent_window)
-            return None
-        if not set_base_dir(base_dir):
-            messagebox.showerror("Error", "No se pudo guardar la configuración.", parent=parent_window)
-            return None
+        return None
 
     try:
         update_paths_for_base_dir(base_dir)
     except Exception as exc:
-        messagebox.showerror(
-            "Error",
-            f"No se pudo configurar el directorio base:\n\n{exc}",
-            parent=parent_window,
-        )
+        if parent_window is not None:
+            messagebox.showerror(
+                "Error",
+                f"No se pudo inicializar las rutas del proyecto:\n\n{exc}",
+                parent=parent_window,
+            )
         return None
 
     return base_dir
@@ -4185,31 +4166,32 @@ class PipelinePage(ttk.Frame):
             )
 
     def _check_initial_config(self):
-        """Verifica si hay una configuración inicial y solicita la carpeta si es necesario."""
+        """
+        Detecta automáticamente la carpeta del proyecto desde la ubicación
+        del ejecutable. No muestra diálogos de selección — funciona para
+        cualquier usuario que tenga el proyecto sincronizado en OneDrive.
+        """
         base_dir = get_configured_base_dir()
         self._refresh_last_success_label()
 
         if not base_dir or not base_dir.exists():
-            self._log_message("⚠️ Primera ejecución: Seleccione la carpeta raíz del proyecto")
-            self._log_message("Esta carpeta debe contener las carpetas: outputs/, ref/, models/, docs/")
-            messagebox.showinfo(
-                "Configuración Inicial",
-                "Esta es la primera vez que ejecuta la aplicación.\n\n"
-                "Por favor, seleccione la carpeta raíz del proyecto.\n"
-                "Esta carpeta debe contener:\n"
-                "- outputs/ (se creará automáticamente)\n"
-                "- ref/\n"
-                "- models/\n"
-                "- docs/\n\n"
-                "Esta configuración se guardará y no se volverá a pedir."
+            self._log_message("❌ Error: no se pudo detectar la carpeta del proyecto.")
+            self._log_message("Verifique que SniesManager.exe esté junto a las carpetas ref/, outputs/, models/.")
+            messagebox.showerror(
+                "Error de configuración",
+                "No se pudo detectar la carpeta del proyecto.\n\n"
+                "Verifique que SniesManager.exe esté en la carpeta raíz "
+                "del proyecto, junto a las carpetas:\n"
+                "  - ref/\n  - outputs/\n  - models/\n  - docs/\n\n"
+                "No mueva el ejecutable fuera de esa carpeta.\n"
+                "Si el problema persiste, use el botón 'Cambiar carpeta'.",
             )
-            self._select_base_directory()
         else:
             self.base_dir = base_dir
             self._update_dir_label()
             self.btn_execute.config(state=tk.NORMAL)
             self._refresh_last_success_label()
-            self._log_message(f"✓ Carpeta configurada: {base_dir}")
+            self._log_message(f"✓ Carpeta del proyecto detectada automáticamente: {base_dir}")
             self._log_message("Listo para ejecutar el pipeline")
     
     def _select_base_directory(self):
