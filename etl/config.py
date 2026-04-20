@@ -119,41 +119,28 @@ def _save_config(config: dict) -> bool:
 
 def get_base_dir() -> Path:
     """
-    Obtiene el directorio base del proyecto.
-    
-    Si existe 'base_dir' en config.json, usa esa ruta.
-    Si no, usa la ruta por defecto (carpeta del ejecutable o del proyecto).
+    Obtiene el directorio base del proyecto siempre de forma relativa
+    al ejecutable (o al script en desarrollo).
+
+    No lee base_dir de config.json. Esto permite que el mismo proyecto
+    compartido en OneDrive/SharePoint funcione automáticamente en cualquier
+    computador, sin importar la ruta local del usuario, porque cada quien
+    tiene su propia carpeta de usuario de Windows pero el exe siempre
+    está junto a las carpetas del proyecto (ref/, outputs/, models/).
     """
-    config = _load_config()
-    base_dir_str = config.get("base_dir", "").strip()
-    
-    if base_dir_str:
-        base_dir = Path(base_dir_str)
-        if base_dir.exists() and base_dir.is_dir():
-            return base_dir
-        else:
-            print(f"[WARN] El base_dir configurado no existe: {base_dir_str}")
-            print(f"[WARN] Usando ruta por defecto.")
-    
     return _get_default_base_path()
 
 
 def set_base_dir(base_dir: Path) -> bool:
     """
-    Establece el directorio base del proyecto y lo guarda en config.json.
-    
-    Args:
-        base_dir: Path del directorio base a establecer
-        
-    Returns:
-        True si se guardó correctamente, False en caso contrario
+    Mantenida por compatibilidad con el resto del código que la llama.
+    Ya NO guarda base_dir en config.json porque la ruta se calcula
+    automáticamente desde la ubicación del ejecutable.
+
+    Retorna True si la carpeta existe (comportamiento esperado por los
+    llamadores), False si no existe.
     """
-    if not base_dir.exists() or not base_dir.is_dir():
-        return False
-    
-    config = _load_config()
-    config["base_dir"] = str(base_dir.resolve())
-    return _save_config(config)
+    return base_dir.exists() and base_dir.is_dir()
 
 
 # Ruta base del proyecto (se obtiene dinámicamente)
