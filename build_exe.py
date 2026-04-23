@@ -395,43 +395,229 @@ coll = COLLECT(
     return spec_file
 
 
-def copiar_ejecutable_a_raiz(modo_onefile: bool) -> None:
+def _forzar_eliminacion(carpeta: Path) -> bool:
     """
-    Copia el ejecutable (y en onedir la carpeta _internal) a la raíz del proyecto
-    para que el usuario pueda abrirlo desde ahí sin entrar en dist/.
-    La copia es totalmente funcional: el .exe usa la carpeta donde está como base.
+    Elimina una carpeta de forma agresiva en Windows:
+    fuerza permisos de escritura en cada archivo antes de borrar.
+    Retorna True si tuvo éxito.
     """
-    base_path = Path(__file__).parent  # raíz del proyecto
+    import stat
+
+    def _on_error(func, path, exc_info):
+        """Callback: quita readonly y reintenta."""
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception:
+            pass
+
+    max_intentos = 4
+    for intento in range(max_intentos):
+        try:
+            if intento > 0:
+                time.sleep(1.5)
+                print_colored(
+                    f"  Reintento {intento}/{max_intentos - 1} eliminando SniesManager/...",
+                    Colors.YELLOW,
+                )
+            shutil.rmtree(carpeta, onerror=_on_error)
+            if not carpeta.exists():
+                return True
+        except Exception:
+            pass
+
+    # Último recurso: eliminar archivo por archivo
+    if carpeta.exists():
+        try:
+            import stat
+            for f in carpeta.rglob("*"):
+                try:
+                    if f.is_file():
+                        os.chmod(f, stat.S_IWRITE)
+                        f.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            for d in sorted(carpeta.rglob("*"), reverse=True):
+                try:
+                    if d.is_dir():
+                        d.rmdir()
+                except Exception:
+                    pass
+            carpeta.rmdir()
+        except Exception:
+            pass
+
+    return not carpeta.exists()
+
+
+def crear_carpeta_distribucion(modo_onefile: bool) -> bool:
+    """
+    Crea la carpeta SniesManager/ lista para subir a OneDrive/SharePoint.
+    Borra la versión anterior completamente antes de recrearla.
+    """
+    print_colored(
+        "\n=== Creando carpeta de distribución SniesManager/ ===", Colors.GREEN
+    )
+
+    base_path = Path(__file__).parent
+    dest = base_path / "SniesManager"
+
+    # ── Eliminar versión anterior completamente ───────────────────────────────
+    if dest.exists():
+        print_colored(
+            "  Eliminando versión anterior de SniesManager/ (esto puede tardar)...",
+            Colors.YELLOW,
+        )
+        eliminado = _forzar_eliminacion(dest)
+        if eliminado:
+            print_colored("  [OK] Versión anterior eliminada.", Colors.GREEN)
+        else:
+            print_colored(
+                "  [ERROR CRÍTICO] No se pudo eliminar SniesManager/.\n"
+                "  → Cierra el Explorador de Windows si tienes esa carpeta abierta.\n"
+                "  → Cierra OneDrive o pausa la sincronización.\n"
+                "  → Cierra cualquier archivo de SniesManager/ abierto en Excel.\n"
+                "  → Luego vuelve a ejecutar el build.",
+                Colors.RED,
+            )
+            return False
+
+    # ── Crear estructura limpia ───────────────────────────────────────────────
+    dest.mkdir(parents=True)
+    ok_count = 0
+    err_count = 0
+
+    # 1. Ejecutable
     src_exe = Path("dist") / "SniesManager.exe"
-    dst_exe = base_path / "SniesManager.exe"
+    if src_exe.exists():
+        try:
+            shutil.copy2(src_exe, dest / "SniesManager.exe")
+            print_colored("  [OK] SniesManager.exe", Colors.GREEN)
+            ok_count += 1
+        except Exception as e:
+            print_colored(f"  [ERROR] SniesManager.exe: {e}", Colors.RED)
+            err_count += 1
+    else:
+        print_colored("  [ERROR] No se encontró dist/SniesManager.exe", Colors.RED)
+        err_count += 1
 
-    if not src_exe.exists():
-        print_colored("[ADVERTENCIA] No se encontró dist/SniesManager.exe, no se copia a la raíz.", Colors.YELLOW)
-        return
-
-    try:
-        shutil.copy2(src_exe, dst_exe)
-        print_colored(f"[OK] Copia del ejecutable en la raíz: {dst_exe}", Colors.GREEN)
-    except Exception as e:
-        print_colored(f"[ADVERTENCIA] No se pudo copiar el .exe a la raíz: {e}", Colors.YELLOW)
-        return
-
+    # 2. _internal/ (solo onedir)
     if not modo_onefile:
         src_internal = Path("dist") / "_internal"
-        dst_internal = base_path / "_internal"
         if src_internal.exists():
             try:
-                if dst_internal.exists():
-                    shutil.rmtree(dst_internal)
-                shutil.copytree(src_internal, dst_internal)
-                print_colored(f"[OK] Carpeta _internal copiada a la raíz (necesaria para el .exe)", Colors.GREEN)
+                shutil.copytree(src_internal, dest / "_internal")
+                print_colored("  [OK] _internal/", Colors.GREEN)
+                ok_count += 1
             except Exception as e:
-                print_colored(f"[ADVERTENCIA] No se pudo copiar _internal a la raíz: {e}", Colors.YELLOW)
-                print_colored("   Puedes ejecutar el .exe desde dist/ o copiar _internal manualmente.", Colors.YELLOW)
+                print_colored(f"  [ERROR] _internal/: {e}", Colors.RED)
+                err_count += 1
         else:
-            print_colored("[ADVERTENCIA] No se encontró dist/_internal; la copia en la raíz puede no funcionar en modo onedir.", Colors.YELLOW)
+            print_colored("  [ERROR] No se encontró dist/_internal/", Colors.RED)
+            err_count += 1
 
-    print_colored("   Puedes usar SniesManager.exe en la raíz del proyecto (ref/, models/, docs/ ya están ahí).", Colors.GREEN)
+    # 3. ref/, models/, docs/
+    for carpeta in ["ref", "models", "docs"]:
+        src = base_path / carpeta
+        if src.exists():
+            try:
+                shutil.copytree(src, dest / carpeta)
+                print_colored(f"  [OK] {carpeta}/", Colors.GREEN)
+                ok_count += 1
+            except Exception as e:
+                print_colored(f"  [ERROR] {carpeta}/: {e}", Colors.RED)
+                err_count += 1
+        else:
+            print_colored(
+                f"  [OMITIDO] {carpeta}/ no existe en el proyecto", Colors.YELLOW
+            )
+
+    # 4. outputs/ — copiar contenido real excluyendo temp/ y _staging/
+    src_outputs = base_path / "outputs"
+    dst_outputs = dest / "outputs"
+    if src_outputs.exists():
+        try:
+            shutil.copytree(
+                src_outputs,
+                dst_outputs,
+                ignore=shutil.ignore_patterns(
+                    "temp", "temp/*", "_staging", "_staging/*"
+                ),
+            )
+            # Recrear temp/ y _staging/ vacíos (el pipeline los necesita)
+            (dst_outputs / "temp").mkdir(exist_ok=True)
+            (dst_outputs / "_staging").mkdir(exist_ok=True)
+            print_colored(
+                "  [OK] outputs/ (con contenido, sin temp/ ni _staging/)", Colors.GREEN
+            )
+            ok_count += 1
+        except Exception as e:
+            print_colored(f"  [ERROR] outputs/: {e}", Colors.RED)
+            for sub in [
+                "outputs",
+                "outputs/estudio_de_mercado",
+                "outputs/historico",
+                "outputs/temp",
+                "outputs/_staging",
+            ]:
+                (dest / sub).mkdir(parents=True, exist_ok=True)
+            err_count += 1
+    else:
+        for sub in [
+            "outputs",
+            "outputs/estudio_de_mercado",
+            "outputs/historico",
+            "outputs/temp",
+            "outputs/_staging",
+        ]:
+            (dest / sub).mkdir(parents=True, exist_ok=True)
+        print_colored(
+            "  [OK] outputs/ (vacío — no existía en el proyecto)", Colors.YELLOW
+        )
+        ok_count += 1
+
+    # 5. logs/
+    (dest / "logs").mkdir(exist_ok=True)
+    print_colored("  [OK] logs/", Colors.GREEN)
+    ok_count += 1
+
+    # 6. config.json
+    config_src = base_path / "config.json"
+    config_example = base_path / "config.json.example"
+    config_dst = dest / "config.json"
+    if config_src.exists():
+        try:
+            shutil.copy2(config_src, config_dst)
+            print_colored("  [OK] config.json", Colors.GREEN)
+            ok_count += 1
+        except Exception as e:
+            print_colored(f"  [ERROR] config.json: {e}", Colors.RED)
+            err_count += 1
+    elif config_example.exists():
+        try:
+            shutil.copy2(config_example, config_dst)
+            print_colored(
+                "  [OK] config.json (desde config.json.example)", Colors.GREEN
+            )
+            ok_count += 1
+        except Exception as e:
+            print_colored(f"  [ERROR] config.json: {e}", Colors.RED)
+            err_count += 1
+    else:
+        config_dst.write_text("{}", encoding="utf-8")
+        print_colored("  [OK] config.json (creado vacío)", Colors.GREEN)
+        ok_count += 1
+
+    # ── Resumen ───────────────────────────────────────────────────────────────
+    total_bytes = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())
+    total_mb = total_bytes / (1024 * 1024)
+    print_colored(f"\n  Tamaño total: {total_mb:.0f} MB", Colors.GREEN)
+    print_colored(
+        f"  Resultado: {ok_count} OK, {err_count} errores", Colors.GREEN
+    )
+    print_colored(f"  Carpeta lista en: {dest.resolve()}", Colors.GREEN)
+
+    return err_count == 0
 
 
 def construir_exe(modo_onefile: bool = False) -> bool:
@@ -506,9 +692,7 @@ def construir_exe(modo_onefile: bool = False) -> bool:
                 print_colored("  2. Copie las carpetas ref/, models/, docs/ junto al ejecutable", Colors.YELLOW)
                 print_colored("  3. El ejecutable creará archivos temporales al ejecutarse", Colors.YELLOW)
                 
-                print_colored("\n=== Copiando ejecutable a la raíz del proyecto ===", Colors.GREEN)
-                copiar_ejecutable_a_raiz(modo_onefile=True)
-                return True
+                return crear_carpeta_distribucion(modo_onefile=True)
             else:
                 print_colored(f"\n[ERROR] No se encontró el ejecutable en: {final_exe}", Colors.RED)
                 return False
@@ -555,9 +739,7 @@ def construir_exe(modo_onefile: bool = False) -> bool:
                 print_colored("\n[IMPORTANTE] Para distribuir, copie TODA la carpeta 'dist/'", Colors.YELLOW)
                 print_colored("   El .exe necesita la carpeta '_internal/' junto a él", Colors.YELLOW)
                 
-                print_colored("\n=== Copiando ejecutable a la raíz del proyecto ===", Colors.GREEN)
-                copiar_ejecutable_a_raiz(modo_onefile=False)
-                return True
+                return crear_carpeta_distribucion(modo_onefile=False)
             elif dist_app_exe.exists():
                 # El ejecutable está en dist/SniesManager/SniesManager.exe (estructura alternativa)
                 print_colored("\n=== Organizando archivos para distribución ===", Colors.GREEN)
@@ -604,9 +786,7 @@ def construir_exe(modo_onefile: bool = False) -> bool:
                 print_colored("\n[IMPORTANTE] Para distribuir, copie TODA la carpeta 'dist/'", Colors.YELLOW)
                 print_colored("   El .exe necesita la carpeta '_internal/' junto a él", Colors.YELLOW)
                 
-                print_colored("\n=== Copiando ejecutable a la raíz del proyecto ===", Colors.GREEN)
-                copiar_ejecutable_a_raiz(modo_onefile=False)
-                return True
+                return crear_carpeta_distribucion(modo_onefile=False)
             else:
                 print_colored(f"\n[ERROR] No se encontró el ejecutable en ninguna ubicación esperada", Colors.RED)
                 print_colored(f"  Buscado en: {final_exe}", Colors.RED)
@@ -619,171 +799,71 @@ def construir_exe(modo_onefile: bool = False) -> bool:
         return False
 
 def crear_instrucciones(modo_onefile: bool = False) -> None:
-    """Crea un archivo README con instrucciones para usar el .EXE.
-    
-    Args:
-        modo_onefile: Si True, ajusta instrucciones para modo onefile.
-    """
-    modo_texto = "ejecutable único" if modo_onefile else "carpeta con archivos"
-    estructura_texto = """SniesManager.exe
-ref/ (carpeta con archivos de referencia)
-models/ (carpeta con modelos ML, opcional)
-docs/ (carpeta con archivos de normalización)""" if modo_onefile else """SniesManager.exe
-_internal/ (carpeta con DLLs de Python - REQUERIDA)
-ref/ (carpeta con archivos de referencia)
-models/ (carpeta con modelos ML)
-docs/ (carpeta con archivos de normalización)"""
-    
-    instrucciones = f"""========================================
-  INSTRUCCIONES DE USO - SniesManager
-  Sistema de Clasificación de Programas SNIES - EAFIT
-========================================
+    """Crea INSTRUCCIONES.txt dentro de SniesManager/ (paquete de distribución)."""
+    nota_modo = (
+        "Este paquete es modo onedir: la carpeta _internal/ es obligatoria junto a "
+        "SniesManager.exe; sin ella el programa no inicia."
+        if not modo_onefile
+        else "Este paquete es modo onefile: no hay carpeta _internal/; las dependencias "
+        "van dentro del ejecutable. Mantén igualmente ref/, models/ y docs/ disponibles "
+        "localmente (prioridad alta/medio según corresponda)."
+    )
+    instrucciones = f"""
+================================================================================
+INSTRUCCIONES DE CONFIGURACIÓN - SNIESMANAGER v{FILE_VERSION}
+Fecha de empaquetado: {time.strftime('%Y-%m-%d %H:%M:%S')}
+================================================================================
 
-VERSIÓN: {FILE_VERSION}
-MODO DE EMPAQUETADO: {modo_texto}
+Para que la aplicación funcione correctamente desde OneDrive/SharePoint,
+configura la sincronización según las siguientes prioridades.
 
-REQUISITOS PREVIOS
-------------------
-1. Google Chrome instalado: El programa necesita Chrome para descargar 
-   los datos de SNIES desde el portal oficial.
+PASOS PARA CONFIGURAR:
+1. Navega a esta carpeta SniesManager/ en el Explorador de Windows.
+2. Selecciona los elementos indicados como PRIORIDAD ALTA.
+3. Clic derecho → "Mantener siempre en este dispositivo".
+   El ícono debe mostrar un círculo verde con marca blanca (✓), no una nube.
 
-2. Sistema Operativo: Windows 10 o superior
+--------------------------------------------------------------------------------
+[PRIORIDAD ALTA - "Mantener siempre en este dispositivo"]
+Deben residir físicamente en tu equipo para que el ejecutable funcione.
 
-3. Estructura de archivos: Debe tener las siguientes carpetas junto al ejecutable:
-{estructura_texto}
+    - SniesManager.exe    (Ejecutable principal)
+    - _internal/          (Librerías y dependencias de Python - CRÍTICO en modo onedir)
+    - ref/                (Archivos de referencia del pipeline)
+    - models/             (Modelos ML entrenados)
+    - outputs/            (Carpeta de resultados del pipeline)
+    - config.json         (Configuración: SMLMV, benchmarks de costo)
+
+[PRIORIDAD MEDIA - Preferiblemente local]
+Se lee al iniciar la aplicación; si está solo en la nube puede causar
+lentitud al arrancar.
+
+    - docs/               (Archivo de normalización final)
+
+[PRIORIDAD BAJA - Puede quedar solo en línea]
+No bloquea la ejecución del pipeline.
+
+    - logs/               (Registros en logs/pipeline.log; se generan al ejecutar)
+
+--------------------------------------------------------------------------------
+Nota sobre el modo de empaquetado:
+{nota_modo}
 
 PRIMERA EJECUCIÓN
-------------------
-1. Haga doble clic en SniesManager.exe
-
-2. La aplicación le pedirá que seleccione la carpeta raíz del proyecto.
-   Esta es la carpeta que contiene:
-   - ref/ (archivos de referencia)
-   - models/ (modelos de ML, se crearán automáticamente si no existen)
-   - docs/ (documentación y archivos de normalización)
-   
-   Ejemplo: C:\\Users\\usuario\\OneDrive - Universidad EAFIT\\trabajo\\proyectoMejora
-
-3. Una vez seleccionada, la configuración se guardará automáticamente
-   en config.json y no se volverá a pedir.
-
-4. Si es la primera vez, el sistema entrenará automáticamente el modelo ML
-   (esto puede tardar varios minutos).
-
-USO DIARIO
-----------
-1. Haga doble clic en SniesManager.exe
-
-2. En el menú principal, presione el botón "Ejecutar Pipeline"
-
-3. Espere a que termine el proceso (puede tardar 3-7 minutos):
-   - Descarga de datos SNIES (2-5 min)
-   - Normalización y procesamiento (10-30 seg)
-   - Clasificación ML (30-60 seg)
-   - Exportación Power BI (5-10 seg)
-
-4. Los archivos se guardarán automáticamente en:
-   - outputs/Programas.xlsx (archivo principal con todos los programas)
-   - outputs/Programas_PowerBI.xlsx (datos preparados para Power BI)
-   - outputs/HistoricoProgramasNuevos.xlsx (histórico consolidado)
-   - outputs/historico/Programas_YYYYMMDD_HHMMSS.xlsx (histórico con fecha)
-
-FUNCIONALIDADES DISPONIBLES
----------------------------
-1. Ejecutar Pipeline: Descarga y clasifica programas nuevos automáticamente
-
-2. Ajuste Manual: Revisa y corrige clasificaciones manualmente
-   - Edita ES_REFERENTE y programas EAFIT
-   - Filtra por programas nuevos, referentes, o todos
-   - Busca por código o nombre
-
-3. Reentrenamiento: Edita referentes y reentrena el modelo ML
-   - Sincroniza ajustes manuales con archivo de entrenamiento
-   - Simula reentrenamiento antes de entrenar
-   - Versionado de modelos con rollback
-
-4. Consolidar Archivos: Combina archivos históricos con el actual
-
-5. Ver Logs: Abre el archivo de log para revisar errores
-
-SALIDA
-------
-Los archivos generados se guardan en la carpeta outputs/:
-- Programas.xlsx: Archivo principal con todos los programas y clasificaciones
-- Programas_PowerBI.xlsx: Datos preparados para visualización en Power BI
-  - Hoja "Datos": Tabla detallada de programas nuevos
-  - Hoja "Métricas": Métricas agregadas calculadas
-- HistoricoProgramasNuevos.xlsx: Histórico consolidado de programas nuevos
-- historico/Programas_YYYYMMDD_HHMMSS.xlsx: Archivos históricos con fecha
-
-Los logs se guardan en: logs/pipeline.log
-
-SOLUCIÓN DE PROBLEMAS
----------------------
-❌ Error "Chrome no encontrado"
-   → Solución: Instale Google Chrome desde chrome.google.com
-
-❌ Error de permisos al guardar
-   → Solución: 
-     - Cierre Excel/Power BI si tienen archivos abiertos en outputs/
-     - Verifique permisos de escritura en la carpeta del proyecto
-     - Ejecute como administrador si es necesario
-
-❌ La aplicación no inicia
-   → Solución: 
-     - Verifique que todas las carpetas (ref/, models/, docs/) estén presentes
-     - En modo onedir, asegúrese de que _internal/ esté junto al .exe
-     - Revise logs/pipeline.log para más detalles
-
-❌ Error "ModuleNotFoundError" al ejecutar
-   → Solución: 
-     - Reconstruya el ejecutable con build_exe.py
-     - Verifique que todas las dependencias estén en requirements.txt
-
-❌ El ejecutable es muy grande (>500MB)
-   → Es normal. Incluye Python completo, todas las dependencias y modelos ML.
-
-❌ Antivirus bloquea el ejecutable
-   → Solución:
-     - Agregue excepción en su antivirus
-     - En modo onefile, el antivirus puede ser más estricto (use onedir)
-
-NOTAS IMPORTANTES
 -----------------
-✅ La aplicación NO requiere Python instalado
-✅ La aplicación NO requiere instalar librerías manualmente
-✅ El proceso se ejecuta típicamente una vez por semana
-✅ Todos los archivos se guardan automáticamente en outputs/
-✅ Puede cambiar la carpeta del proyecto desde el menú "Configuración"
-✅ Los modelos ML se entrenan automáticamente la primera vez
-✅ Los ajustes manuales se pueden sincronizar con el archivo de entrenamiento
+1. Doble clic en SniesManager.exe dentro de esta carpeta SniesManager/.
+2. Cuando la app pida la carpeta del proyecto, puedes indicar la misma carpeta
+   SniesManager/ (contiene ref/, models/, docs/, outputs/, config.json) o la
+   raíz de tu copia de trabajo si prefieres separar datos del instalador.
+3. Google Chrome debe estar instalado para las descargas desde el portal SNIES.
 
-CONFIGURACIÓN AVANZADA
-----------------------
-Puede crear un archivo config.json junto al ejecutable para personalizar:
+Más detalle técnico y solución de problemas: consulta la documentación del
+proyecto o logs/pipeline.log si algo falla.
 
-{{
-  "base_dir": "ruta/al/proyecto",
-  "umbral_referente": 0.70,
-  "log_level": "INFO",
-  "headless": false,
-  "max_wait_download_sec": 180
-}}
-
-CONTACTO Y SOPORTE
-------------------
-Para problemas técnicos, revise:
-1. logs/pipeline.log para errores detallados
-2. Los mensajes en la ventana de la aplicación
-3. Verifique que todas las carpetas requeridas estén presentes
-
-========================================
-Versión: {FILE_VERSION}
-Fecha de empaquetado: {time.strftime('%Y-%m-%d %H:%M:%S')}
-========================================
+================================================================================
 """
     
-    readme_file = Path("dist") / "INSTRUCCIONES.txt"
+    readme_file = Path("SniesManager") / "INSTRUCCIONES.txt"
     readme_file.parent.mkdir(exist_ok=True)
     with open(readme_file, "w", encoding="utf-8") as f:
         f.write(instrucciones)
@@ -846,25 +926,22 @@ def main() -> int:
     print_colored("  ¡PROCESO COMPLETADO!", Colors.GREEN)
     print_colored("=" * 60, Colors.RESET)
     
+    dist_exe = Path("dist") / "SniesManager.exe"
+    paquete = Path("SniesManager")
+    print_colored(f"\nArtefacto PyInstaller (referencia): {dist_exe}", Colors.GREEN)
+    print_colored(f"Paquete listo para OneDrive/SharePoint: {paquete.resolve()}", Colors.GREEN)
     if modo_onefile:
-        exe_path = Path("dist") / "SniesManager.exe"
-        print_colored(f"\nEl ejecutable está en: {exe_path}", Colors.GREEN)
-        print_colored("También hay una copia en la raíz del proyecto; puedes abrirla desde ahí.", Colors.GREEN)
         print_colored("\n[IMPORTANTE] Para distribuir:", Colors.YELLOW)
-        print_colored("  1. Copie el archivo SniesManager.exe", Colors.YELLOW)
-        print_colored("  2. Asegúrese de que las carpetas ref/, models/, docs/ estén en la misma ubicación", Colors.YELLOW)
-        print_colored("  3. El ejecutable creará archivos temporales al ejecutarse", Colors.YELLOW)
+        print_colored("  1. Sube o copia toda la carpeta SniesManager/", Colors.YELLOW)
+        print_colored("  2. Incluye SniesManager.exe, ref/, models/, docs/, outputs/, logs/, config.json", Colors.YELLOW)
+        print_colored("  3. En onefile el .exe extrae dependencias al ejecutarse; puede ser más lento al abrir", Colors.YELLOW)
     else:
-        exe_path = Path("dist") / "SniesManager.exe"
-        print_colored(f"\nEl ejecutable está en: {exe_path}", Colors.GREEN)
-        print_colored("También hay una copia en la raíz del proyecto (SniesManager.exe + _internal/)", Colors.GREEN)
-        print_colored("  -> Puedes abrir SniesManager.exe desde la raíz; ref/, models/, docs/ ya están ahí.", Colors.GREEN)
         print_colored("\n[IMPORTANTE] Para distribuir:", Colors.YELLOW)
-        print_colored("  1. Copie TODA la carpeta 'dist/' completa", Colors.YELLOW)
-        print_colored("  2. Incluya: SniesManager.exe, _internal/, ref/, models/, docs/", Colors.YELLOW)
-        print_colored("  3. Mantenga todas las carpetas juntas (el .exe necesita _internal/)", Colors.YELLOW)
-    
-    print_colored("\nRevisa dist/INSTRUCCIONES.txt para más información.", Colors.YELLOW)
+        print_colored("  1. Sube o copia toda la carpeta SniesManager/", Colors.YELLOW)
+        print_colored("  2. Debe incluir SniesManager.exe y _internal/ (obligatorio en onedir)", Colors.YELLOW)
+        print_colored("  3. Mantén ref/, models/, docs/ y el resto junto al ejecutable", Colors.YELLOW)
+
+    print_colored("\nRevisa SniesManager/INSTRUCCIONES.txt para sincronización en OneDrive.", Colors.YELLOW)
     
     return 0
 

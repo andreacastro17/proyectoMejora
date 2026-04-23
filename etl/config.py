@@ -2,8 +2,8 @@
 Módulo de configuración centralizado para manejar rutas de archivos.
 
 Este módulo detecta automáticamente si el código se está ejecutando como:
-- Script de Python (desarrollo)
-- Ejecutable .EXE (distribución)
+- Script de Python (desarrollo; raíz = carpeta del repo)
+- Ejecutable .EXE (PyInstaller; raíz = carpeta del .exe, p. ej. SniesManager/)
 
 Y configura las rutas de manera apropiada para cada caso.
 
@@ -21,27 +21,59 @@ import datetime
 import pandas as pd
 
 
+def _esta_en_onedrive(ruta: Path) -> bool:
+    """
+    Detecta si una ruta está dentro de una carpeta sincronizada
+    con OneDrive o SharePoint en Windows.
+    Funciona comprobando si algún componente de la ruta contiene
+    indicadores conocidos de OneDrive en Windows.
+    """
+    try:
+        ruta_str = str(ruta.resolve()).lower()
+        indicadores = [
+            "onedrive",
+            "sharepoint",
+            "\\onedrive - ",  # OneDrive personal o empresarial
+            "/onedrive - ",
+        ]
+        return any(ind in ruta_str for ind in indicadores)
+    except Exception:
+        return False
+
+
+def _get_temp_dir_local(base_path: Path) -> Path:
+    """
+    Si la app corre desde OneDrive/SharePoint, devuelve una ruta local
+    en %LOCALAPPDATA%\\SniesManager\\temp para evitar conflictos de
+    sincronización con los archivos intermedios del pipeline.
+    Si no está en OneDrive, usa outputs/temp/ junto al ejecutable.
+    """
+    if _esta_en_onedrive(base_path):
+        # Usar carpeta local del sistema que OneDrive nunca sincroniza
+        local_app_data = Path(os.environ.get("LOCALAPPDATA", "~")).expanduser()
+        temp_local = local_app_data / "SniesManager" / "temp"
+        temp_local.mkdir(parents=True, exist_ok=True)
+        return temp_local
+    else:
+        # Ruta estándar junto al ejecutable
+        return base_path / "outputs" / "temp"
+
+
 def _get_default_base_path() -> Path:
     """
     Obtiene la ruta base por defecto del proyecto.
-    
-    Si se ejecuta como .EXE (PyInstaller):
-    - Si el .exe está dentro de una carpeta llamada "dist", se usa la carpeta padre
-      de "dist" como base (raíz del proyecto), para que outputs, ref, models e
-      históricos sean los de la raíz del proyecto y no los de dist/.
-    - Si el .exe está en otra ruta (ej. instalación distribuida), se usa la
-      carpeta del ejecutable como base.
-    Si se ejecuta como script, usa la carpeta del proyecto.
+
+    Si se ejecuta como .EXE (PyInstaller), la carpeta del ejecutable es la base
+    (p. ej. SniesManager/ con ref/, models/, outputs/, docs/, config.json junto al .exe).
+
+    Si se ejecuta como script, usa la carpeta del repositorio (padre de etl/).
     """
     if getattr(sys, 'frozen', False):
-        # Ejecutándose como .EXE (PyInstaller)
-        # Resolver la ruta para normalizar y manejar symlinks/case sensitivity
+        # Ejecutándose como .EXE empaquetado con PyInstaller.
+        # La carpeta del exe (SniesManager/) ES la raíz del proyecto:
+        # contiene ref/, models/, outputs/, docs/, config.json junto al exe.
+        # No hay que subir niveles — usamos directamente la carpeta del exe.
         base_path = Path(sys.executable).resolve().parent
-        # Si el .exe está en proyectoMejora/dist/SniesManager.exe, usar proyectoMejora como base
-        # para que outputs, ref, históricos, etc. sean los de la raíz del proyecto
-        # Verificación case-insensitive y más robusta
-        if base_path.name.lower() == "dist" and base_path.parent.exists() and base_path.parent.is_dir():
-            base_path = base_path.parent
     else:
         # Ejecutándose como script de Python
         base_path = Path(__file__).resolve().parents[1]
@@ -188,7 +220,7 @@ ARCHIVO_PROGRAMAS = OUTPUTS_DIR / "Programas.xlsx"
 ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos .xlsx"  # Con espacio al final (archivo principal con todos los históricos)
 
 # ========= PIPELINE MERCADO (Fase 1+) =========
-TEMP_DIR = OUTPUTS_DIR / "temp"
+TEMP_DIR = _get_temp_dir_local(_BASE_PATH)
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 ESTUDIO_MERCADO_DIR = OUTPUTS_DIR / "estudio_de_mercado"
@@ -405,8 +437,13 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     ARCHIVO_PROGRAMAS = OUTPUTS_DIR / "Programas.xlsx"
     ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos .xlsx"  # Con espacio al final (archivo principal con todos los históricos)
     ARCHIVO_NORMALIZACION = DOCS_DIR / "normalizacionFinal.xlsx"
-    TEMP_DIR = OUTPUTS_DIR / "temp"
+    TEMP_DIR = _get_temp_dir_local(base_dir)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    if _esta_en_onedrive(_BASE_PATH):
+        print(
+            f"[INFO] App detectada en OneDrive/SharePoint. "
+            f"Archivos temporales redirigidos a: {TEMP_DIR}"
+        )
     RAW_HISTORIC_DIR = HISTORIC_DIR / "raw"
     RAW_HISTORIC_DIR.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_BASE_MAESTRA = TEMP_DIR / "base_maestra.parquet"

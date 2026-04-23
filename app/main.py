@@ -4912,6 +4912,47 @@ class MercadoPipelinePage(ttk.Frame):
         self.prog_seg = ttk.Progressbar(seg_card, mode="indeterminate", length=500)
         self.prog_seg.pack(fill=tk.X, pady=(10, 4))
 
+        # ── Card 4: Valorización de programas ────────────────────────────────
+        val_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
+        val_card.pack(fill=tk.X, pady=(0, 14))
+        ttk.Label(
+            val_card,
+            text="4. Valorización de Programas EAFIT",
+            style="SectionTitle.TLabel",
+        ).pack(anchor="w")
+        ttk.Label(
+            val_card,
+            text=(
+                "Genera Programas_para_valorizacion_output.xlsx con dos matrices "
+                "por programa y región: métricas del mercado regional (todas las IES) "
+                "y métricas de las 13 IES referentes. "
+                "Requiere haber ejecutado los reportes segmentados primero."
+            ),
+            style="Muted.TLabel",
+            wraplength=900,
+        ).pack(anchor="w", pady=(4, 10), fill=tk.X)
+        btn_frame_val = ttk.Frame(val_card, style="Card.TFrame")
+        btn_frame_val.pack(anchor="w")
+        self.btn_valorizacion = ttk.Button(
+            btn_frame_val,
+            text="▶️ Generar Valorización",
+            command=self._on_valorizacion_clicked,
+            style="Primary.TButton",
+        )
+        self.btn_valorizacion.pack(side=tk.LEFT)
+        self.btn_ver_valorizacion = ttk.Button(
+            btn_frame_val,
+            text="📂 Ver resultado",
+            command=self._open_resultado_valorizacion,
+            state=tk.DISABLED,
+            style="Secondary.TButton",
+        )
+        self.btn_ver_valorizacion.pack(side=tk.LEFT, padx=(10, 0))
+        self.prog_val = ttk.Progressbar(val_card, mode="indeterminate", length=500)
+        self.prog_val.pack(fill=tk.X, pady=(10, 4))
+        self.lbl_val_status = ttk.Label(val_card, text="", style="Status.TLabel")
+        self.lbl_val_status.pack(anchor="w")
+
         # ── Card: Logs ───────────────────────────────────────────────────────
         log_card = ttk.Frame(main_frame, padding=16, style="Card.TFrame")
         log_card.pack(fill=tk.X, pady=(0, 10))
@@ -4930,6 +4971,63 @@ class MercadoPipelinePage(ttk.Frame):
         )
         self.messages_text.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.messages_text.yview)
+
+    def _on_valorizacion_clicked(self):
+        """Ejecuta la Fase 7 — Valorización de Programas."""
+        import threading
+        from etl.valorizacion_pipeline import run_fase_valorizacion
+
+        self.btn_valorizacion.config(state=tk.DISABLED)
+        self.btn_ver_valorizacion.config(state=tk.DISABLED)
+        self.prog_val.start(12)
+        self.lbl_val_status.config(text="⏳ Generando valorización...")
+        self._log_message("━━━ Fase 7 — Valorización de Programas ━━━")
+
+        def _run():
+            try:
+                ruta = run_fase_valorizacion(log=self._log_message)
+                self.after(0, lambda p=ruta: self._on_valorizacion_done(p))
+            except Exception as exc:
+                self.after(0, lambda e=exc: self._on_valorizacion_error(e))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_valorizacion_done(self, ruta: Path):
+        self.prog_val.stop()
+        self.btn_valorizacion.config(state=tk.NORMAL)
+        self.btn_ver_valorizacion.config(state=tk.NORMAL)
+        self._val_ruta = ruta
+        self.lbl_val_status.config(text=f"✅ Generado: {ruta.name}")
+        self._log_message(f"✓ Valorización completada: {ruta}")
+
+    def _on_valorizacion_error(self, exc: Exception):
+        self.prog_val.stop()
+        self.btn_valorizacion.config(state=tk.NORMAL)
+        self.lbl_val_status.config(text=f"❌ Error: {exc}")
+        self._log_message(f"✗ Error en valorización: {exc}")
+        messagebox.showerror(
+            "Error en Valorización",
+            f"No se pudo generar el archivo:\n\n{exc}",
+            parent=self.root,
+        )
+
+    def _open_resultado_valorizacion(self):
+        ruta = getattr(self, "_val_ruta", None)
+        if ruta and ruta.exists():
+            _open_in_excel(ruta)
+        else:
+            from etl.config import ESTUDIO_MERCADO_DIR
+
+            candidato = ESTUDIO_MERCADO_DIR / "Programas_para_valorizacion_output.xlsx"
+            if candidato.exists():
+                _open_in_excel(candidato)
+            else:
+                messagebox.showinfo(
+                    "Sin resultado",
+                    "Aún no se ha generado el archivo de valorización.\n"
+                    "Ejecuta primero 'Generar Valorización'.",
+                    parent=self.root,
+                )
 
     def _open_programas_categorias(self):
         """Abre una ventana con Programas.xlsx mostrando CATEGORIA_FINAL y fuente ML."""

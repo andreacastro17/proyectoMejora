@@ -1,0 +1,71 @@
+================================================================================
+INSTRUCCIONES PARA LA EJECUCIÓN
+================================================================================
+
+Para asegurar el correcto funcionamiento de la aplicación y evitar errores de 
+ejecución ("File not found", "Access denied" o errores de carga de librerías), 
+es necesario que los archivos críticos residan físicamente en tu equipo local.
+
+OneDrive/SharePoint, por defecto, puede mantener archivos en la nube y solo 
+descargarlos bajo demanda. Para esta aplicación, debes configurar los siguientes 
+elementos en modo "Mantener siempre en este dispositivo".
+
+--------------------------------------------------------------------------------
+PASOS PARA CONFIGURAR LA SINCRONIZACIÓN:
+1. Navega a la carpeta del proyecto en tu explorador de archivos de Windows.
+2. Selecciona las carpetas/archivos listados como [PRIORIDAD ALTA].
+3. Haz clic derecho sobre el elemento seleccionado.
+4. Selecciona la opción: "Mantener siempre en este dispositivo".
+   * Verás que el ícono de estado cambia a un círculo verde con una marca blanca.
+--------------------------------------------------------------------------------
+
+CONFIGURACIÓN REQUERIDA:
+
+[PRIORIDAD ALTA - "Mantener siempre en este dispositivo"]
+Deben estar siempre sincronizados físicamente para que el ejecutable los encuentre.
+
+    - SniesManager.exe    (Ejecutable principal)
+    - _internal/          (Librerías y dependencias críticas de Python)
+    - ref/                (Archivos de referencia del pipeline)
+    - models/             (Modelos ML entrenados)
+    - outputs/            (Carpeta de escritura del pipeline)
+    - config.json         (Configuración del sistema)
+
+[PRIORIDAD MEDIA - Preferiblemente local]
+    - docs/               (Normalización final - Se lee al inicio)
+
+[PRIORIDAD BAJA - "Espacio liberado" (Online)]
+Pueden dejarse gestionados por OneDrive (Online) sin afectar la ejecución.
+
+    - logs/               (Registros de actividad)
+
+================================================================================
+SOLUCIÓN DE PROBLEMAS COMUNES
+================================================================================
+
+* LA APP NO ENCUENTRA LOS ARCHIVOS (ERROR DE RUTA RAÍZ):
+  Si por algún motivo la aplicación no detecta automáticamente la dirección de 
+  la carpeta raíz en tu PC (debido a configuraciones particulares de OneDrive), 
+  debes indicarle la ruta de forma manual:
+  
+  -> Haz clic en la opción "Cambiar carpeta" dentro de la aplicación.
+  -> Busca y selecciona manualmente la carpeta principal del proyecto en tu PC.
+
+* LA APP NO ABRE O SE CIERRA DE INMEDIATO:
+  Verifica que todos los elementos de PRIORIDAD ALTA tengan el ícono de "Check" 
+  verde sólido. Si tienen un ícono de nube (solo en línea), el programa fallará.
+
+* ERRORES AL GUARDAR RESULTADOS:
+  Si experimentas errores al guardar resultados, pausa temporalmente la 
+  sincronización de OneDrive durante la ejecución del pipeline.
+
+================================================================================
+INFO PARA DESARROLLADORES DEL EQUIPO:
+================================================================================
+
+Llegado el caso, si el equipo de estrategia necesita mejoras o, en su defecto, la 
+corrección y mantenimiento del proyecto, adjunto la dirección del repositorio git 
+con el fin de que el desarrollador pueda realizar los cambios pertinentes al 
+proyecto: 
+
+https://github.com/andreacastro17/proyectoMejora.git
