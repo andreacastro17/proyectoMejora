@@ -27,6 +27,7 @@ from sklearn.pipeline import Pipeline
 
 from etl.config import (
     ARCHIVO_PROGRAMAS,
+    ARCHIVO_CATALOGO_EAFIT,
     ARCHIVO_REFERENTE_CATEGORIAS,
     BENCHMARK_COSTO,
     CHECKPOINT_BASE_MAESTRA,
@@ -167,8 +168,35 @@ MAPEO_PROGRAMAS_EAFIT: dict[str, str] = {
     "Maestría en Inteligencia Artificial": "INTELIGENCIA ARTIFICIAL",
     "Maestría en Liderazgo Educativo": "LIDERAZGO",
     "Maestría en Marca y Publicidad": "MERCADEO Y PUBLICIDAD",
+    # Pregrados legacy (nombres con prefijo; ya no están todos en catálogo activo)
     "Pregrado en Ingeniería en Energía": "ENERGIA Y RECURSOS ENERGETICOS",
     "Pregrado en Inteligencia de Negocios": "INTELIGENCIA DE NEGOCIOS",
+    # ── Pregrados EAFIT (claves = Nombre Programa EAFIT en catálogo, minúsculas) ──
+    "administracion de negocios": "ADMINISTRACION DE EMPRESAS",
+    "contaduria publica": "CONTABILIDAD Y AUDITORIA",
+    "mercadeo": "MERCADEO Y PUBLICIDAD",
+    "finanzas": "ADMINISTRACION FINANCIERA",
+    "negocios internacionales": "NEGOCIOS INTERNACIONALES",
+    "derecho": "DERECHO Y CIENCIAS JURIDICAS",
+    "economia": "ECONOMIA",
+    "psicologia": "PSICOLOGIA GENERAL",
+    "ciencias politicas": "CIENCIA POLITICA",
+    "comunicacion social": "COMUNICACION Y PERIODISMO",
+    "ingenieria de sistemas": "INGENIERIA DE SISTEMAS Y SOFTWARE",
+    "ingenieria civil": "INGENIERIA CIVIL",
+    "ingenieria mecanica": "INGENIERIA MECANICA E INDUSTRIAL",
+    "ingenieria de produccion": "INGENIERÍA DE PRODUCCIÓN Y PROCESOS",
+    "ingenieria de procesos": "INGENIERIA QUIMICA Y PROCESOS",
+    "ingenieria de diseno de producto": "INGENIERÍA DE PRODUCCIÓN Y PROCESOS",
+    "ingenieria fisica": "FISICA",
+    "ingenieria matematica": "MATEMATICAS",
+    "ingenieria agronomica": "CIENCIAS AGROPECUARIAS",
+    "biologia": "CIENCIAS BIOLOGICAS",
+    "geologia": "SUELOS Y RECURSOS MINERALES",
+    "musica": "MUSICA",
+    "literatura": "LINGUISTICA Y LITERATURA",
+    "diseno interactivo": "DISEÑO DIGITAL Y GRAFICO",
+    "diseno urbano y gestion del habitat": "ARQUITECTURA",
 }
 
 
@@ -318,7 +346,7 @@ def run_fase1() -> pd.DataFrame:
 
     # Capa 1.5 — Match directo nombre_base → categoría exacta del referente
     # Cubre el caso: nombre del programa == nombre de categoría, pero el programa
-    # no está en el referente (ej. pregrados universitarios como "MEDICINA").
+    # no está en el referente. El referente ya incluye programas universitarios (pregrado).
     # La Capa 2 busca en *programas* del referente; esta capa busca en *categorías*.
     _cats_validas = set(
         df_referente["CATEGORIA_FINAL"]
@@ -1334,6 +1362,22 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
 
     ag = ag.reset_index()
 
+    # NIVEL_MAYORIT — nivel de formación dominante de la categoría (para AAGR por universo)
+    _nivel_counts = (
+        df.groupby(["CATEGORIA_FINAL", "NIVEL_DE_FORMACIÓN"])
+        .size()
+        .reset_index(name="_cnt")
+    )
+    _nivel_mayorit = (
+        _nivel_counts.sort_values("_cnt", ascending=False)
+        .drop_duplicates(subset=["CATEGORIA_FINAL"])
+        .set_index("CATEGORIA_FINAL")["NIVEL_DE_FORMACIÓN"]
+    )
+    if "CATEGORIA_FINAL" in ag.columns:
+        ag["NIVEL_MAYORIT"] = ag["CATEGORIA_FINAL"].map(_nivel_mayorit)
+    else:
+        ag["NIVEL_MAYORIT"] = "ESPECIALIZACIÓN"
+
     for y in range(2020, 2025):
         c_curr = f"suma_primer_curso_{y}"
         c_prev = f"suma_primer_curso_{y-1}"
@@ -1369,19 +1413,26 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
             den_p = p_prev.replace(0, np.nan)
             ag[f"var_prom_{y}"] = (p_curr - p_prev) / den_p
 
-    # Participación = promedio de matrícula de la categoría / suma de promedios de todas las categorías
-    # Validado contra Excel de referencia (Programas_para_valoración.xlsx)
-    # Refleja el peso relativo del programa típico de cada categoría en el mercado
+    # participacion_2019 — mantiene matrícula total como referencia histórica
     total_prom_2019 = ag["prom_matricula_2019"].sum() if "prom_matricula_2019" in ag.columns else 0
-    total_prom_2024 = ag["prom_matricula_2024"].sum() if "prom_matricula_2024" in ag.columns else 0
     if total_prom_2019 and total_prom_2019 != 0:
         ag["participacion_2019"] = ag["prom_matricula_2019"] / total_prom_2019
     else:
         ag["participacion_2019"] = np.nan
-    if total_prom_2024 and total_prom_2024 != 0:
-        ag["participacion_2024"] = ag["prom_matricula_2024"] / total_prom_2024
+
+    # participacion_2024 — sobre primer_curso (peso relativo del flujo de nuevos)
+    if "prom_primer_curso_2024" in ag.columns:
+        total_pc_2024 = ag["prom_primer_curso_2024"].sum()
+        if total_pc_2024 and total_pc_2024 != 0:
+            ag["participacion_2024"] = ag["prom_primer_curso_2024"] / total_pc_2024
+        else:
+            ag["participacion_2024"] = np.nan
     else:
-        ag["participacion_2024"] = np.nan
+        total_prom_2024 = ag["prom_matricula_2024"].sum() if "prom_matricula_2024" in ag.columns else 0
+        ag["participacion_2024"] = (
+            ag["prom_matricula_2024"] / total_prom_2024
+            if total_prom_2024 != 0 else np.nan
+        )
 
     # AAGR_suma y AAGR_prom
     var_suma_cols = [f"var_suma_{y}" for y in range(2020, 2025) if f"var_suma_{y}" in ag.columns]
@@ -1397,14 +1448,49 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         mask_cagr = (suma_2019 > 0) & (suma_2024 > 0)
         ag.loc[mask_cagr, "CAGR_suma"] = (suma_2024[mask_cagr] / suma_2019[mask_cagr]) ** (1 / 5) - 1
 
-    # ── AAGR_ROBUSTO: métrica de crecimiento corregida por calidad de base histórica ──
-    UMBRAL_BASE = 100  # matriculados en 2019 necesarios para confiar en AAGR_suma
-    if "suma_matricula_2019" in ag.columns and "suma_matricula_2024" in ag.columns:
-        m19 = ag["suma_matricula_2019"].fillna(0)
-        m24 = ag["suma_matricula_2024"].fillna(0)
+    # CAGR_primer_curso — tasa compuesta sobre flujo de nuevos matriculados
+    ag["CAGR_primer_curso"] = np.nan
+    if "suma_primer_curso_2019" in ag.columns and "suma_primer_curso_2024" in ag.columns:
+        pc_2019 = ag["suma_primer_curso_2019"]
+        pc_2024 = ag["suma_primer_curso_2024"]
+        mask_cagr_pc = (pc_2019 > 0) & (pc_2024 > 0)
+        ag.loc[mask_cagr_pc, "CAGR_primer_curso"] = (
+            pc_2024[mask_cagr_pc] / pc_2019[mask_cagr_pc]
+        ) ** (1 / 5) - 1
 
-        cond_normal = m19 >= UMBRAL_BASE
-        cond_pequena = (m19 > 0) & (m19 < UMBRAL_BASE)
+    # AAGR_ROBUSTO — árbol de decisión con UMBRAL_BASE diferenciado por universo.
+    # El umbral determina cuándo la base histórica (suma_primer_curso_2019) es suficientemente
+    # grande para confiar en AAGR en vez de CAGR.
+    # Valores calibrados sobre distribución real Colombia:
+    #   ESP: P10 de suma_PC_2019 = 13 → umbral 30 clasifica 69% como NORMAL ✓
+    #   MAE: P10 de suma_PC_2019 = 12 → umbral 15 clasifica 73% como NORMAL ✓
+    #   PRE: P10 de suma_PC_2019 = 54 → umbral 100 clasifica 65% como NORMAL ✓
+    _ESP_NIVELES = {
+        "ESPECIALIZACIÓN", "ESPECIALIZACIÓN MÉDICO QUIRÚRGICA",
+        "ESPECIALIZACIÓN TECNOLÓGICA", "ESPECIALIZACIÓN TÉCNICO PROFESIONAL",
+    }
+    _MAE_NIVELES = {"MAESTRÍA"}
+    _PRE_NIVELES = {"UNIVERSITARIO"}
+
+    def _umbral_base(nivel: str) -> int:
+        nivel_u = str(nivel).strip().upper()
+        if nivel_u in _PRE_NIVELES:
+            return 100    # Pregrado: base histórica mínima alta (mayor volumen)
+        if nivel_u in _MAE_NIVELES:
+            return 15     # Maestría: base histórica pequeña → umbral bajo
+        return 30         # Especialización (default): umbral intermedio
+
+    # Calcular UMBRAL_BASE por fila usando NIVEL_MAYORIT
+    if "NIVEL_MAYORIT" in ag.columns:
+        _umbral_series = ag["NIVEL_MAYORIT"].apply(_umbral_base)
+    else:
+        _umbral_series = pd.Series(30, index=ag.index)  # fallback global
+    if "suma_primer_curso_2019" in ag.columns and "suma_primer_curso_2024" in ag.columns:
+        m19 = ag["suma_primer_curso_2019"].fillna(0)
+        m24 = ag["suma_primer_curso_2024"].fillna(0)
+
+        cond_normal = m19 >= _umbral_series
+        cond_pequena = (m19 > 0) & (m19 < _umbral_series)
         cond_nueva = (m19 == 0) & (m24 > 0)
         cond_extinta = (m24 == 0) & (m19 > 0)
         cond_sin_act = (m19 == 0) & (m24 == 0)
@@ -1416,31 +1502,47 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         tipo[cond_sin_act] = "SIN_ACTIVIDAD"
         ag["TIPO_CRECIMIENTO"] = tipo
 
-        aagr_r = ag["AAGR_suma"].copy()
-        if "CAGR_suma" in ag.columns:
-            mask_cagr_ok = cond_pequena & ag["CAGR_suma"].notna()
-            aagr_r[mask_cagr_ok] = ag.loc[mask_cagr_ok, "CAGR_suma"]
+        aagr_r = (
+            ag["AAGR_primer_curso"].copy()
+            if "AAGR_primer_curso" in ag.columns
+            else pd.Series(np.nan, index=ag.index)
+        )
+        if "CAGR_primer_curso" in ag.columns:
+            mask_cagr_ok = cond_pequena & ag["CAGR_primer_curso"].notna()
+            aagr_r[mask_cagr_ok] = ag.loc[mask_cagr_ok, "CAGR_primer_curso"]
 
         aagr_r[cond_nueva] = np.nan
         aagr_r[cond_extinta] = -1.0
         aagr_r[cond_sin_act] = np.nan
         ag["AAGR_ROBUSTO"] = aagr_r
 
-        log_info(
-            "AAGR_ROBUSTO calculado. Tipos: "
-            + ", ".join(f"{t}={int((tipo == t).sum())}" for t in tipo.dropna().unique())
+        _tipos_str = ", ".join(
+            f"{t}={int((tipo == t).sum())}"
+            for t in ["NORMAL", "BASE_PEQUENA", "CATEGORIA_NUEVA", "EXTINTA", "SIN_ACTIVIDAD"]
+            if (tipo == t).any()
         )
+        if "NIVEL_MAYORIT" in ag.columns:
+            for _univ in ["ESPECIALIZACIÓN", "MAESTRÍA", "UNIVERSITARIO"]:
+                _mask_univ = ag["NIVEL_MAYORIT"].astype(str).str.upper() == _univ.upper()
+                _n_normal = int((tipo[_mask_univ] == "NORMAL").sum())
+                _n_total = int(_mask_univ.sum())
+                log_info(
+                    f"  AAGR {_univ[:3]}: NORMAL={_n_normal}/{_n_total} "
+                    f"({_n_normal / max(_n_total, 1) * 100:.0f}%)"
+                )
+        log_info(f"AAGR_ROBUSTO calculado. {_tipos_str}")
     else:
-        ag["AAGR_ROBUSTO"] = ag.get("AAGR_suma", pd.Series(np.nan, index=ag.index))
+        ag["AAGR_ROBUSTO"] = ag.get("AAGR_primer_curso", pd.Series(np.nan, index=ag.index))
         ag["TIPO_CRECIMIENTO"] = "SIN_DATOS"
+        log_info("AAGR_ROBUSTO: no se encontraron columnas suma_primer_curso_2019/2024.")
 
     # ── MOMENTUM YoY: crecimiento del último año vs. tendencia histórica ──────────
     # var_yoy_2024: variación real del último año (2023→2024)
     # diferencial_tendencia: cuánto se desvía el YoY del AAGR histórico
     # SEÑAL_TENDENCIA: etiqueta legible para el analista
-    if "suma_matricula_2023" in ag.columns and "suma_matricula_2024" in ag.columns:
-        m23 = pd.to_numeric(ag["suma_matricula_2023"], errors="coerce").fillna(0)
-        m24 = pd.to_numeric(ag["suma_matricula_2024"], errors="coerce").fillna(0)
+    if "suma_primer_curso_2023" in ag.columns and "suma_primer_curso_2024" in ag.columns:
+        m23 = pd.to_numeric(ag["suma_primer_curso_2023"], errors="coerce").fillna(0)
+        m24 = pd.to_numeric(ag["suma_primer_curso_2024"], errors="coerce").fillna(0)
         den_yoy = m23.replace(0, np.nan)
         ag["var_yoy_2024"] = (m24 - m23) / den_yoy
 
@@ -1478,7 +1580,7 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         ag["var_yoy_2024"] = np.nan
         ag["diferencial_tendencia"] = np.nan
         ag["SEÑAL_TENDENCIA"] = "SIN_DATO"
-        log_info("Momentum YoY: no se encontraron columnas suma_matricula_2023/2024.")
+        log_info("Momentum YoY: no se encontraron columnas suma_primer_curso_2023/2024.")
 
     # Bloque B: pct_no_matriculados y var_inscritos
     if "inscritos_2023_suma" in ag.columns and "suma_matricula_2023" in ag.columns:
@@ -1537,8 +1639,14 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         ag["pct_con_matricula"] = ag["num_programas_2024"] / ag["programas_activos"].replace(0, np.nan)
     else:
         ag["pct_con_matricula"] = np.nan
-    if "num_programas_2024" in ag.columns and "suma_matricula_2024" in ag.columns:
-        ag["prom_matricula_por_programa_2024"] = ag["suma_matricula_2024"] / ag["num_programas_2024"].replace(0, np.nan)
+    # prom_matricula_por_programa_2024 — ahora es prom de nuevos matriculados por programa.
+    # Mantener el nombre para compatibilidad con scoring.py y valorizacion_pipeline.py.
+    if "prom_primer_curso_2024" in ag.columns:
+        ag["prom_matricula_por_programa_2024"] = ag["prom_primer_curso_2024"]
+    elif "num_programas_2024" in ag.columns and "suma_matricula_2024" in ag.columns:
+        ag["prom_matricula_por_programa_2024"] = (
+            ag["suma_matricula_2024"] / ag["num_programas_2024"].replace(0, np.nan)
+        )
     else:
         ag["prom_matricula_por_programa_2024"] = np.nan
 
@@ -1656,6 +1764,7 @@ _BLOQUES_TOTAL = [
     ]),
     # ── 4. PARTICIPACIÓN Y CRECIMIENTO ────────────────────────────────────
     ("PARTICIPACIÓN Y CRECIMIENTO", [
+        "NIVEL_MAYORIT",                                    # universo dominante de la categoría
         "participacion_2019", "participacion_2024",
         "AAGR_suma", "AAGR_prom", "CAGR_suma",
         "AAGR_ROBUSTO", "TIPO_CRECIMIENTO",
@@ -1710,7 +1819,7 @@ _BLOQUES_TOTAL = [
     ]),
     # ── 11. BLOQUE SCORING: valor | score lado a lado (igual que referente) ─
     ("SCORING", [
-        "prom_matricula_por_programa_2024", "score_matricula",
+        "prom_primer_curso_2024",   "score_matricula",   # valor visible = primer_curso
         "participacion_2024", "score_participacion",
         "AAGR_ROBUSTO", "score_AAGR",
         "salario_promedio", "score_salario",
@@ -2485,6 +2594,20 @@ def run_segmentos_regionales(
     resultados: dict[str, pd.DataFrame] = {}
 
     log_etapa_iniciada("Segmentos regionales/modales")
+
+    _scoring_path = Path(__file__).resolve().parent / "scoring.py"
+    for _seg_name in ["Antioquia", "Bogota", "Eje_Cafetero", "Virtual"]:
+        _cache = TEMP_DIR / f"agregado_{_seg_name}.parquet"
+        if (
+            _cache.exists()
+            and _scoring_path.exists()
+            and _scoring_path.stat().st_mtime > _cache.stat().st_mtime
+        ):
+            try:
+                _cache.unlink()
+                log_info(f"[Cache] Invalidado {_cache.name} (scoring.py más reciente)")
+            except OSError as e:
+                log_warning(f"[Cache] No se pudo invalidar {_cache.name}: {e}")
 
     for seg in SEGMENTOS:
         if cancel_event is not None and cancel_event.is_set():
@@ -3302,7 +3425,13 @@ def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
-        df_raw = pd.read_excel(PROGRAMAS_EAFIT)
+        # Misma convención que valorizacion_pipeline / _leer_programas_eafit:
+        # fila 0 = bloques; fila 1 = encabezados reales.
+        df_raw = (
+            pd.read_excel(PROGRAMAS_EAFIT, header=1)
+            if str(PROGRAMAS_EAFIT).lower().endswith((".xlsx", ".xlsm"))
+            else pd.read_excel(PROGRAMAS_EAFIT)
+        )
     except Exception as exc:
         log(f"✗ Error leyendo {PROGRAMAS_EAFIT.name}: {exc}")
         return pd.DataFrame()
@@ -3311,15 +3440,20 @@ def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
         log("⚠ Fase 6: el archivo EAFIT viene vacío. Se omite hoja.")
         return pd.DataFrame()
 
-    # Normalizar columnas (tolerante a espacios extra)
+    # Normalizar columnas — misma lógica específica que _leer_programas_eafit()
+    # para evitar capturar columnas de scoring que también contienen "programa".
     rename_map: dict[str, str] = {}
     for col in df_raw.columns:
-        col_strip = str(col).strip()
-        if "Programas" in col_strip or "programa" in col_strip.lower():
+        col_lower = str(col).strip().lower()
+        if "proceso" in col_lower or "calidad" in col_lower:
             rename_map[col] = "PROGRAMA_EAFIT"
-        elif "estudio" in col_strip.lower() or "mercado" in col_strip.lower():
+        elif "estudio" in col_lower and "mercado" in col_lower:
             rename_map[col] = "TIENE_ESTUDIO_MERCADO"
     df_raw = df_raw.rename(columns=rename_map)
+
+    # Guardia contra columnas duplicadas: si aún existen dos columnas con el mismo
+    # nombre (improbable, pero defensivo), conservar solo la primera.
+    df_raw = df_raw.loc[:, ~df_raw.columns.duplicated(keep="first")]
 
     if "PROGRAMA_EAFIT" not in df_raw.columns:
         log("✗ No se encontró la columna de nombres de programa en el archivo.")
@@ -3340,8 +3474,12 @@ def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
     if "TIENE_ESTUDIO_MERCADO" not in df_eafit.columns:
         df_eafit["TIENE_ESTUDIO_MERCADO"] = False
 
-    # Asignar categoría de mercado por mapeo exacto
-    df_eafit["CATEGORIA_MERCADO"] = df_eafit["PROGRAMA_EAFIT"].map(MAPEO_PROGRAMAS_EAFIT)
+    # Asignar categoría de mercado por mapeo (tolerante a mayúsculas/minúsculas)
+    # El input puede venir mezclado: pregrados en minúsculas (catálogo) y posgrados en Title Case.
+    _mapeo_normalizado = {str(k).strip().lower(): v for k, v in MAPEO_PROGRAMAS_EAFIT.items()}
+    df_eafit["CATEGORIA_MERCADO"] = (
+        df_eafit["PROGRAMA_EAFIT"].astype(str).str.strip().str.lower().map(_mapeo_normalizado)
+    )
 
     sin_mapeo = df_eafit[df_eafit["CATEGORIA_MERCADO"].isna()]
     if not sin_mapeo.empty:
@@ -3352,12 +3490,37 @@ def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
             + "\n".join(f"    - {p}" for p in muestras)
         )
 
-    # Extraer nivel de formación (heurística por prefijo del nombre)
+    # Extraer nivel de formación desde el catálogo EAFIT (fuente de verdad)
+    # La heurística por prefijo fallaba con pregrados de nombre genérico
+    # (ej. "Ingeniería de Sistemas" no empieza por "pregrado").
+    try:
+        _df_cat = (
+            pd.read_excel(ARCHIVO_CATALOGO_EAFIT)
+            if str(ARCHIVO_CATALOGO_EAFIT).endswith(".xlsx")
+            else pd.read_csv(ARCHIVO_CATALOGO_EAFIT, encoding="utf-8-sig")
+        )
+        # Normalizar nombre para cruce
+        _df_cat["_nombre_cat_norm"] = _df_cat["Nombre Programa EAFIT"].str.lower().str.strip()
+        _cat_nivel = _df_cat.set_index("_nombre_cat_norm")["NIVEL_DE_FORMACIÓN"].to_dict()
+    except Exception:
+        _cat_nivel = {}
+
     def _nivel(nombre: str) -> str:
-        n = str(nombre).strip().lower()
-        if n.startswith(("maestría", "maestria", "master", "msc")):
+        n_norm = str(nombre).strip().lower()
+        nivel_cat = _cat_nivel.get(n_norm, "")
+        if nivel_cat:
+            n_lv = str(nivel_cat).strip().lower()
+            if "maestr" in n_lv or "magist" in n_lv:
+                return "Maestría"
+            if "universit" in n_lv or "pregrad" in n_lv:
+                return "Pregrado"
+            if "especial" in n_lv:
+                return "Especialización"
+        # Fallback heurístico si el programa no está en el catálogo
+        n_lower = n_norm
+        if n_lower.startswith(("maestría", "maestria", "master", "msc")):
             return "Maestría"
-        if n.startswith(("pregrado", "licenciatura")):
+        if n_lower.startswith(("pregrado", "licenciatura")):
             return "Pregrado"
         return "Especialización"
 
@@ -3885,7 +4048,7 @@ def exportar_base_maestra_excel(ruta_salida: Path | None = None) -> Path:
     """
     Exporta un Excel formateado con los resultados de la Fase 1 (base_maestra.parquet).
 
-    Filtra solo Especializaciones y Maestrías (NIVELES_MERCADO).
+    Filtra los niveles activos en NIVELES_MERCADO (incluye UNIVERSITARIO si está configurado).
     Genera dos hojas:
       - 'Programas_Categorizados': todos los programas filtrados con sus categorías.
       - 'Revision_Requerida': solo los que tienen REQUIERE_REVISION=True (confianza KNN < 50%).
@@ -3913,7 +4076,7 @@ def exportar_base_maestra_excel(ruta_salida: Path | None = None) -> Path:
     n_total = len(df)
     if col_nivel in df.columns and NIVELES_MERCADO:
         df = df[df[col_nivel].isin(NIVELES_MERCADO)].copy()
-        log_info(f"[Exportar F1] Filtro niveles: {n_total:,} → {len(df):,} programas (solo Esp+Maestría)")
+        log_info(f"[Exportar F1] Filtro niveles: {n_total:,} → {len(df):,} programas. Niveles activos: {NIVELES_MERCADO}")
     else:
         log_info("[Exportar F1] No se aplicó filtro de niveles (columna no disponible).")
 

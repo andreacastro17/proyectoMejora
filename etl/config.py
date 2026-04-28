@@ -263,6 +263,7 @@ NIVELES_MERCADO: list[str] = [
     "ESPECIALIZACIÓN MÉDICO QUIRÚRGICA",
     "ESPECIALIZACIÓN TECNOLÓGICA",
     "ESPECIALIZACIÓN TÉCNICO PROFESIONAL",
+    "UNIVERSITARIO",
 ]
 
 # ── Análisis regional ────────────────────────────────────────────────────────
