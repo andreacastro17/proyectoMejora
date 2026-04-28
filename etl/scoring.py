@@ -2,6 +2,11 @@
 Lógica de calificación ponderada por categoría (Fase 4 pipeline mercado).
 
 Cada variable se mapea a score 1-5 según umbrales; calificacion_final = suma(score_i × peso_i).
+
+score_matricula: quintiles fijos (P20/P40/P60/P80) sobre ``prom_matricula_por_programa_2024``
+calibrados en el agregado **Colombia** (no por segmento regional).
+
+score_participacion: quintiles por **cuantiles del segmento** actual (``participacion_2024``).
 """
 
 from __future__ import annotations
@@ -9,72 +14,46 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from etl.pipeline_logger import log_info
+
+# Pesos de las dos métricas con lógica propia (deben coincidir con el resto de SCORING_CONFIG).
+_SCORE_MATRICULA_PESO = 0.30
+_SCORE_PARTICIPACION_PESO = 0.15
+
+# score_matricula — percentiles reales de prom_primer_curso_2024 sobre Colombia (288 cats)
+# Ejecución: pipeline post-primer_curso · Universos mezclados ESP+MAE+PRE
+# Distribución resultante: ~58 categorías por score (quintílica perfecta)
+_SCORE_MAT_P20 = 3.9
+_SCORE_MAT_P40 = 8.3
+_SCORE_MAT_P60 = 15.0
+_SCORE_MAT_P80 = 27.6
+
 # Umbrales: lista de (límite_superior_inclusivo, score). Valores por encima del último → score 5 (o 1 si inverse).
 # Para "inverse" (menor es mejor), se usa score 5 para el rango más bajo.
 SCORING_CONFIG = [
     {
-        "col": "prom_matricula_2024",
-        "out": "score_matricula",
-        "peso": 0.30,
-        # Umbrales validados contra Excel de referencia (Programas_para_valoración.xlsx)
-        # Evalúa el tamaño típico de un programa en la categoría, no el volumen total
-        # p25=17.6, p50=27.3, p75=40.5 del universo Esp+Maestría
-        "thresholds": [(0, 1), (20, 2), (50, 3), (80, 4)],
-        "inverse": False,
-    },
-    {
-        "col": "participacion_2024",
-        "out": "score_participacion",
-        "peso": 0.15,
-        # Umbrales anclados a percentiles reales de participacion_2024
-        # (Colombia 2024, n=288 categorías). Umbrales fijos para que los scores
-        # sean comparables entre segmentos (Bogotá, Antioquia, Eje Cafetero, Virtual).
-        # Metodología: posición relativa en el mercado nacional de referencia.
-        #   Score 1: < p10 = 0.052%  → categoría marginal
-        #   Score 2: < p25 = 0.147%  → por debajo del primer cuartil
-        #   Score 3: < p50 = 0.269%  → mercado medio (mediana)
-        #   Score 4: < p75 = 0.425%  → mercado relevante
-        #   Score 5: > p75 = 0.425%  → top cuartil
-        # Distribución resultante: 10% / 15% / 25% / 25% / 25%
-        # Recalibrar cuando el universo de categorías cambie significativamente
-        # (>10% de variación en p50 o p75 respecto a los valores aquí documentados).
-        "thresholds": [(0.000522, 1), (0.001467, 2), (0.002689, 3), (0.004247, 4)],
-        "inverse": False,
-    },
-    {
         "col": "AAGR_ROBUSTO",
         "out": "score_AAGR",
         "peso": 0.20,
-        # Distribución actual: score1=33% score2=22% score3=34% score4=6% score5=4%
-        # Problema: 33% en score 1, umbrales correctos pero el mercado colombiano
-        # tiene crecimiento moderado. Umbrales se mantienen — la distribución refleja
-        # la realidad: muchos mercados decrecen o crecen poco.
-        # NO CAMBIAR — distribución es informativa, no un problema de calibración.
-        "thresholds": [(0, 1), (0.04, 2), (0.19, 3), (0.30, 4)],
+        # Percentiles P20/P40/P60/P80 de AAGR_ROBUSTO (primer_curso) Colombia 288 cats
+        # Antes (total mat): 0% / 4% / 19% / 30%  ← calibrado para stock, no flujo
+        # Ahora (primer_curso): P80 real = 16.5%  (crecimiento de flujo más volátil)
+        "thresholds": [(0.00, 1), (0.038, 2), (0.084, 3), (0.165, 4)],
         "inverse": False,
     },
     {
         "col": "salario_promedio_smlmv",
         "out": "score_salario",
         "peso": 0.15,
-        # Distribución actual: score1=1% score2=2% score3=11% score4=42% score5=44%
-        # Problema crítico: 86% en scores 4-5. Mediana real = 5.74 SMLMV.
-        # El umbral de score5 (>6 SMLMV) es demasiado bajo — el 44% llega ahí fácilmente.
-        # Recalibrado con percentiles reales: p25=4.60, p50=5.74, p75=7.24, p90=8.89
-        # Alineado también con el Excel manual (umbrales 5 y 8 SMLMV)
-        "thresholds": [(2, 1), (4, 2), (5, 3), (7, 4)],
+        # Alineado con Excel referencia manual: score 5 = >= 8 SMLMV (médicos, TI senior)
+        # Rango real Colombia: P20=3.2 / P40=4.7 / P60=5.5 / P80=7.0 SMLMV
+        "thresholds": [(2, 1), (3, 2), (5, 3), (8, 4)],
         "inverse": False,
     },
     {
         "col": "pct_no_matriculados_2024",
         "out": "score_pct_no_matriculados",
         "peso": 0.10,
-        # Distribución actual: score5=79% (la mayoría)
-        # Causa: mediana = 0 (muchas categorías sin datos de inscritos → fill con 0.20 → score4-5)
-        # Los umbrales son correctos conceptualmente. El fill de 0.20 produce score4, no score5.
-        # El 79% en score5 se debe a categorías con tasa real baja — es correcto.
-        # NO CAMBIAR umbrales. Sí ajustar el fill neutral de 0.20 a 0.25 para ser más conservador
-        # cuando no hay datos de inscritos (0.25 queda en score3 = neutro real).
         "thresholds": [(0.10, 5), (0.20, 4), (0.30, 3), (0.50, 2)],
         "inverse": True,
     },
@@ -82,10 +61,6 @@ SCORING_CONFIG = [
         "col": "num_programas_2024",
         "out": "score_num_programas",
         "peso": 0.05,
-        # Distribución actual: score5=27% score4=30% score3=22% score2=15% score1=6%
-        # Percentiles reales: p25=5, p50=13, p75=27, p90=43, p95=68
-        # Distribución razonablemente uniforme. Ajuste menor al último umbral
-        # para alinear con p95 real (68 vs 60 actual — impacto mínimo).
         "thresholds": [(5, 5), (15, 4), (30, 3), (70, 2)],
         "inverse": True,
     },
@@ -93,11 +68,6 @@ SCORING_CONFIG = [
         "col": "distancia_costo_pct",
         "out": "score_costo",
         "peso": 0.05,
-        # Distribución actual: score1=22% score2=51% score3=7% score4=4% score5=16%
-        # Problema grave: 51% en score2, distribución muy sesgada.
-        # Causa: mediana real = -36.9% (mayoría de programas más baratos que el benchmark).
-        # Los umbrales actuales (-50, -20, 0, 20) no reflejan esta realidad.
-        # Recalibrado con percentiles reales: p25=-48% p50=-37% p75=-18% p90=+79%
         "thresholds": [(-60, 1), (-40, 2), (-15, 3), (20, 4)],
         "inverse": False,
     },
@@ -113,12 +83,10 @@ def _value_to_score(value: float, thresholds: list[tuple[float, int]], inverse: 
     if pd.isna(value) or (isinstance(value, float) and np.isinf(value)):
         return 1.0
     if inverse:
-        # Menor es mejor: score 5 para valores bajos, 1 para altos
         for bound, score in thresholds:
             if value <= bound:
                 return float(score)
         return 1.0
-    # Mayor es mejor: score 1 para valores bajos, 5 para altos
     for bound, score in thresholds:
         if value <= bound:
             return float(score)
@@ -132,15 +100,84 @@ def apply_scoring(df: pd.DataFrame) -> pd.DataFrame:
     calificacion_final está siempre entre 1.0 y 5.0.
     """
     out = df.copy()
-    total_peso = sum(c["peso"] for c in SCORING_CONFIG)
+    total_peso = _SCORE_MATRICULA_PESO + _SCORE_PARTICIPACION_PESO + sum(c["peso"] for c in SCORING_CONFIG)
     if abs(total_peso - 1.0) > 1e-9:
-        raise ValueError(f"Los pesos en SCORING_CONFIG deben sumar 1.0, suman {total_peso}")
+        raise ValueError(f"Los pesos deben sumar 1.0, suman {total_peso}")
+
+    # ── DIAGNÓSTICO DE DISTRIBUCIÓN ───────────────────────────────────────────
+    _cols_diag = {
+        "prom_primer_curso_2024": "PRIMER_CURSO",
+        "prom_matricula_por_programa_2024": "MAT",
+        "prom_matricula_2024": "MAT_PROM",
+        "participacion_2024": "PART",
+        "AAGR_ROBUSTO": "AAGR",
+        "salario_promedio_smlmv": "SAL",
+    }
+    for _col, _lbl in _cols_diag.items():
+        if _col in out.columns:
+            _s = pd.to_numeric(out[_col], errors="coerce").dropna()
+            if len(_s) > 0:
+                _pcts = np.percentile(_s, [10, 20, 40, 60, 80, 90])
+                log_info(
+                    f"[Scoring diag] {_lbl} n={len(_s)} | "
+                    f"P10={_pcts[0]:.4g} P20={_pcts[1]:.4g} P40={_pcts[2]:.4g} "
+                    f"P60={_pcts[3]:.4g} P80={_pcts[4]:.4g} P90={_pcts[5]:.4g}"
+                )
 
     # Con inscritos SNIES (fuente primaria desde 2025), la cobertura es >80%.
-    # El fill de 0.25 aplica solo a programas nuevos o sin código SNIES válido.
-    PCT_NAN_FILL = 0.25  # 0.25 cae en score 3 (neutro real) en vez de score 4
+    PCT_NAN_FILL = 0.25
     if "pct_no_matriculados_2024" in out.columns:
         out["pct_no_matriculados_2024"] = out["pct_no_matriculados_2024"].fillna(PCT_NAN_FILL)
+
+    # score_matricula — quintiles nacionales fijos (promedio por programa en la categoría, 2024)
+    # Fase 7 arma filas solo con prom_matricula_2024 (a menudo ya es prom. por programa); usar fallback.
+    if "prom_matricula_por_programa_2024" in out.columns:
+        _s_mat = pd.to_numeric(out["prom_matricula_por_programa_2024"], errors="coerce")
+    elif "prom_matricula_2024" in out.columns:
+        _s_mat = pd.to_numeric(out["prom_matricula_2024"], errors="coerce")
+    else:
+        _s_mat = None
+    if _s_mat is not None:
+        _bins = [-np.inf, _SCORE_MAT_P20, _SCORE_MAT_P40, _SCORE_MAT_P60, _SCORE_MAT_P80, np.inf]
+        _cat_mat = pd.cut(
+            _s_mat,
+            bins=_bins,
+            labels=[1, 2, 3, 4, 5],
+            right=True,
+        )
+        out["score_matricula"] = (
+            pd.to_numeric(_cat_mat, errors="coerce").fillna(1.0).astype(int)
+        )
+    else:
+        out["score_matricula"] = 1
+
+    # score_participacion — cuantiles del segmento en curso (mercado regional relativo)
+    if "participacion_2024" in out.columns:
+        _part_series = pd.to_numeric(out["participacion_2024"], errors="coerce")
+        _p20 = float(_part_series.quantile(0.20))
+        _p40 = float(_part_series.quantile(0.40))
+        _p60 = float(_part_series.quantile(0.60))
+        _p80 = float(_part_series.quantile(0.80))
+        if any(map(pd.isna, (_p20, _p40, _p60, _p80))):
+            out["score_participacion"] = 1
+        else:
+            _qs = [_p20, _p40, _p60, _p80]
+            for _i in range(1, len(_qs)):
+                if _qs[_i] <= _qs[_i - 1]:
+                    _qs[_i] = _qs[_i - 1] + 1e-15
+            _p20, _p40, _p60, _p80 = _qs
+            _bins_p = [-np.inf, _p20, _p40, _p60, _p80, np.inf]
+            _cat_p = pd.cut(
+                _part_series,
+                bins=_bins_p,
+                labels=[1, 2, 3, 4, 5],
+                right=True,
+            )
+            out["score_participacion"] = (
+                pd.to_numeric(_cat_p, errors="coerce").fillna(1.0).astype(int)
+            )
+    else:
+        out["score_participacion"] = 1
 
     for cfg in SCORING_CONFIG:
         col = cfg["col"]
@@ -153,8 +190,17 @@ def apply_scoring(df: pd.DataFrame) -> pd.DataFrame:
         out[out_col] = out[col].apply(
             lambda v: _value_to_score(float(v) if pd.notna(v) else np.nan, thresholds, inverse)
         )
+
     out["calificacion_final"] = 0.0
+    out["calificacion_final"] += out["score_matricula"].astype(float) * _SCORE_MATRICULA_PESO
+    out["calificacion_final"] += out["score_participacion"].astype(float) * _SCORE_PARTICIPACION_PESO
     for cfg in SCORING_CONFIG:
         out["calificacion_final"] += out[cfg["out"]] * cfg["peso"]
     out["calificacion_final"] = out["calificacion_final"].clip(1.0, 5.0).round(4)
+
+    for _sc in ["score_matricula", "score_participacion", "score_AAGR", "score_salario"]:
+        if _sc in out.columns:
+            _dist = out[_sc].value_counts().sort_index().to_dict()
+            log_info(f"[Scoring val] {_sc}: {_dist}")
+
     return out
