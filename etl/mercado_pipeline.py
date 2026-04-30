@@ -661,8 +661,14 @@ def run_fase2() -> None:
     any_matriculas = False
     any_ole = False
 
-    # Scraper A: matrículas e inscritos por año y semestre (2019-2024 × 1, 2)
+    # Scraper A: matrículas por semestre + inscritos anual (S1+S2) + primer_curso/graduados por semestre
     for year in range(2019, 2025):
+        try:
+            df_ins = scraper_mat.download_inscritos(year)
+            if df_ins is not None and len(df_ins) > 0:
+                any_matriculas = True
+        except Exception as e:
+            log_warning(f"Inscritos {year}: {e}. Continuando.")
         for semestre in (1, 2):
             try:
                 df_mat = scraper_mat.download_matriculados(year, semestre)
@@ -670,12 +676,6 @@ def run_fase2() -> None:
                     any_matriculas = True
             except Exception as e:
                 log_warning(f"Matriculados {year}-{semestre}: {e}. Continuando.")
-            try:
-                df_ins = scraper_mat.download_inscritos(year, semestre)
-                if df_ins is not None and len(df_ins) > 0:
-                    any_matriculas = True
-            except Exception as e:
-                log_warning(f"Inscritos {year}-{semestre}: {e}. Continuando.")
             try:
                 df_pc = scraper_mat.download_primer_curso(year, semestre)
                 if df_pc is not None and len(df_pc) > 0:
@@ -921,22 +921,54 @@ def run_fase3() -> None:
             base = base.drop(columns=[col_name_mat])
         base = base.merge(merge_m[["_codigo_norm", "matricula"]].rename(columns={"matricula": col_name_mat}), on="_codigo_norm", how="left")
 
-        # Inscritos: sem1 + sem2
-        i1 = _cargar_csv_raw(raw_dir, f"inscritos_{year}_1.csv")
-        i2 = _cargar_csv_raw(raw_dir, f"inscritos_{year}_2.csv")
-        if codigo_col in i1.columns:
-            i1[codigo_col] = _normalizar_codigo_snies(i1[codigo_col])
-        if codigo_col in i2.columns:
-            i2[codigo_col] = _normalizar_codigo_snies(i2[codigo_col])
-        val_i1 = i1.groupby(codigo_col, as_index=False)["INSCRITOS"].sum() if len(i1) > 0 and "INSCRITOS" in i1.columns else pd.DataFrame(columns=[codigo_col, "INSCRITOS"])
-        val_i2 = i2.groupby(codigo_col, as_index=False)["INSCRITOS"].sum() if len(i2) > 0 and "INSCRITOS" in i2.columns else pd.DataFrame(columns=[codigo_col, "INSCRITOS"])
-        merge_i = val_i1.merge(val_i2, on=codigo_col, how="outer", suffixes=("", "_2"))
-        merge_i["inscritos"] = merge_i["INSCRITOS"].fillna(0) + (merge_i["INSCRITOS_2"].fillna(0) if "INSCRITOS_2" in merge_i.columns else 0)
-        merge_i["_codigo_norm"] = _normalizar_codigo_snies(merge_i[codigo_col])
+        # Inscritos: anual S1+S2 (preferido). Fallback a esquema viejo por semestres.
+        i_anual = _cargar_csv_raw(raw_dir, f"inscritos_{year}.csv")
         col_name_ins = f"inscritos_{year}"
-        if col_name_ins in base.columns:
-            base = base.drop(columns=[col_name_ins])
-        base = base.merge(merge_i[["_codigo_norm", "inscritos"]].rename(columns={"inscritos": f"inscritos_{year}"}), on="_codigo_norm", how="left")
+        if len(i_anual) > 0 and "INSCRITOS" in i_anual.columns:
+            if codigo_col in i_anual.columns:
+                i_anual[codigo_col] = _normalizar_codigo_snies(i_anual[codigo_col])
+            val_i = (
+                i_anual.groupby(codigo_col, as_index=False)["INSCRITOS"].sum()
+                if codigo_col in i_anual.columns
+                else pd.DataFrame(columns=[codigo_col, "INSCRITOS"])
+            )
+            val_i["_codigo_norm"] = _normalizar_codigo_snies(val_i[codigo_col])
+            if col_name_ins in base.columns:
+                base = base.drop(columns=[col_name_ins])
+            base = base.merge(
+                val_i[["_codigo_norm", "INSCRITOS"]].rename(columns={"INSCRITOS": col_name_ins}),
+                on="_codigo_norm",
+                how="left",
+            )
+        else:
+            i1 = _cargar_csv_raw(raw_dir, f"inscritos_{year}_1.csv")
+            i2 = _cargar_csv_raw(raw_dir, f"inscritos_{year}_2.csv")
+            if codigo_col in i1.columns:
+                i1[codigo_col] = _normalizar_codigo_snies(i1[codigo_col])
+            if codigo_col in i2.columns:
+                i2[codigo_col] = _normalizar_codigo_snies(i2[codigo_col])
+            val_i1 = (
+                i1.groupby(codigo_col, as_index=False)["INSCRITOS"].sum()
+                if len(i1) > 0 and "INSCRITOS" in i1.columns
+                else pd.DataFrame(columns=[codigo_col, "INSCRITOS"])
+            )
+            val_i2 = (
+                i2.groupby(codigo_col, as_index=False)["INSCRITOS"].sum()
+                if len(i2) > 0 and "INSCRITOS" in i2.columns
+                else pd.DataFrame(columns=[codigo_col, "INSCRITOS"])
+            )
+            merge_i = val_i1.merge(val_i2, on=codigo_col, how="outer", suffixes=("", "_2"))
+            merge_i["inscritos"] = merge_i["INSCRITOS"].fillna(0) + (
+                merge_i["INSCRITOS_2"].fillna(0) if "INSCRITOS_2" in merge_i.columns else 0
+            )
+            merge_i["_codigo_norm"] = _normalizar_codigo_snies(merge_i[codigo_col])
+            if col_name_ins in base.columns:
+                base = base.drop(columns=[col_name_ins])
+            base = base.merge(
+                merge_i[["_codigo_norm", "inscritos"]].rename(columns={"inscritos": col_name_ins}),
+                on="_codigo_norm",
+                how="left",
+            )
 
     # 3.2b Primer curso por año y semestre (2019-2024)
     for year in range(2019, 2025):
@@ -1207,10 +1239,27 @@ def run_fase3() -> None:
         )
     except Exception:
         pass
+    # nuevo_por_primera_matricula: programa que entró al mercado recientemente.
+    # Criterio: sin actividad en el año base (2019) pero con matrícula en alguno de
+    # los últimos 3 años disponibles (2022, 2023, 2024).
+    # Más robusto que FECHA_DE_REGISTRO_EN_SNIES, que incluye programas sin actividad real.
     try:
-        fechas = pd.to_datetime(base.get("FECHA_DE_REGISTRO_EN_SNIES", pd.Series()), errors="coerce")
-        base["nuevo_en_snies_3a"] = fechas >= (pd.Timestamp.today().normalize() - pd.DateOffset(years=3))
-    except Exception:
+        _mat_base = base.get("matricula_2019", pd.Series(0, index=base.index)).fillna(0)
+        _años_recientes = [y for y in [2022, 2023, 2024] if f"matricula_{y}" in base.columns]
+        if _años_recientes:
+            _mat_reciente = base[[f"matricula_{y}" for y in _años_recientes]].fillna(0).max(axis=1)
+            base["nuevo_en_snies_3a"] = (_mat_base == 0) & (_mat_reciente > 0)
+        else:
+            # Fallback a fecha de registro si no hay años recientes de matrícula
+            _fechas = pd.to_datetime(base.get("FECHA_DE_REGISTRO_EN_SNIES", pd.Series()), errors="coerce")
+            base["nuevo_en_snies_3a"] = _fechas >= (pd.Timestamp.today().normalize() - pd.DateOffset(years=3))
+        log_info(
+            f"[Fase 3] programas_nuevos: criterio primera_matricula | "
+            f"nuevos={int(base['nuevo_en_snies_3a'].sum()):,} "
+            f"({base['nuevo_en_snies_3a'].mean()*100:.1f}% del universo)"
+        )
+    except Exception as _e:
+        log_warning(f"[Fase 3] no se pudo calcular nuevo_en_snies_3a: {_e}")
         base["nuevo_en_snies_3a"] = False
     base["nuevo_en_snies_3a"] = base["nuevo_en_snies_3a"].fillna(False)
     mat_2024 = base.get("matricula_2024", pd.Series(0, index=base.index)).fillna(0)
@@ -1272,7 +1321,7 @@ def run_fase3() -> None:
     log_etapa_completada("Fase 3: Consolidación en sábana única", f"{n} filas")
 
 
-def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
+def run_fase4_desde_sabana(df: pd.DataFrame, modo_local: bool = False) -> pd.DataFrame:
     """
     Ejecuta la lógica de agregación y scoring de la Fase 4 a partir de un DataFrame de sábana ya cargado.
 
@@ -1583,56 +1632,85 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
         log_info("Momentum YoY: no se encontraron columnas suma_primer_curso_2023/2024.")
 
     # Bloque B: pct_no_matriculados y var_inscritos
-    if "inscritos_2023_suma" in ag.columns and "suma_matricula_2023" in ag.columns:
-        den = ag["inscritos_2023_suma"].replace(0, np.nan)
-        pct_raw = (ag["inscritos_2023_suma"] - ag["suma_matricula_2023"]) / den
-        # where(>=0): cuando inscritos < matrícula (dato inconsistente), se deja NaN
-        # para que scoring aplique fill neutral (0.25 → score 3 neutro).
-        # clip(upper=1): limitar máximo a 100% de no matriculados.
-        # Cuando inscritos = 0 (sin datos), también queda NaN → fill neutral.
-        ag["pct_no_matriculados_2023"] = pct_raw.where(pct_raw >= 0).clip(upper=1)
-    else:
-        ag["pct_no_matriculados_2023"] = np.nan
-    # pct_no_matriculados_2024: inscritos que no se matricularon
-    # El SNIES de posgrado tiene inscritos < matriculados frecuentemente
-    # (no hay fase de inscripción separada). Estrategia de fallback por año:
-    #   1. Usar 2024 si inscritos_2024 >= matricula_2024 (dato coherente)
-    #   2. Fallback a 2023 si el de 2024 es inconsistente y el de 2023 es coherente
-    #   3. NaN (fill 0.25 en scoring) si ambos son inconsistentes
+    # Fórmula: pct = (inscritos - primer_curso) / inscritos
+    # Comparar inscritos vs primer_curso (no vs matricula_total):
+    #   inscritos      = personas que aplicaron ese año
+    #   primer_curso   = personas que se matricularon por primera vez
+    #   pct_no_mat     = tasa de rechazo/abandono en la transición inscripción→matrícula
+    # Comparar con matricula_total era incorrecto: matrícula acumula múltiples cohortes
+    # y siempre supera a inscritos (ratio típico: ins/mat ≈ 0.3–0.7).
 
-    def _calc_pct(ins_col, mat_col):
-        """Devuelve la tasa solo cuando ins >= mat, NaN si inconsistente."""
-        den = ag[ins_col].replace(0, np.nan)
-        raw = (ag[ins_col] - ag[mat_col]) / den
-        return raw.where(raw >= 0).clip(upper=1)
+    def _calc_pct_vs_pc(ins_col: str, pc_col: str) -> "pd.Series":
+        """pct = (inscritos - primer_curso) / inscritos, clip [0, 1]."""
+        if ins_col not in ag.columns or pc_col not in ag.columns:
+            return pd.Series(np.nan, index=ag.index)
+        ins = pd.to_numeric(ag[ins_col], errors="coerce").fillna(0)
+        pc = pd.to_numeric(ag[pc_col], errors="coerce").fillna(0)
+        den = ins.replace(0, np.nan)
+        return ((ins - pc) / den).clip(lower=0, upper=1)
 
-    pct_2024 = _calc_pct("inscritos_2024_suma", "suma_matricula_2024") \
-        if "inscritos_2024_suma" in ag.columns and "suma_matricula_2024" in ag.columns \
-        else pd.Series(np.nan, index=ag.index)
+    # pct_no_matriculados_2023
+    ag["pct_no_matriculados_2023"] = _calc_pct_vs_pc(
+        "inscritos_2023_suma", "suma_primer_curso_2023"
+    )
 
-    pct_2023 = _calc_pct("inscritos_2023_suma", "suma_matricula_2023") \
-        if "inscritos_2023_suma" in ag.columns and "suma_matricula_2023" in ag.columns \
-        else pd.Series(np.nan, index=ag.index)
+    # pct_no_matriculados_2024 — prioridad 2024, fallback 2023
+    pct_2024 = _calc_pct_vs_pc("inscritos_2024_suma", "suma_primer_curso_2024")
+    pct_2023 = _calc_pct_vs_pc("inscritos_2023_suma", "suma_primer_curso_2023")
 
-    # Combinar: prioridad 2024, fallback 2023
     ag["pct_no_matriculados_2024"] = pct_2024.combine_first(pct_2023)
 
-    # Columna de transparencia: indica la fuente del dato
-    ag["FUENTE_PCT_NO_MAT"] = "SIN_DATOS"
-    ag.loc[pct_2024.notna(), "FUENTE_PCT_NO_MAT"] = "INSCRITOS_2024"
-    ag.loc[pct_2024.isna() & pct_2023.notna(), "FUENTE_PCT_NO_MAT"] = "INSCRITOS_2023_FALLBACK"
+    # FUENTE: basado en si inscritos_suma > 0 (no en coherencia ins>=mat)
+    ins24_ok = ag.get("inscritos_2024_suma", pd.Series(0, index=ag.index))
+    ins24_ok = pd.to_numeric(ins24_ok, errors="coerce").fillna(0) > 0
+    ins23_ok = ag.get("inscritos_2023_suma", pd.Series(0, index=ag.index))
+    ins23_ok = pd.to_numeric(ins23_ok, errors="coerce").fillna(0) > 0
 
-    ag["tiene_inscritos_reales"] = ag["pct_no_matriculados_2024"].notna()
+    ag["FUENTE_PCT_NO_MAT"] = "SIN_DATOS"
+    ag.loc[ins24_ok, "FUENTE_PCT_NO_MAT"] = "INSCRITOS_2024"
+    ag.loc[~ins24_ok & ins23_ok, "FUENTE_PCT_NO_MAT"] = "INSCRITOS_2023_FALLBACK"
+
+    ag["tiene_inscritos_reales"] = ins24_ok | ins23_ok
+
+    # Inscritos promedio por programa (columna informativa — equivale a "Inscritos Prom" del manual)
+    # = inscritos_suma / num_programas_2024 (programas con matrícula activa)
+    for _yr in [2023, 2024]:
+        suma_col = f"inscritos_{_yr}_suma"
+        if suma_col in ag.columns and "num_programas_2024" in ag.columns:
+            _den = pd.to_numeric(ag["num_programas_2024"], errors="coerce").replace(0, np.nan)
+            _suma = pd.to_numeric(ag[suma_col], errors="coerce")
+            ag[f"inscritos_{_yr}_prom_por_programa"] = (_suma / _den).round(1)
+        else:
+            ag[f"inscritos_{_yr}_prom_por_programa"] = np.nan
+
+    # Variación del promedio por programa de inscritos (2023→2024)
+    if (
+        "inscritos_2023_prom_por_programa" in ag.columns
+        and "inscritos_2024_prom_por_programa" in ag.columns
+    ):
+        _prom23 = pd.to_numeric(ag["inscritos_2023_prom_por_programa"], errors="coerce").replace(0, np.nan)
+        _prom24 = pd.to_numeric(ag["inscritos_2024_prom_por_programa"], errors="coerce")
+        ag["var_inscritos_prom"] = ((_prom24 - _prom23) / _prom23).clip(-1.0, 3.0)
+    else:
+        ag["var_inscritos_prom"] = np.nan
+
+    # var_inscritos: variación anual de inscripciones
     if "inscritos_2023_suma" in ag.columns and "inscritos_2024_suma" in ag.columns:
-        den_i = ag["inscritos_2023_suma"].replace(0, np.nan)
-        ag["var_inscritos"] = (ag["inscritos_2024_suma"] - ag["inscritos_2023_suma"]) / den_i
+        ins23 = pd.to_numeric(ag["inscritos_2023_suma"], errors="coerce")
+        ins24 = pd.to_numeric(ag["inscritos_2024_suma"], errors="coerce")
+        den_i = ins23.replace(0, np.nan)
+        ag["var_inscritos"] = ((ins24 - ins23) / den_i).clip(-1.0, 3.0)
     else:
         ag["var_inscritos"] = np.nan
 
     # Bloque C: var_programas, pct_con_matricula, prom_matricula_por_programa_2024
     if "num_programas_2019" in ag.columns and "num_programas_2024" in ag.columns:
         den_p = ag["num_programas_2019"].replace(0, np.nan)
-        ag["var_programas"] = (ag["num_programas_2024"] - ag["num_programas_2019"]) / den_p
+        ag["var_programas"] = (
+            (ag["num_programas_2024"] - ag["num_programas_2019"]) / den_p
+        ).clip(-1.0, 3.0)  # Acotar a [-100%, +300%] — elimina outliers extremos
+        # Nota: fórmula idéntica al archivo manual de referencia.
+        # El clip evita que 5 categorías con crecimiento >200% distorsionen el promedio.
     else:
         ag["var_programas"] = np.nan
     if "programas_activos" in ag.columns:
@@ -1690,7 +1768,7 @@ def run_fase4_desde_sabana(df: pd.DataFrame) -> pd.DataFrame:
     ag = ag.replace([np.inf, -np.inf], np.nan)
 
     # Bloque E: scoring
-    ag = apply_scoring(ag)
+    ag = apply_scoring(ag, modo_local=modo_local)
 
     return ag
 
@@ -1770,45 +1848,52 @@ _BLOQUES_TOTAL = [
         "AAGR_ROBUSTO", "TIPO_CRECIMIENTO",
         "var_yoy_2024", "diferencial_tendencia", "SEÑAL_TENDENCIA",
     ]),
-    # ── 5. SALARIO (OLE) ──────────────────────────────────────────────────
-    ("SALARIO", [
-        "salario_promedio",
-        "salario_proyectado_pesos_hoy",
-    ]),
-    # ── 6. INSCRITOS Y % NO MATRICULADOS ─────────────────────────────────
-    ("INSCRITOS", [
-        "inscritos_2023_suma", "inscritos_2024_suma",
-        "pct_no_matriculados_2023", "pct_no_matriculados_2024",
-        "FUENTE_PCT_NO_MAT",
-        "inscritos_2023_prom", "inscritos_2024_prom",
-        "var_inscritos",
-        "tiene_inscritos_reales",
-    ]),
-    # ── 7. OFERTA DE PROGRAMAS ────────────────────────────────────────────
-    ("OFERTA", [
-        "num_programas_2019", "num_programas_2024",
-        "programas_activos", "programas_inactivos",
-        "programas_nuevos_3a", "nuevos_vs_snapshot",
-        "var_programas", "pct_con_matricula",
-    ]),
-    # ── 8. COSTO ──────────────────────────────────────────────────────────
-    ("COSTO", [
-        "costo_promedio",
-        "distancia_costo_pct",
-    ]),
-    # ── 9. DEMANDA NUEVA Y GRADUADOS ──────────────────────────────────────
+    # ── 5. DEMANDA NUEVA ───────────────────────────────────────────────────
     ("DEMANDA NUEVA", [
         "suma_primer_curso_2019", "suma_primer_curso_2020", "suma_primer_curso_2021",
         "suma_primer_curso_2022", "suma_primer_curso_2023", "suma_primer_curso_2024",
         "prom_primer_curso_2019", "prom_primer_curso_2024",
         "AAGR_primer_curso", "tiene_primer_curso_real",
     ]),
+    # ── 6. INSCRITOS ──────────────────────────────────────────────────────
+    ("INSCRITOS", [
+        # Totales suma (nivel categoría)
+        "inscritos_2023_suma", "inscritos_2024_suma",
+        # Promedio por programa (equivalente al \"Prom\" del manual de referencia)
+        "inscritos_2023_prom_por_programa", "inscritos_2024_prom_por_programa",
+        # Tasa no matriculados
+        "pct_no_matriculados_2023", "pct_no_matriculados_2024",
+        "FUENTE_PCT_NO_MAT",
+        # Variaciones
+        "var_inscritos",
+        "var_inscritos_prom",
+        # Flags de calidad
+        "tiene_inscritos_reales",
+    ]),
+    # ── 7. SALARIO (OLE) ──────────────────────────────────────────────────
+    ("SALARIO", [
+        "salario_promedio",
+        "salario_proyectado_pesos_hoy",
+    ]),
+    # ── 8. OFERTA DE PROGRAMAS ────────────────────────────────────────────
+    ("OFERTA", [
+        "num_programas_2019", "num_programas_2024",
+        "programas_activos", "programas_inactivos",
+        "programas_nuevos_3a", "nuevos_vs_snapshot",
+        "var_programas", "pct_con_matricula",
+    ]),
+    # ── 9. COSTO ──────────────────────────────────────────────────────────
+    ("COSTO", [
+        "costo_promedio",
+        "distancia_costo_pct",
+    ]),
+    # ── 10. GRADUADOS ─────────────────────────────────────────────────────
     ("GRADUADOS", [
         "graduados_2019_suma", "graduados_2020_suma", "graduados_2021_suma",
         "graduados_2022_suma", "graduados_2023_suma", "graduados_2024_suma",
         "tasa_graduacion",
     ]),
-    # ── 10. MATRÍCULAS SEMESTRALES (dato granular, al fondo) ──────────────
+    # ── 11. MATRÍCULAS SEMESTRALES (dato granular, al fondo) ──────────────
     ("MATRÍCULAS SEMESTRALES", [
         "suma_matricula_2019_1", "suma_matricula_2019_2",
         "suma_matricula_2020_1", "suma_matricula_2020_2",
@@ -1817,7 +1902,7 @@ _BLOQUES_TOTAL = [
         "suma_matricula_2023_1", "suma_matricula_2023_2",
         "suma_matricula_2024_1", "suma_matricula_2024_2",
     ]),
-    # ── 11. BLOQUE SCORING: valor | score lado a lado (igual que referente) ─
+    # ── 12. BLOQUE SCORING: valor | score lado a lado (igual que referente) ─
     ("SCORING", [
         "prom_primer_curso_2024",   "score_matricula",   # valor visible = primer_curso
         "participacion_2024", "score_participacion",
@@ -1827,7 +1912,7 @@ _BLOQUES_TOTAL = [
         "num_programas_2024", "score_num_programas",
         "costo_promedio", "score_costo",
     ]),
-    # ── 12. CALIFICACIÓN FINAL (extremo derecho, como en el referente) ────
+    # ── 13. CALIFICACIÓN FINAL (extremo derecho, como en el referente) ────
     ("CALIFICACIÓN", [
         "calificacion_final",
         "FECHA_EJECUCION",
@@ -2650,7 +2735,7 @@ def run_segmentos_regionales(
 
             if not usar_cache:
                 try:
-                    ag_seg = run_fase4_desde_sabana(df_seg)
+                    ag_seg = run_fase4_desde_sabana(df_seg, modo_local=True)
                 except Exception as e:
                     log_error(f"[Segmento {nombre}] Fase 4 falló: {e}")
                     continue
@@ -3827,6 +3912,9 @@ def _escribir_hoja_total(writer: pd.ExcelWriter, ag: pd.DataFrame) -> list[str]:
         "programas_inactivos": "Prog. Inactivos",
         "programas_nuevos_3a": "Prog. Nuevos 3a",
         "pct_con_matricula": "% Con Matr.",
+        "inscritos_2023_prom_por_programa": "Ins. 2023 Prom/Prog",
+        "inscritos_2024_prom_por_programa": "Ins. 2024 Prom/Prog",
+        "var_inscritos_prom": "Var. Ins. Prom",
     }
 
     COLORES_BLOQUES = {

@@ -359,7 +359,7 @@ def _score_y_calificacion(metricas: dict) -> dict:
             }
         ]
     )
-    df_scored = apply_scoring(df_tmp)
+    df_scored = apply_scoring(df_tmp, modo_local=False)
     row = df_scored.iloc[0]
     return {
         **metricas,

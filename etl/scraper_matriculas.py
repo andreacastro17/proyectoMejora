@@ -21,7 +21,7 @@ def _empty_matriculados() -> pd.DataFrame:
 
 
 def _empty_inscritos() -> pd.DataFrame:
-    return pd.DataFrame(columns=["CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS", "SEMESTRE"])
+    return pd.DataFrame(columns=["CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS", "INSCRITOS_S1", "INSCRITOS_S2"])
 
 
 def _empty_primer_curso() -> pd.DataFrame:
@@ -51,14 +51,18 @@ def _detectar_hoja_datos(sheet_names: list[str]) -> str:
     return sheet_names[0]
 
 
-def _leer_inscritos_snies(path: Path, year: int, semestre: int) -> pd.DataFrame:
+def _leer_inscritos_snies(path: Path, year: int) -> pd.DataFrame:
     """
     Lee un Excel oficial SNIES de inscritos con header dinámico.
 
     Retorna un DataFrame con:
       - CÓDIGO SNIES DEL PROGRAMA (str)
-      - INSCRITOS (int)
-    Filtra por el semestre indicado y agrega (suma) por programa.
+      - INSCRITOS (int)  ← suma anual S1+S2 por programa
+      - INSCRITOS_S1 (int)
+      - INSCRITOS_S2 (int)
+
+    Suma ambos semestres para maximizar cobertura: ~1,500 SNIESs/año
+    solo reportan en S2 (especialmente Especializaciones con cohorte única).
     """
     try:
         import openpyxl
@@ -121,27 +125,52 @@ def _leer_inscritos_snies(path: Path, year: int, semestre: int) -> pd.DataFrame:
         df = df[[col_snies, col_sem, col_ins]].copy()
         df = df.rename(columns={col_snies: "CÓDIGO SNIES DEL PROGRAMA", col_sem: "SEMESTRE", col_ins: "INSCRITOS"})
 
-        df["SEMESTRE"] = df["SEMESTRE"].astype(str).str.strip()
-        df = df[df["SEMESTRE"] == str(int(semestre))].copy()
-
         df["CÓDIGO SNIES DEL PROGRAMA"] = (
             df["CÓDIGO SNIES DEL PROGRAMA"]
             .astype(str)
             .str.replace(r"\.0$", "", regex=True)
             .str.strip()
         )
+        df["SEMESTRE"] = pd.to_numeric(df["SEMESTRE"], errors="coerce")
         df["INSCRITOS"] = pd.to_numeric(df["INSCRITOS"], errors="coerce").fillna(0).astype("int64")
 
-        out = (
-            df.groupby("CÓDIGO SNIES DEL PROGRAMA", as_index=False)["INSCRITOS"]
+        # Agregar por SNIES y semestre para obtener subtotales S1 y S2
+        by_sem = (
+            df.groupby(["CÓDIGO SNIES DEL PROGRAMA", "SEMESTRE"], as_index=False)["INSCRITOS"]
             .sum()
-            .sort_values("INSCRITOS", ascending=False)
         )
-        log_info(f"[Fase 2] Inscritos SNIES {year}-S{semestre}: {len(out):,} programas leídos desde {path.name}")
+        s1 = (
+            by_sem[by_sem["SEMESTRE"] == 1]
+            .set_index("CÓDIGO SNIES DEL PROGRAMA")["INSCRITOS"]
+            .rename("INSCRITOS_S1")
+        )
+        s2 = (
+            by_sem[by_sem["SEMESTRE"] == 2]
+            .set_index("CÓDIGO SNIES DEL PROGRAMA")["INSCRITOS"]
+            .rename("INSCRITOS_S2")
+        )
+
+        # Unir S1+S2 — todos los SNIESs, incluyendo los que solo reportan en un semestre
+        out = (
+            pd.concat([s1, s2], axis=1)
+            .fillna(0)
+            .astype("int64")
+            .reset_index()
+        )
+        out.columns = ["CÓDIGO SNIES DEL PROGRAMA", "INSCRITOS_S1", "INSCRITOS_S2"]
+        out["INSCRITOS"] = out["INSCRITOS_S1"] + out["INSCRITOS_S2"]
+        out = out.sort_values("INSCRITOS", ascending=False).reset_index(drop=True)
+
+        n_solo_s1 = int((out["INSCRITOS_S2"] == 0).sum())
+        n_solo_s2 = int((out["INSCRITOS_S1"] == 0).sum())
+        log_info(
+            f"[Fase 2] Inscritos SNIES {year}: {len(out):,} programas "
+            f"(solo_S1={n_solo_s1:,} | solo_S2={n_solo_s2:,} | ambos={len(out) - n_solo_s1 - n_solo_s2:,})"
+        )
         return out.reset_index(drop=True)
     except Exception as e:
-        log_warning(f"[Fase 2] Inscritos {year}-S{semestre}: no se pudo leer {path.name}: {e}.")
-        return pd.DataFrame(columns=["CÓDIGO SNIES DEL PROGRAMA", "INSCRITOS"])
+        log_warning(f"[Fase 2] Inscritos {year}: no se pudo leer {path.name}: {e}.")
+        return pd.DataFrame(columns=["CÓDIGO SNIES DEL PROGRAMA", "INSCRITOS", "INSCRITOS_S1", "INSCRITOS_S2"])
 
 
 def _leer_primer_curso_snies(path: Path, year: int, semestre: int) -> pd.DataFrame:
@@ -595,28 +624,31 @@ class SNIESMatriculasScraper:
             log_warning(f"[Fase 2] Matriculados {year}-{semestre}: {e}. Continuando con vacío.")
             return _empty_matriculados()
 
-    def download_inscritos(self, year: int, semestre: int) -> pd.DataFrame:
+    def download_inscritos(self, year: int) -> pd.DataFrame:
         """
         Lee inscritos desde Excel oficial en ref/backup/inscritos/inscritos_{year}.xlsx.
         Si no existe o falla, retorna DataFrame vacío con columnas esperadas (no bloquea el pipeline).
         """
-        archivo = self.raw_dir / f"inscritos_{year}_{semestre}.csv"
-        cached = self._load_cached(archivo, {"CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS"})
+        archivo = self.raw_dir / f"inscritos_{year}.csv"
+        cached = self._load_cached(
+            archivo,
+            {"CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS", "INSCRITOS_S1", "INSCRITOS_S2"},
+        )
         if cached is not None:
-            # Si el Excel fuente es más nuevo, invalidar caché para este semestre
+            # Si el Excel fuente es más nuevo, invalidar caché
             try:
                 src = REF_DIR / "backup" / "inscritos" / f"inscritos_{year}.xlsx"
                 if src.exists():
                     if src.stat().st_mtime > archivo.stat().st_mtime:
                         log_info(
                             f"[Fase 2] Excel {src.name} fue modificado después del CSV en caché. "
-                            f"Reconstruyendo inscritos para {year}-S{semestre}..."
+                            f"Reconstruyendo inscritos para {year}..."
                         )
                         cached = None
             except Exception:
                 pass
             if cached is not None:
-                log_info(f"[Fase 2] Inscritos {year}-{semestre}: cargado desde disco ({len(cached):,} filas)")
+                log_info(f"[Fase 2] Inscritos {year}: cargado desde disco ({len(cached):,} filas)")
                 return cached
 
         src = REF_DIR / "backup" / "inscritos" / f"inscritos_{year}.xlsx"
@@ -627,19 +659,20 @@ class SNIESMatriculasScraper:
             )
             return _empty_inscritos()
 
-        df_in = _leer_inscritos_snies(src, year=year, semestre=int(semestre))
+        df_in = _leer_inscritos_snies(src, year=year)
         if df_in is None or len(df_in) == 0:
             return _empty_inscritos()
 
         out = df_in.rename(columns={"CÓDIGO SNIES DEL PROGRAMA": "CÓDIGO_SNIES_DEL_PROGRAMA"}).copy()
-        out["SEMESTRE"] = int(semestre)
-        out_path = self.raw_dir / f"inscritos_{year}_{semestre}.csv"
+        out_path = self.raw_dir / f"inscritos_{year}.csv"
         try:
-            out[["CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS", "SEMESTRE"]].to_csv(out_path, index=False, encoding="utf-8-sig")
-            log_info(f"[Fase 2] Inscritos {year}-{semestre}: guardado {out_path.name} ({len(out):,} filas)")
+            out[
+                ["CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS", "INSCRITOS_S1", "INSCRITOS_S2"]
+            ].to_csv(out_path, index=False, encoding="utf-8-sig")
+            log_info(f"[Fase 2] Inscritos {year}: guardado {out_path.name} ({len(out):,} filas)")
         except Exception as e:
-            log_warning(f"[Fase 2] Inscritos {year}-{semestre}: no se pudo guardar CSV: {e}.")
-        return out[["CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS", "SEMESTRE"]].copy()
+            log_warning(f"[Fase 2] Inscritos {year}: no se pudo guardar CSV: {e}.")
+        return out[["CÓDIGO_SNIES_DEL_PROGRAMA", "INSCRITOS", "INSCRITOS_S1", "INSCRITOS_S2"]].copy()
 
     def download_primer_curso(self, year: int, semestre: int) -> pd.DataFrame:
         """
