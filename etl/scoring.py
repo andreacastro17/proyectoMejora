@@ -3,8 +3,8 @@ Lógica de calificación ponderada por categoría (Fase 4 pipeline mercado).
 
 Cada variable se mapea a score 1-5 según umbrales; calificacion_final = suma(score_i × peso_i).
 
-score_matricula: quintiles fijos (P20/P40/P60/P80) sobre ``prom_matricula_por_programa_2024``
-calibrados en el agregado **Colombia** (no por segmento regional).
+score_matricula: modo_local=False → quintiles fijos nacionales (P20/P40/P60/P80) sobre Colombia.
+                 modo_local=True  → quintiles dinámicos del segmento (regional/modal).
 
 score_participacion: quintiles por **cuantiles del segmento** actual (``participacion_2024``).
 """
@@ -61,7 +61,12 @@ SCORING_CONFIG = [
         "col": "num_programas_2024",
         "out": "score_num_programas",
         "peso": 0.05,
-        "thresholds": [(5, 5), (15, 4), (30, 3), (70, 2)],
+        # Umbrales calibrados sobre el pipeline Colombia (288 categorías, media=37 progs/cat).
+        # Percentiles reales: P20=4 · P40=10 · P60=25 · P80=55
+        # Lógica inversa: menos competencia (menos programas) = mejor oportunidad
+        # score 5 = ≤4 programas (mercado muy concentrado, poca competencia)
+        # score 1 = >55 programas (mercado masivo, alta competencia)
+        "thresholds": [(4, 5), (10, 4), (25, 3), (55, 2)],
         "inverse": True,
     },
     {
@@ -93,11 +98,18 @@ def _value_to_score(value: float, thresholds: list[tuple[float, int]], inverse: 
     return 5.0
 
 
-def apply_scoring(df: pd.DataFrame) -> pd.DataFrame:
+def apply_scoring(df: pd.DataFrame, modo_local: bool = False) -> pd.DataFrame:
     """
     Aplica la calificación ponderada a un DataFrame con las columnas esperadas por SCORING_CONFIG.
     Añade columnas score_* y calificacion_final. NaN en alguna variable no rompe; se usa score 1.
     calificacion_final está siempre entre 1.0 y 5.0.
+
+    Args:
+        df: DataFrame con las columnas de métricas agregadas por categoría.
+        modo_local: Si True, score_matricula usa quintiles calculados sobre el propio
+                    DataFrame (para segmentos regionales/modales). Si False (default),
+                    usa los thresholds nacionales fijos _SCORE_MAT_P20.._P80,
+                    garantizando comparabilidad cross-segmento a nivel Colombia.
     """
     out = df.copy()
     total_peso = _SCORE_MATRICULA_PESO + _SCORE_PARTICIPACION_PESO + sum(c["peso"] for c in SCORING_CONFIG)
@@ -129,16 +141,38 @@ def apply_scoring(df: pd.DataFrame) -> pd.DataFrame:
     if "pct_no_matriculados_2024" in out.columns:
         out["pct_no_matriculados_2024"] = out["pct_no_matriculados_2024"].fillna(PCT_NAN_FILL)
 
-    # score_matricula — quintiles nacionales fijos (promedio por programa en la categoría, 2024)
-    # Fase 7 arma filas solo con prom_matricula_2024 (a menudo ya es prom. por programa); usar fallback.
+    # score_matricula — thresholds nacionales fijos (modo_local=False)
+    #                   o quintiles locales dinámicos (modo_local=True).
     if "prom_matricula_por_programa_2024" in out.columns:
         _s_mat = pd.to_numeric(out["prom_matricula_por_programa_2024"], errors="coerce")
     elif "prom_matricula_2024" in out.columns:
         _s_mat = pd.to_numeric(out["prom_matricula_2024"], errors="coerce")
     else:
         _s_mat = None
+
     if _s_mat is not None:
-        _bins = [-np.inf, _SCORE_MAT_P20, _SCORE_MAT_P40, _SCORE_MAT_P60, _SCORE_MAT_P80, np.inf]
+        if modo_local:
+            # Quintiles dinámicos sobre el segmento — misma lógica que score_participacion
+            _mat_valid = _s_mat.dropna()
+            _lp20 = float(_mat_valid.quantile(0.20))
+            _lp40 = float(_mat_valid.quantile(0.40))
+            _lp60 = float(_mat_valid.quantile(0.60))
+            _lp80 = float(_mat_valid.quantile(0.80))
+            # Guard contra bins duplicados cuando el segmento es pequeño
+            _lqs = [_lp20, _lp40, _lp60, _lp80]
+            for _i in range(1, len(_lqs)):
+                if _lqs[_i] <= _lqs[_i - 1]:
+                    _lqs[_i] = _lqs[_i - 1] + 1e-9
+            _lp20, _lp40, _lp60, _lp80 = _lqs
+            _bins = [-np.inf, _lp20, _lp40, _lp60, _lp80, np.inf]
+            log_info(
+                f"[Scoring] score_matricula LOCAL → "
+                f"P20={_lp20:.2f} P40={_lp40:.2f} P60={_lp60:.2f} P80={_lp80:.2f}"
+            )
+        else:
+            # Thresholds nacionales fijos calibrados sobre Colombia
+            _bins = [-np.inf, _SCORE_MAT_P20, _SCORE_MAT_P40, _SCORE_MAT_P60, _SCORE_MAT_P80, np.inf]
+
         _cat_mat = pd.cut(
             _s_mat,
             bins=_bins,
