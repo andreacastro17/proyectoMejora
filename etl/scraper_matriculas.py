@@ -75,22 +75,25 @@ def _leer_inscritos_snies(path: Path, year: int) -> pd.DataFrame:
         sheet_name = _detectar_hoja_datos(sheet_names)
 
         # Detectar fila header: buscar la fila que contenga "CÓDIGO" y "SNIES"
-        preview = pd.read_excel(path, sheet_name=sheet_name, header=None, nrows=30, dtype=str)
+        df_raw = pd.read_excel(path, sheet_name=sheet_name, header=None, dtype=str)
+
         header_idx = None
-        for idx in range(len(preview)):
-            row = preview.iloc[idx]
+        for idx in range(min(30, len(df_raw))):
+            row = df_raw.iloc[idx]
             vals = [v for v in row.tolist() if pd.notna(v) and str(v).strip() != ""]
             if not vals:
                 continue
-            first = _strip_accents_upper(vals[0])
-            any_has_snies = any("SNIES" in _strip_accents_upper(v) for v in vals)
+            first = _strip_accents_upper(str(vals[0]))
+            any_has_snies = any("SNIES" in _strip_accents_upper(str(v)) for v in vals)
             if "CODIGO" in first and any_has_snies:
                 header_idx = idx
                 break
         if header_idx is None:
             raise ValueError("No se pudo detectar fila de encabezado (CÓDIGO SNIES DEL PROGRAMA).")
 
-        df = pd.read_excel(path, sheet_name=sheet_name, header=header_idx, dtype=str)
+        df = df_raw.iloc[header_idx + 1:].copy()
+        df.columns = [str(c).strip() for c in df_raw.iloc[header_idx].tolist()]
+        df = df.reset_index(drop=True)
         if df is None or len(df) == 0:
             return pd.DataFrame(columns=["CÓDIGO SNIES DEL PROGRAMA", "INSCRITOS"])
 
@@ -186,22 +189,25 @@ def _leer_primer_curso_snies(path: Path, year: int, semestre: int) -> pd.DataFra
         wb_tmp.close()
         sheet_name = _detectar_hoja_datos(sheet_names)
 
-        preview = pd.read_excel(path, sheet_name=sheet_name, header=None, nrows=30, dtype=str)
+        df_raw = pd.read_excel(path, sheet_name=sheet_name, header=None, dtype=str)
+
         header_idx = None
-        for idx in range(len(preview)):
-            row = preview.iloc[idx]
+        for idx in range(min(30, len(df_raw))):
+            row = df_raw.iloc[idx]
             vals = [v for v in row.tolist() if pd.notna(v) and str(v).strip() != ""]
             if not vals:
                 continue
-            first = _strip_accents_upper(vals[0])
-            any_has_snies = any("SNIES" in _strip_accents_upper(v) for v in vals)
+            first = _strip_accents_upper(str(vals[0]))
+            any_has_snies = any("SNIES" in _strip_accents_upper(str(v)) for v in vals)
             if "CODIGO" in first and any_has_snies:
                 header_idx = idx
                 break
         if header_idx is None:
             raise ValueError("No se pudo detectar fila de encabezado (CÓDIGO SNIES DEL PROGRAMA).")
 
-        df = pd.read_excel(path, sheet_name=sheet_name, header=header_idx, dtype=str)
+        df = df_raw.iloc[header_idx + 1:].copy()
+        df.columns = [str(c).strip() for c in df_raw.iloc[header_idx].tolist()]
+        df = df.reset_index(drop=True)
         if df is None or len(df) == 0:
             return pd.DataFrame(columns=["CÓDIGO SNIES DEL PROGRAMA", "PRIMER_CURSO"])
 
@@ -273,22 +279,25 @@ def _leer_graduados_snies(path: Path, year: int, semestre: int) -> pd.DataFrame:
         wb_tmp.close()
         sheet_name = _detectar_hoja_datos(sheet_names)
 
-        preview = pd.read_excel(path, sheet_name=sheet_name, header=None, nrows=30, dtype=str)
+        df_raw = pd.read_excel(path, sheet_name=sheet_name, header=None, dtype=str)
+
         header_idx = None
-        for idx in range(len(preview)):
-            row = preview.iloc[idx]
+        for idx in range(min(30, len(df_raw))):
+            row = df_raw.iloc[idx]
             vals = [v for v in row.tolist() if pd.notna(v) and str(v).strip() != ""]
             if not vals:
                 continue
-            first = _strip_accents_upper(vals[0])
-            any_has_snies = any("SNIES" in _strip_accents_upper(v) for v in vals)
+            first = _strip_accents_upper(str(vals[0]))
+            any_has_snies = any("SNIES" in _strip_accents_upper(str(v)) for v in vals)
             if "CODIGO" in first and any_has_snies:
                 header_idx = idx
                 break
         if header_idx is None:
             raise ValueError("No se pudo detectar fila de encabezado (CÓDIGO SNIES DEL PROGRAMA).")
 
-        df = pd.read_excel(path, sheet_name=sheet_name, header=header_idx, dtype=str)
+        df = df_raw.iloc[header_idx + 1:].copy()
+        df.columns = [str(c).strip() for c in df_raw.iloc[header_idx].tolist()]
+        df = df.reset_index(drop=True)
         if df is None or len(df) == 0:
             return pd.DataFrame(columns=["CÓDIGO SNIES DEL PROGRAMA", "GRADUADOS"])
 
