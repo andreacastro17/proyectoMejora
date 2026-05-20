@@ -100,25 +100,12 @@ def normalizar_programas(df: pd.DataFrame | None = None, archivo: Path | None = 
         log_info(f"Advertencia: {warning_msg}")
 
     columnas_normalizadas = 0
-    # OPTIMIZACIÓN: Usar operaciones vectorizadas en lugar de .apply() donde sea posible
     for columna in COLUMNAS_A_NORMALIZAR:
         if columna in df.columns:
             try:
-                # Optimización: operaciones vectorizadas directas
                 s = df[columna].fillna("").astype(str)
-                # Aplicar unidecode de forma más eficiente (batch processing)
-                # Para datasets grandes, procesar en chunks es más eficiente que .apply()
-                if len(s) > 100:  # Solo para datasets grandes
-                    # Procesar en chunks para mejor rendimiento
-                    chunks = [s.iloc[i:i+100] for i in range(0, len(s), 100)]
-                    s_normalized = pd.concat([
-                        pd.Series([unidecode(str(x)) if x else "" for x in chunk], index=chunk.index)
-                        for chunk in chunks
-                    ])
-                    s = s_normalized
-                else:
-                    # Para datasets pequeños, usar map es aceptable
-                    s = s.map(lambda x: unidecode(x) if x else "")
+                # List comprehension directa — más rápida que chunking con pd.concat
+                s = pd.Series([unidecode(x) if x else "" for x in s], index=s.index)
                 # Aplicar normalizaciones vectorizadas después de unidecode
                 s = s.str.lower().str.replace(r"[^a-z0-9\s]", " ", regex=True)
                 s = s.str.replace(r"\s+", " ", regex=True).str.strip()

@@ -221,7 +221,7 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ========= RUTAS DE ARCHIVOS =========
 ARCHIVO_PROGRAMAS = OUTPUTS_DIR / "Programas.xlsx"
-ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos .xlsx"  # Con espacio al final (archivo principal con todos los históricos)
+ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos.xlsx"
 
 # ========= PIPELINE MERCADO (Fase 1+) =========
 TEMP_DIR = _get_temp_dir_local(_BASE_PATH)
@@ -515,7 +515,7 @@ def update_paths_for_base_dir(base_dir: Path) -> None:
     
     # Recalcular rutas de archivos
     ARCHIVO_PROGRAMAS = OUTPUTS_DIR / "Programas.xlsx"
-    ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos .xlsx"  # Con espacio al final (archivo principal con todos los históricos)
+    ARCHIVO_HISTORICO = OUTPUTS_DIR / "HistoricoProgramasNuevos.xlsx"
     ARCHIVO_NORMALIZACION = DOCS_DIR / "normalizacionFinal.xlsx"
     TEMP_DIR = _get_temp_dir_local(base_dir)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)

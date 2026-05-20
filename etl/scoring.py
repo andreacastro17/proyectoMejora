@@ -67,8 +67,8 @@ SCORING_CONFIG = [
         "out": "score_AAGR",
         "peso": 0.20,
         # Percentiles P20/P40/P60/P80 de AAGR_ROBUSTO (primer_curso) Colombia 288 cats
-        # Antes (total mat): 0% / 4% / 19% / 30%  ← calibrado para stock, no flujo
-        # Ahora (primer_curso): P80 real = 16.5%  (crecimiento de flujo más volátil)
+        # Thresholds calibrados sobre prom_primer_curso (flujo de nuevos matriculados).
+        # P80 real Colombia = 16.5% para posgrado.
         "thresholds": [(0.00, 1), (0.038, 2), (0.084, 3), (0.165, 4)],
         "inverse": False,
     },

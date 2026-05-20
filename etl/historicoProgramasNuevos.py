@@ -2,7 +2,7 @@
 Módulo para actualizar el archivo histórico de programas nuevos.
 
 Cada vez que se ejecuta el pipeline, se agregan los programas nuevos detectados
-al archivo HistoricoProgramasNuevos .xlsx (con espacio) con la fecha de ejecución.
+al archivo HistoricoProgramasNuevos.xlsx con la fecha de ejecución.
 """
 
 from __future__ import annotations
@@ -102,12 +102,14 @@ def _consolidar_archivos_historicos_duplicados() -> pd.DataFrame | None:
     _limpiar_archivos_temporales_excel(ARCHIVO_HISTORICO.parent)
     
     archivos_encontrados = []
-    # Buscar variaciones: el archivo principal ahora es el que tiene espacio
+    # Buscar variaciones legacy (migración desde nombres antiguos con espacio)
     variaciones = [
-        ARCHIVO_HISTORICO,  # HistoricoProgramasNuevos .xlsx (con espacio - archivo principal)
-        ARCHIVO_HISTORICO.parent / "HistoricoProgramasNuevos.xlsx",  # Sin espacio (variación antigua)
-        ARCHIVO_HISTORICO.parent / "HistoricoProgramasNuevos  .xlsx",  # Con dos espacios (variación)
+        ARCHIVO_HISTORICO,
+        ARCHIVO_HISTORICO.parent / "HistoricoProgramasNuevos .xlsx",
+        ARCHIVO_HISTORICO.parent / "HistoricoProgramasNuevos  .xlsx",
     ]
+    # Evitar intentar leer el mismo path dos veces si ya está en la lista
+    variaciones = list(dict.fromkeys(variaciones))
     
     # Buscar todos los archivos históricos posibles
     for archivo in variaciones:
@@ -201,7 +203,7 @@ def actualizar_historico_programas_nuevos() -> None:
     Actualiza el archivo histórico de programas nuevos.
     
     Lee los programas nuevos de Programas.xlsx y los agrega al archivo
-    HistoricoProgramasNuevos .xlsx (con espacio) con la fecha de ejecución.
+    HistoricoProgramasNuevos.xlsx con la fecha de ejecución.
     
     Maneja automáticamente archivos históricos duplicados:
     - Consolida todos los archivos encontrados

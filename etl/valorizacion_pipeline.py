@@ -11,6 +11,7 @@ Lista de programas: ref/backup/programas_para_valorizacion.xlsx
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -137,8 +138,9 @@ CODIGOS_IES_REFERENTES: set[int] = {
 }
 
 
+@lru_cache(maxsize=2048)
 def _norm(s: str) -> str:
-    """Mayúsculas y sin tildes (comparación de categorías / IES)."""
+    """Mayúsculas y sin tildes (comparación de categorías / IES). Resultado cacheado."""
     import unicodedata
 
     t = str(s).upper().strip()
@@ -263,10 +265,14 @@ def _lookup_categoria(ag: pd.DataFrame | None, categorias: list[str]) -> dict:
     if col_cat is None:
         return VACIAS.copy()
 
+    col_cat_norm = "_cat_norm_cached"
+    if col_cat_norm not in ag.columns:
+        ag[col_cat_norm] = ag[col_cat].apply(lambda x: _norm(str(x)))
+
     resultados = []
     for cat in categorias:
         cat_n = _norm(cat)
-        mask = ag[col_cat].apply(lambda x: _norm(str(x)) == cat_n)
+        mask = ag[col_cat_norm] == cat_n
         sub = ag[mask]
         if len(sub) == 0:
             continue
@@ -355,10 +361,15 @@ def _agregar_metricas_categoria(
     un dict listo para apply_scoring. Si son varias categorías (programa multi-categoría),
     promedia las métricas de cada una.
     """
+    col_norm = "_cat_norm_cached"
+    if col_norm not in df_region.columns:
+        df_region = df_region.copy()
+        df_region[col_norm] = df_region["CATEGORIA_FINAL"].apply(lambda x: _norm(str(x)))
+
     resultados_por_cat = []
     for cat in categorias:
         cat_limpia = _norm(cat)
-        mask = df_region["CATEGORIA_FINAL"].apply(lambda x: _norm(str(x)) == cat_limpia)
+        mask = df_region[col_norm] == cat_limpia
         sub = df_region[mask]
         resultados_por_cat.append(_metricas_de_subconjunto(sub, df_region))
 
@@ -399,8 +410,8 @@ def _metricas_de_subconjunto(sub: pd.DataFrame, df_region_completo: pd.DataFrame
         }
 
     # Matrícula
-    # Preferir primer_curso_2024 (flujo de nuevos) — mismo criterio que pipeline principal v4.2
-    # Fallback a matricula_2024 si no existe la columna en la sábana
+    # Preferir primer_curso (flujo de nuevos) — mismo criterio que pipeline principal.
+    # Fallback a matricula si no existe la columna en la sábana
     _pc_col = f"primer_curso_{AÑO_FIN_DATOS}" if f"primer_curso_{AÑO_FIN_DATOS}" in sub.columns else f"matricula_{AÑO_FIN_DATOS}"
     prom_mat = float(sub[_pc_col].mean()) if _pc_col in sub.columns else 0.0
     suma_mat = float(sub[_pc_col].sum()) if _pc_col in sub.columns else 0.0
@@ -423,7 +434,7 @@ def _metricas_de_subconjunto(sub: pd.DataFrame, df_region_completo: pd.DataFrame
 
     # Pct no matriculados 2024
     pct_no_mat = np.nan
-    # Fórmula corregida v4.2: (inscritos - primer_curso) / inscritos
+    # Fórmula: (inscritos - primer_curso) / inscritos
     # NO comparar vs matricula_total (genera negativos porque acumula cohortes previas)
     _ins_col = next((c for c in [f"inscritos_{AÑO_FIN_DATOS}_suma", f"inscritos_{AÑO_FIN_DATOS}"] if c in sub.columns), None)
     _pc_col_pct = next((c for c in [f"primer_curso_{AÑO_FIN_DATOS}"] if c in sub.columns), None)

@@ -105,9 +105,12 @@ def _get_or_assign_cat_id(categorias: list[str]) -> dict[str, str]:
     if _CAT_IDS_PATH.exists():
         try:
             df_reg = pd.read_csv(_CAT_IDS_PATH, dtype=str)
-            for _, row in df_reg.iterrows():
-                cat = str(row["CATEGORIA_FINAL"]).strip().upper()
-                registro[cat] = str(row["CAT_ID"]).strip()
+            registro.update(
+                zip(
+                    df_reg["CATEGORIA_FINAL"].astype(str).str.strip().str.upper(),
+                    df_reg["CAT_ID"].astype(str).str.strip(),
+                )
+            )
         except Exception as e:
             log_warning(f"[CAT_ID] No se pudo leer {_CAT_IDS_PATH.name}: {e}")
 
@@ -2801,13 +2804,8 @@ def _exportar_estudio_segmento(
 
     while True:
         try:
-            import datetime as _dt
-
-            _fecha_eje = _dt.date.today().isoformat()
             sabana_seg = sabana_seg.copy()
-            sabana_seg["FECHA_EJECUCION"] = _fecha_eje
             ag_seg = ag_seg.copy()
-            ag_seg["FECHA_EJECUCION"] = _fecha_eje
 
             _sf_col_seg = pd.to_numeric(
                 ag_seg["calificacion_final"]
@@ -3323,13 +3321,8 @@ def run_fase5(
                 sabana_final = sabana
                 total_final = agregado_df
 
-            import datetime as _dt
-
-            _fecha_eje = _dt.date.today().isoformat()
             sabana_final = sabana_final.copy()
             total_final = total_final.copy()
-            sabana_final["FECHA_EJECUCION"] = _fecha_eje
-            total_final["FECHA_EJECUCION"] = _fecha_eje
 
             # Semáforos calculados desde total_final ya procesado — antes de entrar al writer
             # para garantizar que el resumen y la hoja total muestren exactamente lo mismo.
@@ -3369,7 +3362,6 @@ def run_fase5(
                 if ag_pre is not None and len(ag_pre) > 0:
                     try:
                         ag_pre_export = ag_pre.copy()
-                        ag_pre_export["FECHA_EJECUCION"] = _fecha_eje
                         col_order_pre = _escribir_hoja_total(
                             writer, ag_pre_export, sheet_name="total_pregrado"
                         )
@@ -3441,9 +3433,9 @@ def run_fase5(
                 # eran redundantes y pesadas. `run_analisis_regional()` sigue definida
                 # más arriba por si se necesita reactivar este bloque a futuro.
 
-                # Hoja informativa: programas con baja confianza del ML (REQUIERE_REVISION == True)
+                # Hoja informativa: programas con baja confianza del ML (REQUIERE_REVISION)
                 if "REQUIERE_REVISION" in sabana_final.columns:
-                    df_revision = sabana_final[sabana_final["REQUIERE_REVISION"] == True].copy()  # noqa: E712
+                    df_revision = sabana_final[sabana_final["REQUIERE_REVISION"]].copy()
                 else:
                     df_revision = pd.DataFrame()
 
@@ -3872,8 +3864,6 @@ def run_fase6(ag: pd.DataFrame, log) -> pd.DataFrame:
         df_result["costo_promedio"] = pd.to_numeric(df_result["costo_promedio"], errors="coerce")
     if "AAGR_primer_curso" in df_result.columns:
         df_result["AAGR_primer_curso"] = pd.to_numeric(df_result["AAGR_primer_curso"], errors="coerce")
-    if "tasa_graduacion" in df_result.columns:
-        df_result["tasa_graduacion"] = pd.to_numeric(df_result["tasa_graduacion"], errors="coerce")
 
     # Columnas derivadas
     def _semaforo(c) -> str:
@@ -4041,7 +4031,7 @@ def _formatear_hoja_gap(writer: pd.ExcelWriter, df_gap: pd.DataFrame) -> None:
                     pass
 
             elif col_name in ("AAGR_ROBUSTO", f"var_yoy_{AÑO_FIN_DATOS}", "diferencial_tendencia",
-                              "distancia_costo_pct", "tasa_graduacion"):
+                              "distancia_costo_pct"):
                 cell.fill = base_fill
                 cell.number_format = "0.0%"
                 cell.font = Font(name="Arial", size=10)

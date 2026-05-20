@@ -55,27 +55,6 @@ def leer_excel_con_reintentos(
             "Verifica que la ruta sea correcta y que el archivo exista."
         )
     
-    # Validar que sea un Excel válido antes de intentar leer
-    try:
-        # Intento rápido de validación con openpyxl
-        wb = load_workbook(archivo, read_only=True, data_only=True)
-        wb.close()
-    except BadZipFile:
-        raise ValueError(
-            f"El archivo {archivo.name} está corrupto o no es un archivo Excel válido.\n\n"
-            "Verifica que el archivo no esté dañado. Si es necesario, descárgalo nuevamente."
-        ) from None
-    except InvalidFileException:
-        raise ValueError(
-            f"El archivo {archivo.name} no es un archivo Excel válido.\n\n"
-            "Verifica que el archivo tenga extensión .xlsx o .xls y que no esté corrupto."
-        ) from None
-    except PermissionError:
-        # Si falla la validación por permisos, intentaremos leer de todas formas
-        pass
-    except Exception as e:
-        log_warning(f"Advertencia al validar Excel {archivo.name}: {e}")
-    
     # Intentar leer con reintentos si hay PermissionError
     ultimo_error: Exception | None = None
     for intento in range(1, max_intentos + 1):

@@ -100,7 +100,7 @@ print()
 print("4. VERIFICANDO CONFIGURACIÓN DEL ARCHIVO HISTÓRICO...")
 try:
     from etl.config import ARCHIVO_HISTORICO
-    nombre_esperado = "HistoricoProgramasNuevos .xlsx"
+    nombre_esperado = "HistoricoProgramasNuevos.xlsx"
     if ARCHIVO_HISTORICO.name == nombre_esperado:
         print(f"  [OK] ARCHIVO_HISTORICO configurado correctamente: {ARCHIVO_HISTORICO.name}")
     else:
