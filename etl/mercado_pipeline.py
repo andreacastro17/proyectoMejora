@@ -2211,7 +2211,63 @@ def run_fase4_desde_sabana(
     ag = ag.replace([np.inf, -np.inf], np.nan)
 
     # Bloque E: scoring
+    # Fix 23 — Winsorización de AAGR_ROBUSTO para scoring.
+    #
+    # AAGR_ROBUSTO visible en Excel NO se modifica: el analista sigue viendo el valor real
+    # (ej. 1883% para INTELIGENCIA ARTIFICIAL virtual).
+    # Lo que se winsorizea es únicamente la columna interna que entra a apply_scoring().
+    #
+    # Cap de 3.0 (300%): elegido porque:
+    #   - Todos los outliers conocidos superan 100% → el cap los distingue del resto.
+    #   - 300% es un crecimiento real posible (mercado emergente sólido) pero no un
+    #     artefacto estadístico de base ínfima.
+    #   - Con cap=300%, el score sigue siendo 5 para cualquier AAGR > 18% (ESP) u 8% (MAE),
+    #     pero se elimina la distorsión cuando AAGR es astronómico por base de 1-5 estudiantes.
+    #
+    # Floor de -1.0 (-100%): ya está implícito en EXTINTA=-1.0 pero lo hacemos explícito
+    # para que ningún valor negativo más extremo pueda bajar artificialmente el score.
+    _AAGR_CAP_SCORING = 3.0   # 300% — techo para scoring (valor crudo se preserva)
+    _AAGR_FLOOR_SCORING = -1.0  # -100% — piso para scoring
+
+    if "AAGR_ROBUSTO" in ag.columns:
+        ag["AAGR_ROBUSTO_scoring"] = (
+            pd.to_numeric(ag["AAGR_ROBUSTO"], errors="coerce")
+            .clip(lower=_AAGR_FLOOR_SCORING, upper=_AAGR_CAP_SCORING)
+        )
+        _n_capped_up = int(
+            (pd.to_numeric(ag["AAGR_ROBUSTO"], errors="coerce") > _AAGR_CAP_SCORING).sum()
+        )
+        _n_capped_dn = int(
+            (pd.to_numeric(ag["AAGR_ROBUSTO"], errors="coerce") < _AAGR_FLOOR_SCORING).sum()
+        )
+        if _n_capped_up or _n_capped_dn:
+            log_info(
+                f"[Fix 23] AAGR_ROBUSTO_scoring: {_n_capped_up} valores capeados en >{_AAGR_CAP_SCORING*100:.0f}% "
+                f"| {_n_capped_dn} valores capeados en <{_AAGR_FLOOR_SCORING*100:.0f}%"
+            )
+    else:
+        ag["AAGR_ROBUSTO_scoring"] = np.nan
+
+    # Flag de alerta para el analista: AAGR_OUTLIER = True cuando el valor real
+    # supera el cap → el score es técnicamente correcto pero el crecimiento proviene
+    # de una base estadísticamente frágil (pocos estudiantes en el año inicial).
+    if "AAGR_ROBUSTO" in ag.columns:
+        ag["AAGR_OUTLIER"] = (
+            pd.to_numeric(ag["AAGR_ROBUSTO"], errors="coerce").abs() > _AAGR_CAP_SCORING
+        ).fillna(False)
+    else:
+        ag["AAGR_OUTLIER"] = False
+
+    # Renombrar temporalmente para que apply_scoring use la versión winsorizada.
+    # Después del scoring se restaura el nombre original para el Excel.
+    _aagr_original = ag["AAGR_ROBUSTO"].copy() if "AAGR_ROBUSTO" in ag.columns else pd.Series(np.nan, index=ag.index)
+    ag["AAGR_ROBUSTO"] = ag["AAGR_ROBUSTO_scoring"]
+
     ag = apply_scoring(ag, modo_local=modo_local, universo=universo)
+
+    # Restaurar AAGR_ROBUSTO real para el Excel (el analista ve el valor sin cap).
+    ag["AAGR_ROBUSTO"] = _aagr_original
+    ag = ag.drop(columns=["AAGR_ROBUSTO_scoring"], errors="ignore")
 
     # Restaurar NaN en export para inscritos < primer_curso (scoring usa fillna 0.25 interno)
     _col_pct_nm = f"pct_no_matriculados_{AÑO_FIN_DATOS}"
@@ -2341,7 +2397,7 @@ _BLOQUES_TOTAL = [
     ("PARTICIPACIÓN Y CRECIMIENTO", [
         f"participacion_{AÑO_INICIO_HISTORICO}", f"participacion_{AÑO_FIN_DATOS}",
         "AAGR_suma", "AAGR_prom", "CAGR_suma",
-        "AAGR_ROBUSTO", "TIPO_CRECIMIENTO", "SEÑAL_TENDENCIA",
+        "AAGR_ROBUSTO", "TIPO_CRECIMIENTO", "SEÑAL_TENDENCIA", "AAGR_OUTLIER",
     ]),
     ("INSCRITOS", [
         f"inscritos_{AÑO_FIN_DATOS - 1}_suma", f"inscritos_{AÑO_FIN_DATOS}_suma",
@@ -2510,7 +2566,8 @@ def _escribir_hoja_estandar(writer: pd.ExcelWriter) -> None:
 
     METRICAS_HEADERS = [
         "Score", "Peso",
-        f"Prom. primer\ncurso {_yr_fin}\n(S. Primer curso, 30%)",
+        f"Prom. primer curso {_yr_fin}\n(S. Primer curso, 30%)\n— ESP",
+        f"Prom. primer curso {_yr_fin}\n(S. Primer curso, 30%)\n— MAE",
         "AAGR primer\ncurso robusto\n(S. AAGR, 20%) — ESP",
         "AAGR primer\ncurso robusto\n(S. AAGR, 20%) — MAE",
         "Salario\n(SMLMV)\n(S. Salario, 15%)",
@@ -2524,23 +2581,23 @@ def _escribir_hoja_estandar(writer: pd.ExcelWriter) -> None:
     fila += 1
 
     UMBRALES = [
-        (1, "0-1.3", "≤ 3.0", "≤ 0.8%", "≤ -5.1%", "≤ 2 SMLMV", "> 50%", "> 32", "< -60%"),
-        (2, "1.3-2.3", "≤ 5.4", "≤ 5.8%", "≤ -0.6%", "≤ 3 SMLMV", "≤ 50%", "≤ 32", "< -40%"),
-        (3, "2.3-3.3", "≤ 8.5", "≤ 10.3%", "≤ 3.3%", "≤ 5 SMLMV", "≤ 30%", "≤ 18", "< -15%"),
-        (4, "3.3-4.3", "≤ 13.8", "≤ 18.0%", "≤ 8.0%", "≤ 8 SMLMV", "≤ 20%", "≤ 10", "< +20%"),
-        (5, "4.3-5.0", "> 13.8", "> 18.0%", "> 8.0%", "> 8 SMLMV", "≤ 10%", "≤ 4", "≥ +20%"),
+        (1, "0-1.3",  "≤ 9.89",  "≤ 7.93",  "≤ 0.8%",  "≤ -5.1%", "≤ 2 SMLMV", "> 50%", "> 32", "< -60%"),
+        (2, "1.3-2.3","≤ 19.08", "≤ 9.78",  "≤ 5.8%",  "≤ -0.6%", "≤ 3 SMLMV", "≤ 50%", "≤ 32", "< -40%"),
+        (3, "2.3-3.3","≤ 29.90", "≤ 12.76", "≤ 10.3%", "≤ 3.3%",  "≤ 5 SMLMV", "≤ 30%", "≤ 18", "< -15%"),
+        (4, "3.3-4.3","≤ 43.87", "≤ 18.85", "≤ 18.0%", "≤ 8.0%",  "≤ 8 SMLMV", "≤ 20%", "≤ 10", "< +20%"),
+        (5, "4.3-5.0","> 43.87", "> 18.85", "> 18.0%", "> 8.0%",  "> 8 SMLMV", "≤ 10%", "≤ 4",  "≥ +20%"),
     ]
     ETIQUETAS = {
         1: "1 — Bajo", 2: "2 — Bajo-Medio", 3: "3 — Medio",
         4: "4 — Medio-Alto", 5: "5 — Alto",
     }
 
-    for score, peso_rango, mat, aagr_e, aagr_m, sal, nomat, nprog, costo in UMBRALES:
+    for score, peso_rango, mat_esp, mat_mae, aagr_e, aagr_m, sal, nomat, nprog, costo in UMBRALES:
         bg = SCORE_COLORES[score]
         fg = SCORE_FUENTE[score]
         _cell(ws, fila, 1, ETIQUETAS[score], bold=True, bg=bg, fg=fg)
         _cell(ws, fila, 2, peso_rango, bg=bg, fg=fg)
-        for ci, val in enumerate([mat, aagr_e, aagr_m, sal, nomat, nprog, costo], 3):
+        for ci, val in enumerate([mat_esp, mat_mae, aagr_e, aagr_m, sal, nomat, nprog, costo], 3):
             _cell(ws, fila, ci, val, bg=bg, fg=fg)
         ws.row_dimensions[fila].height = 20
         fila += 1
@@ -4482,6 +4539,7 @@ def _escribir_hoja_total(
         "AAGR_ROBUSTO": "AAGR primer curso (robusto)",
         "TIPO_CRECIMIENTO": "Tipo de mercado",
         "SEÑAL_TENDENCIA": "Señal tendencia actual",
+        "AAGR_OUTLIER": "⚠ AAGR outlier (base frágil)",
         f"suma_primer_curso_{AÑO_INICIO_HISTORICO}": f"Primer curso {AÑO_INICIO_HISTORICO}",
         f"suma_primer_curso_{AÑO_FIN_DATOS}": f"Primer curso {AÑO_FIN_DATOS}",
         f"prom_primer_curso_{AÑO_INICIO_HISTORICO}": (
@@ -4917,6 +4975,11 @@ def exportar_base_maestra_excel(ruta_salida: Path | None = None) -> Path:
         ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M")
         ruta_salida = OUTPUTS_DIR / f"Base_Programas_Categoria_F1_{ts}.xlsx"
     ruta_salida.parent.mkdir(parents=True, exist_ok=True)
+
+    # Archivar export anterior en snapshots/ antes de generar el nuevo (Fase 1).
+    from etl.merge_incremental import archivar_base_programas_f1_antes_de_export
+
+    archivar_base_programas_f1_antes_de_export(ruta_salida)
 
     # ── Hoja de revisión requerida ───────────────────────────────────────────
     col_rev = "REQUIERE_REVISION"

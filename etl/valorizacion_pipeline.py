@@ -22,6 +22,7 @@ import pandas as pd
 
 from etl.config import (
     AÑO_FIN_DATOS,
+    AÑO_INICIO_HISTORICO,
     AÑO_INICIO_PRIMER_CURSO,
     OUTPUTS_DIR,
     RAW_HISTORIC_DIR,
@@ -30,6 +31,8 @@ from etl.config import (
     CHECKPOINT_BASE_MAESTRA,
     ESTUDIO_MERCADO_DIR,
     NIVELES_MERCADO,
+    NIVELES_POSGRADO,
+    NIVELES_PREGRADO,
 )
 from etl.pipeline_logger import log_info, log_warning
 from etl.scoring import _SCORE_PARTICIPACION_PESO, apply_scoring
@@ -767,8 +770,18 @@ def _metricas_de_subconjunto(sub: pd.DataFrame, df_region_completo: pd.DataFrame
     # Preferir primer_curso (flujo de nuevos) — mismo criterio que pipeline principal.
     # Fallback a matricula si no existe la columna en la sábana
     _pc_col = f"primer_curso_{AÑO_FIN_DATOS}" if f"primer_curso_{AÑO_FIN_DATOS}" in sub.columns else f"matricula_{AÑO_FIN_DATOS}"
-    prom_mat = float(sub[_pc_col].mean()) if _pc_col in sub.columns else 0.0
-    suma_mat = float(sub[_pc_col].sum()) if _pc_col in sub.columns else 0.0
+    # Fix B: excluir programas con PC=0 del denominador, igual que run_fase4_desde_sabana (Fix 24).
+    # La sábana almacena 0 (no NaN) para programas sin actividad ese año.
+    # mean() simple incluye esos ceros en el denominador → subestima el promedio real.
+    # Interpretación: "promedio de nuevos matriculados por programa ACTIVO ese año".
+    if _pc_col in sub.columns:
+        _pc_series = pd.to_numeric(sub[_pc_col], errors="coerce")
+        _pc_activos = _pc_series[_pc_series > 0]
+        prom_mat = float(_pc_activos.mean()) if len(_pc_activos) > 0 else 0.0
+        suma_mat = float(_pc_series.sum())
+    else:
+        prom_mat = 0.0
+        suma_mat = 0.0
     num_prog = int((sub[f"matricula_{AÑO_FIN_DATOS}"] > 0).sum()) if f"matricula_{AÑO_FIN_DATOS}" in sub.columns else 0
 
     # Participación sobre primer_curso (flujo), no sobre stock total — igual que pipeline principal
@@ -849,13 +862,19 @@ def _score_y_calificacion(metricas: dict) -> dict:
         f"prom_matricula_por_programa_{AÑO_FIN_DATOS}",
         metricas.get(f"prom_matricula_{AÑO_FIN_DATOS}", 0),
     )
+    # NIVEL_MAYORIT desde NIVEL del programa (valorización), no del agregado de categoría.
+    nivel_raw = str(metricas.get("NIVEL", "")).strip().upper()
+    if "MAEST" in nivel_raw:
+        nivel_mayorit = "MAESTRÍA"
+    else:
+        nivel_mayorit = "ESPECIALIZACIÓN"
     df_tmp = pd.DataFrame(
         [
             {
                 f"prom_matricula_por_programa_{AÑO_FIN_DATOS}": _pmp_scoring,
                 f"prom_matricula_{AÑO_FIN_DATOS}": _pmp_scoring,
                 f"participacion_{AÑO_FIN_DATOS}": metricas.get(f"participacion_{AÑO_FIN_DATOS}", 0),
-                "NIVEL_MAYORIT": metricas.get("NIVEL_MAYORIT", "ESPECIALIZACIÓN"),
+                "NIVEL_MAYORIT": nivel_mayorit,
                 "AAGR_ROBUSTO": metricas.get("AAGR_ROBUSTO", np.nan),
                 "salario_promedio_smlmv": metricas.get("salario_promedio_smlmv", np.nan),
                 f"pct_no_matriculados_{AÑO_FIN_DATOS}": metricas.get(f"pct_no_matriculados_{AÑO_FIN_DATOS}", np.nan),
@@ -896,87 +915,64 @@ def _score_y_calificacion(metricas: dict) -> dict:
 
 def _construir_tabla_crecimiento(sabana: pd.DataFrame) -> pd.DataFrame:
     """
-    Construye tabla de crecimiento de mercado con 9 combinaciones de
-    SEGMENTO × SECTOR × MODALIDAD, para ESP y MAE.
+    Construye tabla de crecimiento de mercado con 6 segmentos × ESP/MAE.
 
-    Estructura: bloques apilados con cabecera de filtros + 3 filas de datos
-    (ESPECIALIZACIÓN / MAESTRÍA / Total) por combinación.
-
+    Columnas: NIVEL | 2014-2024 | CAGR 2014-24 | CAGR 2019-24 | CAGR 2021-24.
     Fuente: archivos primer_curso_YYYY.xlsx en ref/backup/ (no la sábana).
-    El parámetro sabana se conserva por compatibilidad de firma.
     """
     del sabana  # no se usa; datos desde backups SNIES
 
-    CONTEXTOS = {
-        "Colombia — Todo el mercado": (
-            "Universo completo del mercado nacional de posgrado y pregrado.\n"
-            "Incluye todas las metodologías (presencial, virtual, a distancia "
-            "e híbrida) y todos los sectores de IES (pública y privada).\n"
-            "Referencia de demanda bruta sin ningún filtro: útil para medir "
-            "el tamaño real del mercado y las tendencias de largo plazo."
-        ),
-        "Colombia — No Virtual · Todos sectores": (
-            "Excluye programas 100% virtuales.\n"
-            "Muestra la evolución de la demanda presencial, a distancia "
-            "e híbrida a nivel nacional.\n"
-            "Contexto relevante para entender cuánto del crecimiento nacional "
-            "corresponde a la virtualidad vs. la oferta tradicional."
-        ),
-        "Colombia — Presencial puro · Todos sectores": (
-            "Solo programas presenciales puros, toda clase de IES.\n"
-            "Es el segmento más cercano al modelo educativo de EAFIT y de "
-            "sus competidores directos (Uniandes, ICESI, Rosario, Javeriana).\n"
-            "Los CAGRs negativos post-2019 reflejan la migración de estudiantes "
-            "hacia la virtualidad, especialmente en Especialización."
-        ),
-        "Colombia — Virtual · Todos sectores": (
-            "Solo programas 100% virtuales a nivel nacional.\n"
-            "Segmento de mayor crecimiento: compite por el perfil de estudiante "
-            "trabajador que busca flexibilidad horaria.\n"
-            "El salto de 2018-2019 (+93%) refleja la consolidación de plataformas "
-            "virtuales; el de 2020-2021 (+19%) el efecto pandemia."
-        ),
-        "Colombia — Privada · Presencial puro": (
-            "IES privadas, modalidad presencial exclusivamente.\n"
-            "Competencia directa de EAFIT a nivel nacional: universidades privadas "
-            "de calidad con campus físico.\n"
-            "Benchmark para fijar participación de mercado esperada en nuevos "
-            "programas presenciales."
-        ),
-        "Colombia — Privada · Virtual": (
-            "IES privadas en modalidad 100% virtual.\n"
-            "Muestra el crecimiento de la oferta digital de competidores privados "
-            "directos de EAFIT.\n"
-            "Relevante para programas de EAFIT que podrían tener versión virtual "
-            "o enfrentar sustitución por parte de esta oferta."
-        ),
-        "Antioquia — Todo el mercado": (
-            "Mercado regional de Antioquia, todas metodologías y sectores.\n"
-            "Zona de influencia primaria de EAFIT: el mercado local más relevante "
-            "para evaluar demanda de nuevos programas presenciales.\n"
-            "El CAGR 2019-2024 negativo en Especialización refleja pérdida de "
-            "estudiantes hacia Bogotá y plataformas virtuales nacionales."
-        ),
-        "Bogotá — Todo el mercado": (
-            "Capital del país y mercado más grande (≈49% del mercado nacional "
-            "en Especialización y Maestría).\n"
-            "Refleja tendencias con antelación al resto del país.\n"
-            "Relevante para programas EAFIT con modalidad virtual o planes de "
-            "expansión fuera de Antioquia."
-        ),
-        "Eje Cafetero — Todo el mercado": (
-            "Caldas, Risaralda y Quindío.\n"
-            "Zona de influencia secundaria de EAFIT; mercado relevante para "
-            "programas que pueden atraer estudiantes de Manizales, Pereira y "
-            "Armenia.\n"
-            "Tamaño pequeño pero con buena tasa de crecimiento reciente en "
-            "Maestría (CAGR 2021-2024: +2.2%)."
-        ),
-    }
+    SEGMENTOS_REDISENO = [
+        {
+            "nombre": "Colombia — Todo el mercado",
+            "desc": "Referencia nacional total (presencial + virtual, pública + privada)",
+            "filtro_sector": None,
+            "filtro_mod": ["PRESENCIAL", "VIRTUAL", "A DISTANCIA", "HIBRIDA"],
+            "filtro_dpto": None,
+        },
+        {
+            "nombre": "Colombia — Presencial",
+            "desc": "Segmento más cercano al modelo EAFIT. CAGRs negativos reflejan migración a virtual post-2019",
+            "filtro_sector": None,
+            "filtro_mod": ["PRESENCIAL"],
+            "filtro_dpto": None,
+        },
+        {
+            "nombre": "Colombia — Virtual",
+            "desc": "Segmento de mayor crecimiento. Compite por el estudiante que busca flexibilidad horaria",
+            "filtro_sector": None,
+            "filtro_mod": ["VIRTUAL"],
+            "filtro_dpto": None,
+        },
+        {
+            "nombre": "Antioquia — Todo el mercado",
+            "desc": "Zona de influencia primaria de EAFIT. ESP pierde ante virtual y Bogotá post-2019",
+            "filtro_sector": None,
+            "filtro_mod": ["PRESENCIAL", "VIRTUAL", "A DISTANCIA", "HIBRIDA"],
+            "filtro_dpto": ["ANTIOQUIA"],
+        },
+        {
+            "nombre": "Bogotá — Todo el mercado",
+            "desc": "Mercado más grande del país (≈49% del nacional). Crece en ambos niveles",
+            "filtro_sector": None,
+            "filtro_mod": ["PRESENCIAL", "VIRTUAL", "A DISTANCIA", "HIBRIDA"],
+            "filtro_dpto": ["BOGOTÁ D.C.", "BOGOTA D.C."],
+        },
+        {
+            "nombre": "Eje Cafetero — Todo el mercado",
+            "desc": "Caldas, Risaralda y Quindío. Zona de influencia secundaria de EAFIT",
+            "filtro_sector": None,
+            "filtro_mod": ["PRESENCIAL", "VIRTUAL", "A DISTANCIA", "HIBRIDA"],
+            "filtro_dpto": ["CALDAS", "RISARALDA", "QUINDÍO"],
+        },
+    ]
 
     años = list(range(AÑO_INICIO_PRIMER_CURSO, AÑO_FIN_DATOS + 1))
-    yr_ini = años[0]
-    yr_fin = años[-1]
+    yr_ini = AÑO_INICIO_PRIMER_CURSO
+    yr_fin = AÑO_FIN_DATOS
+    col_cagr_full = f"CAGR {yr_ini}-{yr_fin}"
+    col_cagr_2019 = "CAGR 2019-2024"
+    col_cagr_2021 = "CAGR 2021-2024"
 
     def _norm_sheet(name: object) -> str:
         s2 = _ud.normalize("NFD", str(name))
@@ -1197,100 +1193,36 @@ def _construir_tabla_crecimiento(sabana: pd.DataFrame) -> pd.DataFrame:
             serie[yr] = float(df_yr.loc[mask, "PC"].sum())
         return serie
 
-    COMBOS = [
-        (
-            "Colombia — Todo el mercado",
-            None,
-            ["PRESENCIAL", "VIRTUAL", "A DISTANCIA", "HIBRIDA"],
-            None,
-        ),
-        (
-            "Colombia — No Virtual · Todos sectores",
-            None,
-            ["PRESENCIAL", "A DISTANCIA", "HIBRIDA"],
-            None,
-        ),
-        (
-            "Colombia — Presencial puro · Todos sectores",
-            None,
-            ["PRESENCIAL"],
-            None,
-        ),
-        (
-            "Colombia — Virtual · Todos sectores",
-            None,
-            ["VIRTUAL"],
-            None,
-        ),
-        (
-            "Colombia — Privada · Presencial puro",
-            "PRIVADA",
-            ["PRESENCIAL"],
-            None,
-        ),
-        (
-            "Colombia — Privada · Virtual",
-            "PRIVADA",
-            ["VIRTUAL"],
-            None,
-        ),
-        (
-            "Antioquia — Todo el mercado",
-            None,
-            ["PRESENCIAL", "VIRTUAL", "A DISTANCIA", "HIBRIDA"],
-            ["ANTIOQUIA"],
-        ),
-        (
-            "Bogotá — Todo el mercado",
-            None,
-            ["PRESENCIAL", "VIRTUAL", "A DISTANCIA", "HIBRIDA"],
-            ["BOGOTÁ D.C.", "BOGOTA D.C."],
-        ),
-        (
-            "Eje Cafetero — Todo el mercado",
-            None,
-            ["PRESENCIAL", "VIRTUAL", "A DISTANCIA", "HIBRIDA"],
-            ["CALDAS", "RISARALDA", "QUINDÍO"],
-        ),
-    ]
-
     filas: list[dict] = []
-    for nombre, sec_f, mod_f, dpto_f in COMBOS:
+    for seg in SEGMENTOS_REDISENO:
+        nombre = seg["nombre"]
+        sec_f = seg["filtro_sector"]
+        mod_f = seg["filtro_mod"]
+        dpto_f = seg["filtro_dpto"]
+
         serie_esp = _suma_serie(sec_f, mod_f, dpto_f, "ESPECIALI")
         serie_mae = _suma_serie(sec_f, mod_f, dpto_f, "MAESTR")
-        serie_tot = {yr: serie_esp[yr] + serie_mae[yr] for yr in años}
-
-        sector_txt = sec_f if sec_f else "(Todos)"
-        mod_txt = " · ".join(mod_f) if mod_f else "(Todas)"
-        dpto_txt = ", ".join(dpto_f) if dpto_f else "(Todos)"
 
         filas.append({
             "__tipo": "header",
-            "__campo": "SEGMENTO",
-            "__valor": nombre,
-            "__contexto": CONTEXTOS.get(nombre, ""),
+            "__nombre": nombre,
+            "__desc": seg["desc"],
         })
-        filas.append({"__tipo": "header", "__campo": "SECTOR IES", "__valor": sector_txt})
-        filas.append({"__tipo": "header", "__campo": "METODOLOGÍA", "__valor": mod_txt})
-        filas.append({"__tipo": "header", "__campo": "DEPARTAMENTO", "__valor": dpto_txt})
-        filas.append({"__tipo": "blank"})
 
         for nivel_label, serie in [
-            ("ESPECIALIZACIÓN", serie_esp),
-            ("MAESTRÍA", serie_mae),
-            ("Total", serie_tot),
+            ("Especialización", serie_esp),
+            ("Maestría", serie_mae),
         ]:
-            fila: dict = {"__tipo": "data", "NIVEL": nivel_label}
-            total_fila = 0.0
+            fila: dict = {
+                "__tipo": "data",
+                "NIVEL": nivel_label,
+                col_cagr_full: _cagr(serie, yr_ini, yr_fin),
+                col_cagr_2019: _cagr(serie, 2019, yr_fin),
+                col_cagr_2021: _cagr(serie, 2021, yr_fin),
+            }
             for yr in años:
                 v = serie.get(yr, 0) or 0
                 fila[str(yr)] = v if v > 0 else None
-                if v:
-                    total_fila += v
-            fila["Total general"] = total_fila if total_fila > 0 else None
-            fila[f"CAGR {yr_ini}-{yr_fin}"] = _cagr(serie, yr_ini, yr_fin)
-            fila["CAGR 2019-2024"] = _cagr(serie, 2019, yr_fin)
-            fila["CAGR 2021-2024"] = _cagr(serie, 2021, yr_fin)
             filas.append(fila)
 
         filas.append({"__tipo": "blank"})
@@ -1967,6 +1899,22 @@ def run_fase_valorizacion(log: Callable = print) -> Path:
             _pmp_parquet = float(met_m.get(_pmp_key, 0) or 0)
             if _pmp_parquet == 0.0:
                 df_seg = SEGMENTOS_FILTROS[seg](sabana)
+                # Fix A: filtrar por nivel de formación antes de calcular el promedio.
+                # Sin este filtro, categorías con solo programas UNIVERSITARIOS en esa
+                # región/modalidad inflan M_prom_matricula con primer_curso de pregrado
+                # (ej. INGENIERIA DE SISTEMAS VIRTUAL: 23 pregrados con hasta 6.598
+                # estudiantes → prom=515.78 cuando el valor correcto es 0).
+                # El filtro usa NIVELES_POSGRADO para ESP/MAE o NIVELES_PREGRADO para universitario,
+                # que es el universo que compara con los parquets regionales.
+                _col_niv_seg = "NIVEL_DE_FORMACIÓN"
+                if _col_niv_seg in df_seg.columns and len(df_seg) > 0:
+                    _nivel_upper = nivel.upper()
+                    _niveles_filtro = (
+                        NIVELES_PREGRADO
+                        if "UNIVERSIT" in _nivel_upper or "PREGRAD" in _nivel_upper
+                        else NIVELES_POSGRADO
+                    )
+                    df_seg = df_seg[df_seg[_col_niv_seg].isin(_niveles_filtro)].copy()
                 if len(df_seg) > 0:
                     met_sabana = _agregar_metricas_categoria(df_seg, categorias)
                     _pmp_sab = float(met_sabana.get(_pmp_key, 0) or 0)
@@ -1988,7 +1936,7 @@ def run_fase_valorizacion(log: Callable = print) -> Path:
                         f"usa AAGR nacional = {float(aagr_nac):.1%}"
                     )
 
-            met_m_s = _score_y_calificacion(met_m)
+            met_m_s = _score_y_calificacion({**met_m, "NIVEL": nivel})
 
             # REFERENTES: agregado Fase 4 sobre IES referentes NACIONALES (sin filtro regional)
             met_r = _lookup_categoria(ag_ref_nacional, categorias)
@@ -1996,7 +1944,7 @@ def run_fase_valorizacion(log: Callable = print) -> Path:
             met_r["serie_primer_curso"] = (
                 _serie_primer_curso_sub(_sub_ref) if len(_sub_ref) else {}
             )
-            met_r_s = _score_y_calificacion(met_r)
+            met_r_s = _score_y_calificacion({**met_r, "NIVEL": nivel})
 
             # CAL_INTEGRADA = 0.4 × M + 0.6 × R
             # Peso 40% mercado general (demanda amplia) + 60% referentes nacionales
@@ -2493,129 +2441,109 @@ def _formatear_hoja_valorizacion(writer, df_out: pd.DataFrame) -> None:
 
 def _formatear_hoja_crecimiento(writer, df: pd.DataFrame) -> None:
     """
-    Formatea la hoja Crecimiento_Mercado con bloques de cabecera + datos.
-    Cada combo: 4 filas de cabecera + 1 blank + 3 datos + 1 blank.
+    Formatea la hoja Crecimiento_Mercado: 6 segmentos, años 2014-2024,
+    CAGR 2014-24, CAGR 2019-24 y CAGR 2021-24.
     """
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
     ws = writer.sheets["Crecimiento_Mercado"]
 
-    COLOR_HEADER_BG = "1C3557"
-    COLOR_HEADER_FG = "FFFFFF"
-    COLOR_TOTAL_BG = "D9E1F2"
-    COLOR_ESP_BG = "EBF9EE"
-    COLOR_MAE_BG = "FFFDE7"
-    COLOR_COL_HEADER = "37474F"
+    if ws.max_row:
+        ws.delete_rows(1, ws.max_row)
+
+    yr_ini = AÑO_INICIO_PRIMER_CURSO
+    yr_fin = AÑO_FIN_DATOS
+    yr_pre = list(range(yr_ini, AÑO_INICIO_HISTORICO))
+    yr_est = list(range(AÑO_INICIO_HISTORICO, yr_fin + 1))
+    años_cols = [str(y) for y in yr_pre + yr_est]
+    col_cagr_full = f"CAGR {yr_ini}-{yr_fin}"
+    col_cagr_2019 = "CAGR 2019-2024"
+    col_cagr_2021 = "CAGR 2021-2024"
+    cols_cagr = [col_cagr_full, col_cagr_2019, col_cagr_2021]
+    all_cols = ["NIVEL"] + años_cols + cols_cagr
+    last_col = len(all_cols)
 
     FMT_NUM = "#,##0"
     FMT_PCT = "0.0%"
 
-    años_cols = [str(yr) for yr in range(AÑO_INICIO_PRIMER_CURSO, AÑO_FIN_DATOS + 1)]
-    yr_ini = AÑO_INICIO_PRIMER_CURSO
-    yr_fin = AÑO_FIN_DATOS
-    all_cols = años_cols + [
-        "Total general",
-        f"CAGR {yr_ini}-{yr_fin}",
-        "CAGR 2019-2024",
-        "CAGR 2021-2024",
-    ]
-    last_col = len(all_cols) + 1
-    CONTEXT_COL = last_col + 2
+    BG_PRE = "D6EAF8"
+    BG_EST = "E2EFDA"
+    BG_CALC = "FFF9C4"
+    BG_SEG = "003057"
+    BG_ESP = "FFFFFF"
+    BG_MAE = "F5F5F5"
+    HDR_FONT = Font(bold=True, color="FFFFFF", name="Arial", size=9)
 
-    if ws.max_row:
-        ws.delete_rows(1, ws.max_row)
+    yr_fin_short = str(yr_fin)[2:]
+    header_labels = {
+        "NIVEL": "NIVEL",
+        col_cagr_full: f"CAGR {yr_ini}-{yr_fin_short}",
+        col_cagr_2019: "CAGR 2019-24",
+        col_cagr_2021: "CAGR 2021-24",
+    }
 
-    hdr_fill = PatternFill("solid", fgColor=COLOR_COL_HEADER)
-    hdr_font = Font(bold=True, color=COLOR_HEADER_FG, name="Arial", size=9)
-
-    ws.cell(row=1, column=1, value="SEGMENTO / NIVEL")
-    ws.cell(row=1, column=1).font = hdr_font
-    ws.cell(row=1, column=1).fill = hdr_fill
-    ws.cell(row=1, column=1).alignment = Alignment(
-        horizontal="left", vertical="center"
-    )
-
-    for j, col in enumerate(all_cols, start=2):
-        cell = ws.cell(row=1, column=j, value=col)
-        cell.font = hdr_font
-        cell.fill = hdr_fill
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        if "CAGR" in str(col):
-            cell.number_format = FMT_PCT
-
-    ctx_hdr = ws.cell(row=1, column=CONTEXT_COL, value="Descripción del segmento")
-    ctx_hdr.font = hdr_font
-    ctx_hdr.fill = hdr_fill
-    ctx_hdr.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    ws.row_dimensions[1].height = 22
-    ws.freeze_panes = "B2"
-
-    section_fill = PatternFill("solid", fgColor=COLOR_HEADER_BG)
-    section_font_bold = Font(bold=True, color=COLOR_HEADER_FG, name="Arial", size=9)
-    section_font_val = Font(color=COLOR_HEADER_FG, name="Arial", size=9)
-
-    ctx_border = Border(
-        left=Side(style="medium", color="1C3557"),
-        top=Side(style="thin", color="BDC3C7"),
-        bottom=Side(style="thin", color="BDC3C7"),
-        right=Side(style="thin", color="BDC3C7"),
-    )
+    # Fila 1: encabezados de columna
+    for j, col in enumerate(all_cols, start=1):
+        label = header_labels.get(col, col)
+        cell = ws.cell(row=1, column=j, value=label)
+        cell.font = HDR_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        if col == "NIVEL":
+            cell.fill = PatternFill("solid", fgColor="455A64")
+        elif col in {str(y) for y in yr_pre}:
+            cell.fill = PatternFill("solid", fgColor=BG_PRE)
+            cell.font = Font(bold=True, color="1A5276", name="Arial", size=9)
+        elif col in {str(y) for y in yr_est}:
+            cell.fill = PatternFill("solid", fgColor=BG_EST)
+            cell.font = Font(bold=True, color="1B5E20", name="Arial", size=9)
+        elif col in cols_cagr:
+            cell.fill = PatternFill("solid", fgColor=BG_CALC)
+            cell.font = Font(bold=True, color="7D6608", name="Arial", size=9)
+    ws.row_dimensions[1].height = 28
 
     current_row = 2
-    context_start_row: int | None = None
-    context_text: str | None = None
-
     for _, fila in df.iterrows():
         tipo = fila.get("__tipo", "data")
-
-        if tipo == "header" and fila.get("__campo") == "SEGMENTO":
-            context_start_row = current_row
-            context_text = str(fila.get("__contexto", "") or "")
 
         if tipo == "blank":
             current_row += 1
             continue
 
         if tipo == "header":
-            campo = fila.get("__campo", "")
-            valor = fila.get("__valor", "")
-            c1 = ws.cell(row=current_row, column=1, value=campo)
-            c1.font = section_font_bold
-            c1.fill = section_fill
-            c2 = ws.cell(row=current_row, column=2, value=valor)
-            c2.font = section_font_val
-            c2.fill = section_fill
-            ws.merge_cells(
-                start_row=current_row,
-                start_column=2,
-                end_row=current_row,
-                end_column=last_col,
-            )
-            ws.row_dimensions[current_row].height = 15
+            nombre = str(fila.get("__nombre", ""))
+            desc = str(fila.get("__desc", ""))
+            c1 = ws.cell(row=current_row, column=1, value=nombre)
+            c1.font = Font(bold=True, color="FFFFFF", name="Arial", size=11)
+            c1.fill = PatternFill("solid", fgColor=BG_SEG)
+            c1.alignment = Alignment(horizontal="left", vertical="center")
+            c2 = ws.cell(row=current_row, column=2, value=desc)
+            c2.font = Font(italic=True, color="FFFFFF", name="Arial", size=9)
+            c2.fill = PatternFill("solid", fgColor=BG_SEG)
+            c2.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            if last_col > 2:
+                ws.merge_cells(
+                    start_row=current_row,
+                    start_column=2,
+                    end_row=current_row,
+                    end_column=last_col,
+                )
+            ws.row_dimensions[current_row].height = 22
             current_row += 1
             continue
 
         if tipo == "data":
-            nivel = fila.get("NIVEL", "")
-            if nivel == "Total":
-                bg = COLOR_TOTAL_BG
-                bold = True
-            elif "ESPECIALI" in str(nivel).upper():
-                bg = COLOR_ESP_BG
-                bold = False
-            else:
-                bg = COLOR_MAE_BG
-                bold = False
+            nivel = str(fila.get("NIVEL", ""))
+            is_mae = "MAEST" in nivel.upper()
+            row_bg = BG_MAE if is_mae else BG_ESP
+            fill = PatternFill("solid", fgColor=row_bg)
 
-            fill = PatternFill("solid", fgColor=bg)
             c0 = ws.cell(row=current_row, column=1, value=nivel)
-            c0.font = Font(bold=bold, name="Arial", size=10)
+            c0.font = Font(name="Arial", size=10)
             c0.fill = fill
             c0.alignment = Alignment(horizontal="left", vertical="center")
 
-            for j, col in enumerate(all_cols, start=2):
+            for j, col in enumerate(all_cols[1:], start=2):
                 v = fila.get(col, None)
                 cell = ws.cell(
                     row=current_row,
@@ -2623,50 +2551,32 @@ def _formatear_hoja_crecimiento(writer, df: pd.DataFrame) -> None:
                     value=v if v is not None and pd.notna(v) else None,
                 )
                 cell.fill = fill
-                cell.font = Font(bold=bold, name="Arial", size=10)
                 cell.alignment = Alignment(horizontal="right", vertical="center")
-                if "CAGR" in col:
+
+                if col in cols_cagr:
                     cell.number_format = FMT_PCT
+                    if v is not None and pd.notna(v):
+                        try:
+                            fv = float(v)
+                            color = "1A6B2B" if fv > 0 else ("9C0006" if fv < 0 else "595959")
+                            cell.font = Font(bold=True, color=color, name="Arial", size=10)
+                        except (TypeError, ValueError):
+                            cell.font = Font(name="Arial", size=10)
+                    else:
+                        cell.font = Font(color="595959", name="Arial", size=10)
                 else:
                     cell.number_format = FMT_NUM
+                    cell.font = Font(name="Arial", size=10)
 
             ws.row_dimensions[current_row].height = 16
-
-            if str(nivel).strip() == "Total" and context_start_row is not None:
-                context_end_row = current_row
-                ctx_cell = ws.cell(
-                    row=context_start_row,
-                    column=CONTEXT_COL,
-                    value=context_text,
-                )
-                ctx_cell.font = Font(
-                    name="Arial", size=9, color="2C3E50", italic=False
-                )
-                ctx_cell.fill = PatternFill("solid", fgColor="EBF3FB")
-                ctx_cell.alignment = Alignment(
-                    horizontal="left",
-                    vertical="top",
-                    wrap_text=True,
-                )
-                ctx_cell.border = ctx_border
-                ws.merge_cells(
-                    start_row=context_start_row,
-                    start_column=CONTEXT_COL,
-                    end_row=context_end_row,
-                    end_column=CONTEXT_COL,
-                )
-                context_start_row = None
-                context_text = None
-
             current_row += 1
 
-    ws.column_dimensions["A"].width = 42
-    for j in range(2, last_col + 1):
+    ws.column_dimensions["A"].width = 16
+    for j, col in enumerate(all_cols[1:], start=2):
         letter = get_column_letter(j)
-        ws.column_dimensions[letter].width = 10 if j <= len(años_cols) + 1 else 12
-    ws.column_dimensions[get_column_letter(CONTEXT_COL)].width = 52
+        ws.column_dimensions[letter].width = 14 if col in cols_cagr else 9
 
-    ws.auto_filter.ref = f"A1:{get_column_letter(last_col)}1"
+    ws.sheet_view.showGridLines = False
 
 
 def _formatear_hoja_proyecciones(
