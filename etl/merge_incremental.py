@@ -6,12 +6,15 @@ Reglas:
   - Programas nuevos (en Programas.xlsx pero no en Excel): se agregan.
   - Programas comunes: se actualizan columnas calculadas; se respetan manuales.
   - Programas desaparecidos (en Excel pero no en Programas.xlsx): ACTIVO_PIPELINE=False.
-  - Antes de modificar, guarda snapshot con fecha en historico_estudio_de_mercado/snapshots/
-    (Estudio_Mercado_Colombia.xlsx y Base_Programas_Categoria_F1_*.xlsx).
+  - Antes de modificar Estudio_Mercado_Colombia.xlsx, copia la versión actual a
+    historico_estudio_de_mercado/snapshots/ (la ejecución anterior queda archivada).
+  - Base_Programas_Categoria_F1 se archiva al exportar Fase 1 (ver
+    archivar_base_programas_f1_antes_de_export), no en esta fase.
 """
 
 from __future__ import annotations
 
+import filecmp
 import shutil
 from datetime import date, datetime
 from pathlib import Path
@@ -92,7 +95,9 @@ COLS_DESCRIPTIVAS_SNIES = [
 
 def _guardar_snapshot(path: Path) -> None:
     """
-    Copia el estudio actual y los Excel Base_Programas F1 a historico/snapshots/.
+    Copia Estudio_Mercado_Colombia.xlsx actual a snapshots/ antes del merge.
+
+    Si no existe el Excel (primera ejecución), no archiva nada.
     Luego elimina snapshots con más de SNAPSHOT_RETENTION_DAYS días de antigüedad.
     """
     SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -109,25 +114,78 @@ def _guardar_snapshot(path: Path) -> None:
             dest = SNAPSHOTS_DIR / f"{stem}_{hora}{suffix}"
         return dest
 
-    # Estudio_Mercado_Colombia.xlsx
+    # Estudio_Mercado_Colombia.xlsx — solo si ya existe (ejecución anterior a sobrescribir).
     if path.exists():
         dest = _destino_unico(f"Estudio_Mercado_{fecha}.xlsx")
         shutil.copy2(path, dest)
         log_info(f"[Merge] Snapshot guardado: {dest.name}")
-
-    # Base_Programas_Categoria_F1_*.xlsx (export Fase 1 en estudio_de_mercado/)
-    n_base = 0
-    for src in sorted(ESTUDIO_MERCADO_DIR.glob(BASE_PROGRAMAS_GLOB)):
-        dest = _destino_unico(src.name)
-        shutil.copy2(src, dest)
-        log_info(f"[Merge] Snapshot Base F1: {dest.name}")
-        n_base += 1
-    if n_base == 0:
-        log_info("[Merge] No hay archivos Base_Programas_Categoria_F1_*.xlsx para archivar.")
     else:
-        log_info(f"[Merge] {n_base} archivo(s) Base_Programas archivados en snapshots/.")
+        log_info("[Merge] Sin Estudio_Mercado previo — primera ejecución, no hay snapshot que archivar.")
 
     _limpiar_snapshots_antiguos()
+
+
+def _destino_snapshot_unico(nombre: str) -> Path:
+    """Nombre único en snapshots/ si ya existe un archivo con el mismo nombre."""
+    dest = SNAPSHOTS_DIR / nombre
+    if dest.exists():
+        hora = datetime.now().strftime("%H%M")
+        stem, suffix = dest.stem, dest.suffix
+        dest = SNAPSHOTS_DIR / f"{stem}_{hora}{suffix}"
+    return dest
+
+
+def _copiar_base_a_snapshot(src: Path) -> int:
+    """
+    Copia un Excel Base F1 a snapshots/ si aún no está archivado con el mismo contenido.
+
+    Retorna 1 si se archivó, 0 si ya existía idéntico o no hubo cambios.
+    """
+    dest = SNAPSHOTS_DIR / src.name
+    if dest.exists():
+        try:
+            if filecmp.cmp(src, dest, shallow=False):
+                return 0
+            dest = _destino_snapshot_unico(src.name)
+        except OSError as e:
+            log_warning(f"[Snapshot] No se pudo comparar Base F1 ({e}); se re-archivará.")
+            dest = _destino_snapshot_unico(src.name)
+    shutil.copy2(src, dest)
+    log_info(f"[Snapshot] Base F1 anterior archivada: {dest.name}")
+    return 1
+
+
+def archivar_base_programas_f1_antes_de_export(ruta_nueva: Path) -> int:
+    """
+    Antes de un nuevo export Fase 1, archiva la versión anterior en snapshots/.
+
+    - Primera exportación (no hay Excel previo): retorna 0, carpeta snapshots puede
+      crearse vacía o no existir aún — es el comportamiento esperado.
+    - Re-exportación con nombre nuevo: archiva el export más reciente distinto de ruta_nueva.
+    - Re-escritura del mismo archivo: archiva la copia actual antes de sobrescribir.
+
+    Retorna 1 si se archivó algo, 0 si no había versión anterior que guardar.
+    """
+    SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    ruta_resuelta = ruta_nueva.resolve()
+
+    if ruta_resuelta.exists():
+        return _copiar_base_a_snapshot(ruta_resuelta)
+
+    candidatos = sorted(
+        (
+            p
+            for p in ESTUDIO_MERCADO_DIR.glob(BASE_PROGRAMAS_GLOB)
+            if p.resolve() != ruta_resuelta
+        ),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidatos:
+        log_info("[Snapshot] Primera exportación Base F1 — sin versión anterior que archivar.")
+        return 0
+
+    return _copiar_base_a_snapshot(candidatos[0])
 
 
 def _limpiar_snapshots_antiguos() -> None:
