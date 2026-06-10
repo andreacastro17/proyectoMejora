@@ -2655,6 +2655,29 @@ def _escribir_hoja_estandar(writer: pd.ExcelWriter) -> None:
         ws.row_dimensions[fila].height = 36
         fila += 1
 
+    # ── Nota: qué columnas interactúan para determinar el tipo ────────────────
+    fila += 1
+    ws.merge_cells(f"A{fila}:N{fila}")
+    _cell(
+        ws, fila, 1,
+        f"¿Cómo se determina el tipo? "
+        f"El sistema evalúa tres datos de la hoja total: "
+        f"primer_curso_{_yr_ini} (col. «Primer curso {_yr_ini}»), "
+        f"primer_curso_{_yr_fin} (col. «Primer curso {_yr_fin}») "
+        f"y el nivel predominante de la categoría (col. «Nivel predominante»). "
+        f"Umbral de base suficiente: Especialización ≥ 30 estudiantes · "
+        f"Maestría ≥ 15 · Universitario ≥ 100. "
+        f"Árbol de decisión: "
+        f"(1) PC_{_yr_ini} ≥ umbral → NORMAL → AAGR_ROBUSTO = promedio de 5 variaciones anuales. "
+        f"(2) 0 < PC_{_yr_ini} < umbral → BASE_PEQUEÑA → AAGR_ROBUSTO = CAGR = "
+        f"(PC_{_yr_fin}/PC_{_yr_ini})^(1/5)−1, más estable para bases pequeñas. "
+        f"(3) PC_{_yr_ini} = 0 y PC_{_yr_fin} > 0 → CATEGORÍA_NUEVA → AAGR desde primer año con dato. "
+        f"(4) PC_{_yr_ini} > 0 y PC_{_yr_fin} = 0 → EXTINTA → AAGR_ROBUSTO = −1.0 fijo. "
+        f"(5) Ambos = 0 → SIN_ACTIVIDAD → AAGR_ROBUSTO = NaN · S. AAGR = 1.",
+        bg="F1F8E9", fg="1B5E20", halign="left", wrap=True, size=9,
+    )
+    ws.row_dimensions[fila].height = 62
+
     fila += 1
     ws.merge_cells(f"A{fila}:N{fila}")
     _cell(ws, fila, 1,
@@ -2682,6 +2705,23 @@ def _escribir_hoja_estandar(writer: pd.ExcelWriter) -> None:
     for ci, h in enumerate(["Señal", "Descripción"], 1):
         _cell(ws, fila, ci, h, bold=True, bg="1976D2", fg=BLANCO, size=9)
     ws.row_dimensions[fila].height = 18
+    fila += 1
+
+    # ── Nota: las dos entradas de la señal ────────────────────────────────────
+    ws.merge_cells(f"A{fila}:N{fila}")
+    _cell(
+        ws, fila, 1,
+        f"¿Cómo se calcula la señal? Combina DOS medidas independientes: "
+        f"(1) var_yoy = (PC_{_yr_fin} − PC_{_yr_ant}) / PC_{_yr_ant} — "
+        f"¿creció o cayó el mercado en el último año?   "
+        f"(2) diferencial = var_yoy − AAGR_ROBUSTO — "
+        f"¿está creciendo más o menos que su propio promedio histórico de {AÑO_INICIO_HISTORICO}–{_yr_fin}? "
+        f"La combinación evita confundir una recuperación puntual con aceleración real. "
+        f"Ejemplo: var_yoy = +3% pero AAGR histórico = +40% → diferencial = −37 pp "
+        f"→ señal DESACELERANDO aunque el último año fue positivo.",
+        bg="E3F2FD", fg="0D47A1", halign="left", wrap=True, size=9,
+    )
+    ws.row_dimensions[fila].height = 56
     fila += 1
 
     for señal, bg, fg, desc in SEÑALES:
