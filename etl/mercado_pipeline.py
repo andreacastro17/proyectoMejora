@@ -1915,12 +1915,36 @@ def run_fase4_desde_sabana(
         cond_extinta = (m24 == 0) & (m19 > 0)
         cond_sin_act = (m19 == 0) & (m24 == 0)
 
-        tipo = pd.Series("NORMAL", index=ag.index, dtype=object)
+        # Fix 25: NORMAL se desglosa en 4 bandas según suma_primer_curso del año inicial.
+        # Cada banda tiene sus propios thresholds P20/P40/P60/P80 en scoring.py,
+        # de modo que cada categoría compite solo contra mercados de tamaño similar.
+        # Cortes: NICHO 30–99 (15–99 MAE) | EMERGENTE 100–399 |
+        #         ESTABLECIDO 400–1.499 | CONSOLIDADO ≥ 1.500
+        def _banda_normal(pc19: float) -> str:
+            if pc19 < 100:  return "NICHO"
+            if pc19 < 400:  return "EMERGENTE"
+            if pc19 < 1500: return "ESTABLECIDO"
+            return "CONSOLIDADO"
+
+        tipo = pd.Series("NICHO", index=ag.index, dtype=object)
+        tipo[cond_normal]  = m19[cond_normal].apply(_banda_normal)
         tipo[cond_pequena] = "BASE_PEQUENA"
-        tipo[cond_nueva] = "CATEGORIA_NUEVA"
+        tipo[cond_nueva]   = "CATEGORIA_NUEVA"
         tipo[cond_extinta] = "EXTINTA"
         tipo[cond_sin_act] = "SIN_ACTIVIDAD"
         ag["TIPO_CRECIMIENTO"] = tipo
+
+        log_info(
+            "[Fix 25] TIPO_CRECIMIENTO — "
+            + ", ".join(
+                f"{t}={int((tipo == t).sum())}"
+                for t in [
+                    "NICHO", "EMERGENTE", "ESTABLECIDO", "CONSOLIDADO",
+                    "BASE_PEQUENA", "CATEGORIA_NUEVA", "EXTINTA", "SIN_ACTIVIDAD",
+                ]
+                if (tipo == t).any()
+            )
+        )
 
         aagr_r = (
             ag["AAGR_primer_curso"].copy()
@@ -1964,19 +1988,86 @@ def run_fase4_desde_sabana(
         aagr_r[cond_sin_act] = np.nan
         ag["AAGR_ROBUSTO"] = aagr_r
 
+        # ── Auditoría: percentiles reales de AAGR por banda, también para PREGRADO ──
+        # Esto NO cambia ningún score — solo registra en el log los percentiles que
+        # tendría cada banda si se calibrara igual que en posgrado (Fix 25).
+        # (Debe ir después de ag["AAGR_ROBUSTO"]; antes de esa asignación la columna no existe.)
+        if "NIVEL_MAYORIT" in ag.columns and "AAGR_ROBUSTO" in ag.columns:
+            try:
+                _es_pregrado_mask = (
+                    ag["NIVEL_MAYORIT"].astype(str).str.strip().str.upper() == "UNIVERSITARIO"
+                )
+                if _es_pregrado_mask.any():
+                    _aagr_pre = ag.loc[_es_pregrado_mask, "AAGR_ROBUSTO"]
+                    _tipo_pre = tipo[_es_pregrado_mask]
+                    _validos = ~_tipo_pre.isin(["EXTINTA", "SIN_ACTIVIDAD"])
+
+                    log_info("[Auditoría AAGR pregrado] Percentiles reales por banda de tamaño:")
+                    for _banda in ["BASE_PEQUENA", "NICHO", "EMERGENTE", "ESTABLECIDO", "CONSOLIDADO"]:
+                        _mask_banda = _validos & (_tipo_pre == _banda)
+                        _vals = _aagr_pre[_mask_banda].dropna()
+                        _n = len(_vals)
+                        if _n == 0:
+                            log_info(f"  {_banda}: sin datos (n=0)")
+                            continue
+                        if _n < 5:
+                            log_info(
+                                f"  {_banda}: n={_n} — insuficiente para percentiles robustos "
+                                f"(valores: {sorted(round(v*100, 1) for v in _vals)})"
+                            )
+                            continue
+                        _p20, _p40, _p60, _p80 = _vals.quantile([0.20, 0.40, 0.60, 0.80])
+                        log_info(
+                            f"  {_banda}: n={_n} | "
+                            f"P20={_p20*100:.1f}% P40={_p40*100:.1f}% "
+                            f"P60={_p60*100:.1f}% P80={_p80*100:.1f}%"
+                        )
+
+                    from etl.scoring import _AAGR_PRE_THRESHOLDS as _th_pre_actual
+
+                    def _score_plano(v, th=_th_pre_actual):
+                        if pd.isna(v):
+                            return 1
+                        for b, s in th:
+                            if v <= b:
+                                return s
+                        return 5
+
+                    log_info(
+                        "[Auditoría AAGR pregrado] Distribución de score con threshold plano "
+                        "actual, agrupada por banda de tamaño:"
+                    )
+                    for _banda in ["BASE_PEQUENA", "NICHO", "EMERGENTE", "ESTABLECIDO", "CONSOLIDADO"]:
+                        _mask_banda = _validos & (_tipo_pre == _banda)
+                        _vals = _aagr_pre[_mask_banda].dropna()
+                        if len(_vals) == 0:
+                            continue
+                        _scores = _vals.apply(_score_plano)
+                        _dist = _scores.value_counts().sort_index()
+                        _dist_str = ", ".join(
+                            f"S{int(s)}={int(c)}" for s, c in _dist.items()
+                        )
+                        log_info(f"  {_banda} (n={len(_vals)}): {_dist_str}")
+            except Exception as _e_audit_pre:
+                log_warning(f"[Auditoría AAGR pregrado] omitida: {_e_audit_pre}")
+
         _tipos_str = ", ".join(
             f"{t}={int((tipo == t).sum())}"
-            for t in ["NORMAL", "BASE_PEQUENA", "CATEGORIA_NUEVA", "EXTINTA", "SIN_ACTIVIDAD"]
+            for t in [
+                "NICHO", "EMERGENTE", "ESTABLECIDO", "CONSOLIDADO",
+                "BASE_PEQUENA", "CATEGORIA_NUEVA", "EXTINTA", "SIN_ACTIVIDAD",
+            ]
             if (tipo == t).any()
         )
         if "NIVEL_MAYORIT" in ag.columns:
+            _BANDAS_AAGR = {"NICHO", "EMERGENTE", "ESTABLECIDO", "CONSOLIDADO"}
             for _univ in ["ESPECIALIZACIÓN", "MAESTRÍA", "UNIVERSITARIO"]:
                 _mask_univ = ag["NIVEL_MAYORIT"].astype(str).str.upper() == _univ.upper()
-                _n_normal = int((tipo[_mask_univ] == "NORMAL").sum())
+                _n_bandas = int(tipo[_mask_univ].isin(_BANDAS_AAGR).sum())
                 _n_total = int(_mask_univ.sum())
                 log_info(
-                    f"  AAGR {_univ[:3]}: NORMAL={_n_normal}/{_n_total} "
-                    f"({_n_normal / max(_n_total, 1) * 100:.0f}%)"
+                    f"  AAGR {_univ[:3]}: bandas={_n_bandas}/{_n_total} "
+                    f"({_n_bandas / max(_n_total, 1) * 100:.0f}%)"
                 )
         log_info(f"AAGR_ROBUSTO calculado. {_tipos_str}")
     else:
@@ -2526,7 +2617,10 @@ def _escribir_hoja_estandar(writer: pd.ExcelWriter) -> None:
         ("AAGR primer curso (robusto)", "S. AAGR", "20%",
          f"Crecimiento anual promedio histórico del primer_curso "
          f"{AÑO_INICIO_HISTORICO}-{_yr_fin}. "
-         f"Usa CAGR para categorías con base pequeña (< 30 estudiantes en {AÑO_INICIO_HISTORICO})."),
+         f"Umbrales diferenciados por nivel (ESP / MAE) y por banda de tamaño "
+         f"(NICHO / EMERGENTE / ESTABLECIDO / CONSOLIDADO). "
+         f"Cada categoría compite contra mercados de tamaño similar. "
+         f"La tabla muestra los umbrales de la banda ESTABLECIDO (400–1.499 est.)."),
         ("Salario promedio (SMLMV)", "S. Salario", "15%",
          "Salario promedio de egresados en SMLMV, según OLE. "
          "Indica el retorno laboral del área de conocimiento."),
@@ -2581,11 +2675,11 @@ def _escribir_hoja_estandar(writer: pd.ExcelWriter) -> None:
     fila += 1
 
     UMBRALES = [
-        (1, "0-1.3",  "≤ 9.89",  "≤ 7.93",  "≤ 0.8%",  "≤ -5.1%", "≤ 2 SMLMV", "> 50%", "> 32", "< -60%"),
-        (2, "1.3-2.3","≤ 19.08", "≤ 9.78",  "≤ 5.8%",  "≤ -0.6%", "≤ 3 SMLMV", "≤ 50%", "≤ 32", "< -40%"),
-        (3, "2.3-3.3","≤ 29.90", "≤ 12.76", "≤ 10.3%", "≤ 3.3%",  "≤ 5 SMLMV", "≤ 30%", "≤ 18", "< -15%"),
-        (4, "3.3-4.3","≤ 43.87", "≤ 18.85", "≤ 18.0%", "≤ 8.0%",  "≤ 8 SMLMV", "≤ 20%", "≤ 10", "< +20%"),
-        (5, "4.3-5.0","> 43.87", "> 18.85", "> 18.0%", "> 8.0%",  "> 8 SMLMV", "≤ 10%", "≤ 4",  "≥ +20%"),
+        (1, "0-1.3",  "≤ 9.89",  "≤ 7.93",  "≤ 1.5%",   "≤ -15.4%", "≤ 2 SMLMV", "> 50%", "> 32", "< -60%"),
+        (2, "1.3-2.3","≤ 19.08", "≤ 9.78",  "≤ 5.9%",   "≤ -5.8%",  "≤ 3 SMLMV", "≤ 50%", "≤ 32", "< -40%"),
+        (3, "2.3-3.3","≤ 29.90", "≤ 12.76", "≤ 11.7%",  "≤ -0.3%",  "≤ 5 SMLMV", "≤ 30%", "≤ 18", "< -15%"),
+        (4, "3.3-4.3","≤ 43.87", "≤ 18.85", "≤ 16.2%",  "≤ 3.8%",   "≤ 8 SMLMV", "≤ 20%", "≤ 10", "< +20%"),
+        (5, "4.3-5.0","> 43.87", "> 18.85", "> 16.2%",  "> 3.8%",   "> 8 SMLMV", "≤ 10%", "≤ 4",  "≥ +20%"),
     ]
     ETIQUETAS = {
         1: "1 — Bajo", 2: "2 — Bajo-Medio", 3: "3 — Medio",
@@ -2605,11 +2699,15 @@ def _escribir_hoja_estandar(writer: pd.ExcelWriter) -> None:
     fila += 1
     ws.merge_cells(f"A{fila}:N{fila}")
     _cell(ws, fila, 1,
-          "(*) El AAGR usa umbrales distintos para Especialización (ESP) y Maestría (MAE) "
-          "porque el mercado de maestrías tiene menor volatilidad (63% de categorías MAE "
-          "tienen AAGR < 3.3%). La participación usa quintiles dinámicos del segmento actual.",
+          "(*) Los valores de AAGR corresponden a la banda ESTABLECIDO (400–1.499 est. en año inicial). "
+          "El sistema usa umbrales distintos por nivel (ESP / MAE) y por banda de tamaño: "
+          "NICHO (30–99 est.) / EMERGENTE (100–399) / ESTABLECIDO (400–1.499) / CONSOLIDADO (≥ 1.500). "
+          "Cada categoría compite en el pool de percentiles AAGR solo contra mercados de tamaño similar. "
+          "EXTINTA y SIN_ACTIVIDAD reciben score AAGR = 1 directamente. "
+          "CATEGORIA_NUEVA usa los thresholds de BASE_PEQUEÑA. "
+          "La participación usa quintiles dinámicos del segmento actual.",
           bg="FFF8E1", fg="5D4037", halign="left", wrap=True, size=9)
-    ws.row_dimensions[fila].height = 28
+    ws.row_dimensions[fila].height = 40
     fila += 1
 
     fila += 1
@@ -2621,22 +2719,36 @@ def _escribir_hoja_estandar(writer: pd.ExcelWriter) -> None:
 
     _yr_ini = AÑO_INICIO_HISTORICO
     TIPOS_MERCADO = [
-        ("NORMAL",
-         f"El mercado tiene datos desde {_yr_ini} con base suficiente (≥ 30 estudiantes en ESP, "
-         f"≥ 15 en MAE). El AAGR se calcula como promedio de las 5 variaciones anuales."),
+        ("NICHO",
+         f"Mercado activo desde {_yr_ini} con base suficiente (≥ umbral) y "
+         f"entre 30–99 estudiantes nuevos en {_yr_ini} (15–99 para MAE). "
+         f"AAGR = promedio de 5 variaciones anuales. "
+         f"Pool de percentiles propio: compite solo contra otros mercados NICHO."),
+        ("EMERGENTE",
+         f"Mercado activo desde {_yr_ini} con 100–399 estudiantes nuevos en {_yr_ini}. "
+         f"AAGR = promedio de 5 variaciones anuales. "
+         f"Pool de percentiles EMERGENTE × nivel."),
+        ("ESTABLECIDO",
+         f"Mercado activo desde {_yr_ini} con 400–1.499 estudiantes nuevos en {_yr_ini}. "
+         f"AAGR = promedio de 5 variaciones anuales. "
+         f"Los umbrales de la tabla de scores corresponden a esta banda."),
+        ("CONSOLIDADO",
+         f"Mercado maduro con ≥ 1.500 estudiantes nuevos en {_yr_ini}. "
+         f"AAGR = promedio de 5 variaciones anuales. "
+         f"Un crecimiento del 3–8% anual es un resultado sólido en este nivel."),
         ("BASE_PEQUEÑA",
-         f"El mercado existe desde {_yr_ini} pero con pocos estudiantes (< 30 ESP / < 15 MAE). "
-         "El AAGR usa el CAGR (tasa compuesta) en lugar del promedio de variaciones, "
-         "para reducir el ruido estadístico de mercados pequeños."),
+         f"El mercado existe desde {_yr_ini} pero con menos de 30 estudiantes (< 15 en MAE). "
+         f"Usa CAGR en lugar del promedio de variaciones para reducir el ruido estadístico."),
         ("CATEGORIA_NUEVA",
-         f"El mercado no existía en {_yr_ini} (primer_curso_{_yr_ini} = 0) pero sí en años recientes. "
-         "El AAGR se calcula desde el primer año con dato disponible."),
+         f"No existía en {_yr_ini} (primer_curso = 0) pero tiene estudiantes hoy. "
+         f"AAGR desde el primer año con dato. "
+         f"Usa los mismos thresholds que BASE_PEQUEÑA para el score AAGR."),
         ("EXTINTA",
-         f"El mercado existía en {_yr_ini} pero no tiene primer_curso en {_yr_fin}. "
-         "AAGR_ROBUSTO = -1.0 (penalización máxima). Score AAGR = 1."),
+         f"Existía en {_yr_ini} pero primer_curso_{_yr_fin} = 0. "
+         f"AAGR_ROBUSTO = −1.0 fijo. Score AAGR = 1."),
         ("SIN_ACTIVIDAD",
-         "El mercado no tiene primer_curso en ningún año del período. "
-         "AAGR_ROBUSTO = NaN. Score AAGR = 1 (fallback conservador)."),
+         f"Sin primer_curso en ningún año del período. "
+         f"AAGR_ROBUSTO = NaN. Score AAGR = 1."),
     ]
 
     for ci, h in enumerate(["Tipo de mercado", "Significado"], 1):
@@ -2645,8 +2757,14 @@ def _escribir_hoja_estandar(writer: pd.ExcelWriter) -> None:
     fila += 1
 
     TIPO_BG = {
-        "NORMAL": "F1F8E9", "BASE_PEQUEÑA": "FFF8E1", "CATEGORIA_NUEVA": "E3F2FD",
-        "EXTINTA": "FFEBEE", "SIN_ACTIVIDAD": "F5F5F5",
+        "NICHO":          "E8F5E9",
+        "EMERGENTE":      "E3F2FD",
+        "ESTABLECIDO":    "EDE7F6",
+        "CONSOLIDADO":    "FCE4EC",
+        "BASE_PEQUEÑA":   "FFF8E1",
+        "CATEGORIA_NUEVA":"E1F5FE",
+        "EXTINTA":        "FFEBEE",
+        "SIN_ACTIVIDAD":  "F5F5F5",
     }
     for tipo, desc in TIPOS_MERCADO:
         bg = TIPO_BG.get(tipo, "FFFFFF")
@@ -2668,12 +2786,16 @@ def _escribir_hoja_estandar(writer: pd.ExcelWriter) -> None:
         f"Umbral de base suficiente: Especialización ≥ 30 estudiantes · "
         f"Maestría ≥ 15 · Universitario ≥ 100. "
         f"Árbol de decisión: "
-        f"(1) PC_{_yr_ini} ≥ umbral → NORMAL → AAGR_ROBUSTO = promedio de 5 variaciones anuales. "
-        f"(2) 0 < PC_{_yr_ini} < umbral → BASE_PEQUEÑA → AAGR_ROBUSTO = CAGR = "
-        f"(PC_{_yr_fin}/PC_{_yr_ini})^(1/5)−1, más estable para bases pequeñas. "
-        f"(3) PC_{_yr_ini} = 0 y PC_{_yr_fin} > 0 → CATEGORÍA_NUEVA → AAGR desde primer año con dato. "
-        f"(4) PC_{_yr_ini} > 0 y PC_{_yr_fin} = 0 → EXTINTA → AAGR_ROBUSTO = −1.0 fijo. "
-        f"(5) Ambos = 0 → SIN_ACTIVIDAD → AAGR_ROBUSTO = NaN · S. AAGR = 1.",
+        f"(1) PC_{_yr_ini} ≥ umbral y < 100 → NICHO. "
+        f"(2) PC_{_yr_ini} ≥ 100 y < 400 → EMERGENTE. "
+        f"(3) PC_{_yr_ini} ≥ 400 y < 1.500 → ESTABLECIDO. "
+        f"(4) PC_{_yr_ini} ≥ 1.500 → CONSOLIDADO. "
+        f"Los cuatro usan AAGR = promedio de 5 variaciones anuales, "
+        f"cada uno con su propio pool de percentiles. "
+        f"(5) 0 < PC_{_yr_ini} < umbral → BASE_PEQUEÑA → AAGR = CAGR. "
+        f"(6) PC_{_yr_ini} = 0 y PC_{_yr_fin} > 0 → CATEGORÍA_NUEVA → AAGR desde primer año con dato. "
+        f"(7) PC_{_yr_ini} > 0 y PC_{_yr_fin} = 0 → EXTINTA → AAGR = −1.0 fijo. "
+        f"(8) Ambos = 0 → SIN_ACTIVIDAD → NaN → Score AAGR = 1.",
         bg="F1F8E9", fg="1B5E20", halign="left", wrap=True, size=9,
     )
     ws.row_dimensions[fila].height = 62
@@ -2730,27 +2852,154 @@ def _escribir_hoja_estandar(writer: pd.ExcelWriter) -> None:
         ws.row_dimensions[fila].height = 28
         fila += 1
 
+    # ── Sección explicativa: cómo se calculan Tipo, AAGR Robusto y Señal ──────
     fila += 1
     ws.merge_cells(f"A{fila}:N{fila}")
-    _cell(ws, fila, 1,
-          "DIFERENCIA ENTRE AAGR SUMA Y AAGR PROM POR PROGRAMA",
-          bold=True, bg="5D4037", fg=BLANCO, size=10)
-    ws.row_dimensions[fila].height = 18
-    fila += 1
+    _cell(
+        ws, fila, 1,
+        "CÓMO SE CALCULAN EL TIPO DE MERCADO, EL AAGR ROBUSTO Y LA SEÑAL DE TENDENCIA",
+        bold=True, bg="003057", fg="FFFFFF", size=11, halign="center",
+    )
+    ws.row_dimensions[fila].height = 20
 
+    fila += 1
     ws.merge_cells(f"A{fila}:N{fila}")
-    _cell(ws, fila, 1,
-          "AAGR suma del mercado: promedio de las variaciones interanuales de la SUMA total "
-          "de primer_curso. Responde a: ¿el mercado como un todo crece o decrece en nuevos "
-          "estudiantes? Es el insumo de AAGR_ROBUSTO (y del scoring S. AAGR). "
-          "||  "
-          "AAGR prom. por programa: promedio de las variaciones del PROMEDIO por registro SNIES. "
-          "Responde a: ¿cada programa individualmente captura más estudiantes? "
-          "Métrica informativa, no entra al scoring. "
-          "Si AAGR_suma sube pero AAGR_prom baja, el mercado crece porque hay más programas, "
-          "no porque los existentes mejoren.",
-          bg="EFEBE9", fg="3E2723", halign="left", wrap=True, size=10)
-    ws.row_dimensions[fila].height = 60
+    _cell(
+        ws, fila, 1,
+        "Estas tres columnas se calculan en secuencia. El Tipo de mercado se calcula "
+        "primero y su resultado determina qué fórmula usa el AAGR Robusto. "
+        "La Señal de tendencia es independiente y se calcula al final con su propia lógica.",
+        bg="EBF5FB", fg="003057", size=9, halign="left", wrap=True,
+    )
+    ws.row_dimensions[fila].height = 28
+
+    # ── Paso 1: Tipo de mercado ───────────────────────────────────────────────
+    fila += 1
+    ws.merge_cells(f"A{fila}:N{fila}")
+    _cell(
+        ws, fila, 1,
+        "Paso 1 — Tipo de mercado",
+        bold=True, bg="1565C0", fg="FFFFFF", size=10, halign="left",
+    )
+    ws.row_dimensions[fila].height = 18
+
+    fila += 1
+    ws.merge_cells(f"A{fila}:N{fila}")
+    _cell(
+        ws, fila, 1,
+        "Datos de entrada: únicamente dos columnas de la hoja total — "
+        f"\"Primer curso {AÑO_INICIO_HISTORICO}\" (cuántos estudiantes nuevos "
+        f"entró la categoría en {AÑO_INICIO_HISTORICO}) y "
+        f"\"Primer curso {AÑO_FIN_DATOS}\" (cuántos entró en {AÑO_FIN_DATOS}). "
+        "Con esos datos, el sistema asigna una de ocho clasificaciones. "
+        f"Si la suma de estudiantes nuevos en {AÑO_INICIO_HISTORICO} supera el umbral mínimo "
+        "(30 para Especialización, 15 para Maestría), el mercado entra en una de cuatro bandas "
+        "de tamaño según su volumen inicial: NICHO (30–99 est.), EMERGENTE (100–399), "
+        "ESTABLECIDO (400–1.499) o CONSOLIDADO (≥ 1.500). "
+        "Cada banda usa AAGR = promedio de 5 variaciones anuales, pero compite en el scoring "
+        "solo contra mercados de tamaño similar. "
+        f"Si ese total es mayor que cero pero menor que el umbral, se clasifica como "
+        "BASE_PEQUEÑA porque la base es demasiado pequeña para que el promedio anual sea "
+        "confiable. "
+        f"Si no había estudiantes en {AÑO_INICIO_HISTORICO} pero sí los hay en "
+        f"{AÑO_FIN_DATOS}, es CATEGORÍA_NUEVA. "
+        f"Si los había en {AÑO_INICIO_HISTORICO} pero ya no los hay en {AÑO_FIN_DATOS}, "
+        "es EXTINTA. "
+        "Si no hay estudiantes en ninguno de los dos años, es SIN_ACTIVIDAD.  "
+        "— ¿Por qué 30 y 15? Estos umbrales se calcularon a partir de los datos reales "
+        "del mercado colombiano de posgrado. Se tomó la distribución de la suma de "
+        f"estudiantes nuevos en {AÑO_INICIO_HISTORICO} de todas las categorías activas "
+        "(excluyendo las que ya tenían cero estudiantes en ese año) y se calculó el "
+        "percentil 10 de esa distribución: el valor por debajo del cual está el 10% "
+        "de las categorías con menor demanda histórica. "
+        "Para las Especializaciones ese percentil 10 fue 13 estudiantes; "
+        "para las Maestrías fue 12. "
+        "El umbral se fijó ligeramente por encima de ese percentil (30 para ESP, 15 para MAE) "
+        "de modo que aproximadamente el 70% de las categorías con alguna historia "
+        "entren en una de las cuatro bandas (NICHO / EMERGENTE / ESTABLECIDO / CONSOLIDADO). "
+        "El 30% restante son mercados tan pequeños que una variación de 2 o 3 estudiantes "
+        "genera porcentajes anuales de hasta el 100%, lo que haría el AAGR engañoso; "
+        "para esos casos se usa el CAGR, que es más estable. "
+        "Los umbrales son diferentes por nivel porque las Maestrías tienen estructuralmente "
+        "menos programas y menos estudiantes nuevos por categoría que las Especializaciones, "
+        "y usar el mismo umbral de 30 para ambas penalizaría injustamente a mercados de "
+        "maestría que son perfectamente normales para su universo.",
+        bg="EBF5FB", fg="212121", size=9, halign="left", wrap=True,
+    )
+    ws.row_dimensions[fila].height = 130
+
+    # ── Paso 2: AAGR Robusto ─────────────────────────────────────────────────
+    fila += 1
+    ws.merge_cells(f"A{fila}:N{fila}")
+    _cell(
+        ws, fila, 1,
+        "Paso 2 — AAGR Robusto (tasa de crecimiento anual promedio)",
+        bold=True, bg="00695C", fg="FFFFFF", size=10, halign="left",
+    )
+    ws.row_dimensions[fila].height = 18
+
+    fila += 1
+    ws.merge_cells(f"A{fila}:N{fila}")
+    _cell(
+        ws, fila, 1,
+        "Datos de entrada: el Tipo de mercado del paso anterior más las columnas "
+        f"\"Primer curso\" de todos los años del período "
+        f"({AÑO_INICIO_HISTORICO} a {AÑO_FIN_DATOS}). "
+        "El resultado depende completamente del tipo asignado en el paso 1:  "
+        "— Si es NICHO, EMERGENTE, ESTABLECIDO o CONSOLIDADO: calcula la variación porcentual "
+        f"({AÑO_INICIO_HISTORICO}→{AÑO_INICIO_HISTORICO+1}, luego {AÑO_INICIO_HISTORICO+1}→"
+        f"{AÑO_INICIO_HISTORICO+2}, y así hasta {AÑO_FIN_DATOS-1}→{AÑO_FIN_DATOS}) "
+        "y promedia las cinco variaciones. Ese promedio es el AAGR Robusto.  "
+        "— Si es BASE_PEQUEÑA: en lugar de promediar variaciones anuales (que serían "
+        "muy volátiles con pocos estudiantes), calcula el CAGR: divide los estudiantes "
+        f"nuevos de {AÑO_FIN_DATOS} entre los de {AÑO_INICIO_HISTORICO}, eleva el "
+        "resultado a la potencia 1/5 y le resta 1. Esto da la tasa de crecimiento "
+        "constante que habría llevado del inicio al final, ignorando las fluctuaciones "
+        "intermedias.  "
+        "— Si es EXTINTA: el valor es −100% fijo, lo que produce el score mínimo.  "
+        "— Si es CATEGORÍA_NUEVA o SIN_ACTIVIDAD: el valor queda sin dato y el score "
+        "de AAGR es 1. "
+        "Este valor (expresado como decimal: 0.044 equivale a 4.4%) entra al scoring "
+        "con un peso del 20% sobre la calificación final.",
+        bg="E0F2F1", fg="212121", size=9, halign="left", wrap=True,
+    )
+    ws.row_dimensions[fila].height = 96
+
+    # ── Paso 3: Señal de tendencia ────────────────────────────────────────────
+    fila += 1
+    ws.merge_cells(f"A{fila}:N{fila}")
+    _cell(
+        ws, fila, 1,
+        "Paso 3 — Señal de tendencia (qué está pasando ahora mismo)",
+        bold=True, bg="E65100", fg="FFFFFF", size=10, halign="left",
+    )
+    ws.row_dimensions[fila].height = 18
+
+    fila += 1
+    ws.merge_cells(f"A{fila}:N{fila}")
+    _cell(
+        ws, fila, 1,
+        "Datos de entrada: las columnas "
+        f"\"Primer curso {AÑO_FIN_DATOS-1}\" y \"Primer curso {AÑO_FIN_DATOS}\" "
+        "(para la variación del último año) más el AAGR Robusto calculado en el paso 2 "
+        "(para comparar el último año contra la tendencia histórica). "
+        "Este indicador no afecta la calificación final — es solo informativo. "
+        "El sistema calcula dos medidas: "
+        f"(1) la variación del último año: cuánto cambió el número de estudiantes nuevos "
+        f"de {AÑO_FIN_DATOS-1} a {AÑO_FIN_DATOS}; "
+        "(2) el diferencial: la variación del último año menos el AAGR Robusto histórico. "
+        "Un diferencial positivo significa que el último año fue mejor que el promedio "
+        "histórico; negativo significa que fue peor. "
+        "La señal combina ambas medidas: si el último año creció más de 10% y el "
+        "diferencial es alto, se clasifica como ACELERANDO. "
+        "Si el último año creció pero el diferencial es muy negativo (el mercado creció "
+        "mucho menos que su historia reciente), se clasifica como DESACELERANDO, aunque "
+        "el último año haya sido positivo. "
+        "Esto evita confundir una recuperación puntual con un mercado que realmente está "
+        "tomando impulso.",
+        bg="FFF3E0", fg="212121", size=9, halign="left", wrap=True,
+    )
+    ws.row_dimensions[fila].height = 96
 
     ws.column_dimensions["A"].width = 28
     ws.column_dimensions["B"].width = 14
@@ -3838,6 +4087,69 @@ def _escribir_hoja_delta(
         log_warning(f"[Delta] No se pudo generar hoja de cambios: {e}")
 
 
+def _completar_categorias_faltantes(
+    ag_nivel: pd.DataFrame,
+    categorias_universo: pd.Series,
+    nivel_mayorit_label: str,
+) -> pd.DataFrame:
+    """
+    Garantiza que `ag_nivel` tenga una fila para cada categoría en
+    `categorias_universo` (normalmente las 288 de `total`). Las categorías
+    sin programas de ese nivel se agregan con 0 en todas las columnas
+    numéricas, "Sin programas" en TIPO_CRECIMIENTO, "SIN_DATO" en
+    SEÑAL_TENDENCIA, y el nivel se deja en blanco (no aplica).
+
+    No modifica las filas existentes — solo añade las que faltan.
+    """
+    if ag_nivel is None:
+        ag_nivel = pd.DataFrame(columns=["CATEGORIA_FINAL"])
+
+    cats_presentes = set(
+        ag_nivel.get("CATEGORIA_FINAL", pd.Series(dtype=str))
+        .astype(str).str.strip().str.upper()
+    )
+    cats_todas = (
+        categorias_universo.astype(str).str.strip().str.upper().dropna().unique()
+    )
+    cats_faltantes = [c for c in cats_todas if c not in cats_presentes]
+
+    if not cats_faltantes:
+        return ag_nivel
+
+    # Mapear de vuelta al nombre original (con mayúsculas/tildes tal cual
+    # aparece en `total`) usando categorias_universo sin normalizar.
+    _map_original = {
+        str(v).strip().upper(): str(v).strip()
+        for v in categorias_universo.dropna().unique()
+    }
+
+    filas_nuevas = []
+    for cat_norm in cats_faltantes:
+        fila = {col: 0 for col in ag_nivel.columns}
+        fila["CATEGORIA_FINAL"] = _map_original.get(cat_norm, cat_norm)
+        if "CAT_ID" in fila:
+            fila["CAT_ID"] = None
+        if "FUENTE_CATEGORIA" in fila:
+            fila["FUENTE_CATEGORIA"] = "SIN_PROGRAMAS"
+        if "NIVEL_MAYORIT" in fila:
+            fila["NIVEL_MAYORIT"] = nivel_mayorit_label
+        if "TIPO_CRECIMIENTO" in fila:
+            fila["TIPO_CRECIMIENTO"] = "SIN_PROGRAMAS"
+        if "SEÑAL_TENDENCIA" in fila:
+            fila["SEÑAL_TENDENCIA"] = "SIN_DATO"
+        if "AAGR_ROBUSTO" in fila:
+            fila["AAGR_ROBUSTO"] = np.nan
+        if "AAGR_OUTLIER" in fila:
+            fila["AAGR_OUTLIER"] = ""
+        # Scores en 0 (no en 1) para que se distingan visualmente de un
+        # score real bajo — 0 no es un score válido del sistema (1-5),
+        # así que es inequívoco que "no aplica" en vez de "es malo".
+        filas_nuevas.append(fila)
+
+    df_faltantes = pd.DataFrame(filas_nuevas, columns=ag_nivel.columns)
+    return pd.concat([ag_nivel, df_faltantes], ignore_index=True)
+
+
 def run_fase5(
     agregado_df: pd.DataFrame | None,
     ag_pre: pd.DataFrame | None = None,
@@ -3939,7 +4251,7 @@ def run_fase5(
                     if col_name in sabana_final.columns:
                         idx = list(sabana_final.columns).index(col_name) + 1
                         ws_detalle.column_dimensions[get_column_letter(idx)].width = width
-                _aplicar_formato_total(wb["total"], col_order)
+                _aplicar_formato_total(wb["total"], col_order, agregar_alerta_tendencia=True)
 
                 # ── Hoja total_pregrado (144 categorías, solo UNIVERSITARIO) ──
                 # Sin merge incremental: no hay baseline anterior para esta hoja
@@ -3947,10 +4259,22 @@ def run_fase5(
                 if ag_pre is not None and len(ag_pre) > 0:
                     try:
                         ag_pre_export = ag_pre.copy()
+                        ag_pre_export = _completar_categorias_faltantes(
+                            ag_pre_export,
+                            total_final["CATEGORIA_FINAL"],
+                            nivel_mayorit_label="UNIVERSITARIO (sin programas)",
+                        )
+                        log_info(
+                            f"[Fase 5] total_pregrado completado a "
+                            f"{len(ag_pre_export)} categorías (rellenando con 0 las que "
+                            f"no tienen programas de pregrado)."
+                        )
                         col_order_pre = _escribir_hoja_total(
                             writer, ag_pre_export, sheet_name="total_pregrado"
                         )
                         _aplicar_formato_total(wb["total_pregrado"], col_order_pre)
+                        # Hoja visible — se está auditando el scoring de pregrado
+                        # (ver TIPO_CRECIMIENTO no usado en _score_aagr_nivel, scoring.py).
                         # Reposicionar para que aparezca justo después de `total`
                         try:
                             _ws_pre = wb["total_pregrado"]
@@ -3964,7 +4288,7 @@ def run_fase5(
                             )
                         log_info(
                             f"✓ Hoja 'total_pregrado' escrita: "
-                            f"{len(ag_pre)} categorías (solo programas UNIVERSITARIO)."
+                            f"{len(ag_pre_export)} categorías (288 filas, incl. sin programas PRE)."
                         )
                     except Exception as _e_pre:
                         log_warning(
@@ -3975,6 +4299,115 @@ def run_fase5(
                         "[Fase 5] ag_pre vacío o no provisto — hoja total_pregrado omitida."
                     )
 
+                # ── Hojas por nivel: total_esp y total_mae ──────────────────────────
+                # Patrón idéntico a run_segmentos_regionales: filtrar la sábana por
+                # NIVEL_DE_FORMACIÓN y re-ejecutar run_fase4_desde_sabana() completa.
+                # Cada categoría tiene métricas calculadas SOLO desde programas del
+                # nivel correspondiente. Las 199 categorías con programas ESP y MAE
+                # aparecen en AMBAS hojas con números distintos — eso es correcto.
+                _col_nivel_hoja = "NIVEL_DE_FORMACIÓN"
+                if _col_nivel_hoja in sabana.columns:
+                    # ESP: todos los niveles posgrado excepto MAESTRÍA
+                    _NIVELES_ESP_ONLY: frozenset[str] = NIVELES_POSGRADO - {"MAESTRÍA"}
+                    _NIVELES_MAE_ONLY: frozenset[str] = frozenset({"MAESTRÍA"})
+
+                    _nivel_config = [
+                        (_NIVELES_ESP_ONLY, "total_esp", "Especialización", "1565C0"),
+                        (_NIVELES_MAE_ONLY, "total_mae", "Maestría",        "00695C"),
+                    ]
+
+                    for _niv_set, _sh_name, _niv_label, _tab_color in _nivel_config:
+                        try:
+                            # 1. Filtrar sábana al nivel
+                            _sabana_niv = sabana[
+                                sabana[_col_nivel_hoja].isin(_niv_set)
+                            ].copy()
+
+                            if len(_sabana_niv) == 0:
+                                log_info(
+                                    f"[Fase 5] Sin programas '{_niv_label}' en sábana — "
+                                    f"hoja '{_sh_name}' omitida."
+                                )
+                                continue
+
+                            # 2. Re-ejecutar Fase 4 completa sobre el subconjunto.
+                            # modo_local=True: S.PC y S.Participación usan quintiles
+                            # del subconjunto propio (comparación dentro del nivel).
+                            # niveles=_niv_set: segunda validación interna en run_fase4.
+                            log_info(
+                                f"[Fase 5] '{_sh_name}': {len(_sabana_niv):,} programas "
+                                f"{_niv_label} → recalculando Fase 4..."
+                            )
+                            _ag_niv = run_fase4_desde_sabana(
+                                _sabana_niv,
+                                modo_local=True,
+                                niveles=_niv_set,
+                                universo="posgrado",
+                            )
+
+                            if _ag_niv is None or len(_ag_niv) == 0:
+                                log_warning(
+                                    f"[Fase 5] Fase 4 para '{_sh_name}' sin resultados — omitida."
+                                )
+                                continue
+
+                            _ag_niv = _completar_categorias_faltantes(
+                                _ag_niv,
+                                total_final["CATEGORIA_FINAL"],
+                                nivel_mayorit_label=f"{_niv_label} (sin programas)",
+                            )
+
+                            log_info(
+                                f"[Fase 5] '{_sh_name}': {len(_ag_niv)} categorías "
+                                f"(Verde≥4: {int((_ag_niv['calificacion_final'] >= 4.0).sum())}, "
+                                f"Rojo<3: {int((_ag_niv['calificacion_final'] < 3.0).sum())})"
+                            )
+
+                            # 3. Escribir con el mismo formato que "total"
+                            _col_order_niv = _escribir_hoja_total(
+                                writer, _ag_niv, sheet_name=_sh_name
+                            )
+                            _ws_niv = wb[_sh_name]
+                            _aplicar_formato_total(_ws_niv, _col_order_niv)
+
+                            # 4. Color de pestaña para distinción visual inmediata
+                            try:
+                                _ws_niv.sheet_properties.tabColor = _tab_color
+                            except Exception:
+                                pass
+
+                            # 5. Reposicionar: total_esp → después de total
+                            #                 total_mae → después de total_esp
+                            try:
+                                _wb_sheets = wb._sheets
+                                _wb_sheets.remove(_ws_niv)
+                                _ancla = "total_esp" if _sh_name == "total_mae" else "total"
+                                if _ancla in wb.sheetnames:
+                                    _idx_ancla = _wb_sheets.index(wb[_ancla])
+                                    _wb_sheets.insert(_idx_ancla + 1, _ws_niv)
+                                else:
+                                    _wb_sheets.append(_ws_niv)
+                            except Exception as _e_pos:
+                                log_warning(
+                                    f"[Fase 5] No se pudo reposicionar '{_sh_name}': {_e_pos}"
+                                )
+
+                            log_info(
+                                f"[Fase 5] ✓ Hoja '{_sh_name}' exportada y formateada."
+                            )
+
+                        except Exception as _e_niv:
+                            log_warning(
+                                f"[Fase 5] Hoja '{_sh_name}' omitida: {_e_niv}. "
+                                "La hoja total no se ve afectada."
+                            )
+                            continue
+                else:
+                    log_info(
+                        f"[Fase 5] Columna '{_col_nivel_hoja}' no encontrada en sábana — "
+                        "hojas total_esp y total_mae omitidas."
+                    )
+
                 try:
                     _escribir_hoja_delta(writer, total_final)
                 except Exception as e:
@@ -3982,7 +4415,9 @@ def run_fase5(
 
                 # ── Gap de Oportunidad: Océanos Azules (opcional, no bloqueante) ──
                 try:
-                    df_gap = run_gap_oportunidades(total_final, log_info)
+                    df_gap = run_gap_oportunidades(
+                        total_final, log_info, sabana=sabana_final
+                    )
                     if df_gap is not None and len(df_gap) > 0:
                         df_gap.to_excel(
                             writer,
@@ -4086,13 +4521,27 @@ def run_fase5(
     log_etapa_completada("Fase 5: Exportación formateada", str(out_path))
 
 
-def run_gap_oportunidades(ag: pd.DataFrame, log) -> pd.DataFrame:
+def run_gap_oportunidades(
+    ag: pd.DataFrame,
+    log,
+    sabana: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """
     Gap de Oportunidad — Océanos Azules.
 
     Identifica categorías de mercado atractivas donde EAFIT no tiene presencia.
-    Criterio de inclusión: calificacion_final >= 3.0 y categoría no cubierta
-    por MAPEO_PROGRAMAS_EAFIT.
+    Criterio de inclusión: calificacion_final >= 3.0 y categoría sin programa
+    EAFIT activo, verificado dinámicamente contra `sabana` (no contra una lista
+    fija). Una categoría tiene presencia EAFIT si al menos un programa propio
+    cumple NOMBRE_INSTITUCIÓN conteniendo "EAFIT" Y es_activo == True.
+
+    No usar ES_REFERENTE / PROGRAMA_EAFIT_CODIGO para esto: esas columnas viven
+    en la fila del programa de la COMPETENCIA e indican similitud con un
+    programa EAFIT para benchmarking, no presencia real de EAFIT en el mercado.
+
+    Si `sabana` no se provee, se usa MAPEO_PROGRAMAS_EAFIT como fallback
+    (comportamiento legacy) y se registra una advertencia, ya que ese diccionario
+    puede estar desactualizado respecto a los programas EAFIT reales.
 
     Columnas de salida (en orden de lectura para el analista):
     IDENTIFICACIÓN → DECISIÓN → MERCADO → TENDENCIA → RETORNO → OFERTA → COSTO
@@ -4111,7 +4560,51 @@ def run_gap_oportunidades(ag: pd.DataFrame, log) -> pd.DataFrame:
         log("⚠ Gap: columna calificacion_final no encontrada. Se omite hoja.")
         return pd.DataFrame()
 
-    cats_eafit = {str(v).strip().upper() for v in MAPEO_PROGRAMAS_EAFIT.values() if v}
+    # Determinar categorías con presencia EAFIT dinámicamente desde la sábana real,
+    # en lugar de la lista fija MAPEO_PROGRAMAS_EAFIT (quedaba desactualizada:
+    # auditoría encontró 30 de 118 categorías "sin EAFIT" que en realidad sí
+    # tenían un programa EAFIT activo).
+    #
+    # IMPORTANTE: la señal correcta es NOMBRE_INSTITUCIÓN, NO ES_REFERENTE.
+    # ES_REFERENTE vive en la fila del programa de la COMPETENCIA e indica
+    # similitud con un programa EAFIT para benchmarking — no presencia real
+    # de EAFIT. Usar ES_REFERENTE como señal de presencia produce falsos
+    # positivos (confirmado: el caso ACTUARIA marcaba presencia EAFIT por un
+    # programa de otra universidad similar a "finanzas", sin que EAFIT tenga
+    # ningún programa real en esa categoría).
+    if sabana is not None and len(sabana) > 0 and "CATEGORIA_FINAL" in sabana.columns:
+        _sab = sabana.copy()
+
+        _es_eafit = (
+            _sab["NOMBRE_INSTITUCIÓN"].astype(str).str.upper().str.contains(
+                "EAFIT", na=False
+            )
+            if "NOMBRE_INSTITUCIÓN" in _sab.columns
+            else pd.Series(False, index=_sab.index)
+        )
+        _activo = (
+            _sab["es_activo"].astype(bool)
+            if "es_activo" in _sab.columns
+            else pd.Series(True, index=_sab.index)  # si no existe, no filtrar por esto
+        )
+
+        _mask_eafit_real = _es_eafit & _activo
+        cats_eafit = set(
+            _sab.loc[_mask_eafit_real, "CATEGORIA_FINAL"]
+            .astype(str).str.strip().str.upper()
+        )
+        log(
+            f"[Gap] Presencia EAFIT verificada dinámicamente desde sábana "
+            f"(NOMBRE_INSTITUCIÓN, no ES_REFERENTE): "
+            f"{len(cats_eafit)} categorías con programa propio activo."
+        )
+    else:
+        cats_eafit = {str(v).strip().upper() for v in MAPEO_PROGRAMAS_EAFIT.values() if v}
+        log(
+            "[Gap] ⚠ Sábana no provista — usando MAPEO_PROGRAMAS_EAFIT como fallback. "
+            "Esta lista puede estar desactualizada; verificar resultados con cautela."
+        )
+
     ag_work = ag.copy()
     ag_work["_cat_norm"] = ag_work["CATEGORIA_FINAL"].astype(str).str.strip().str.upper()
     ag_work[col_cal] = pd.to_numeric(ag_work[col_cal], errors="coerce")
@@ -4724,7 +5217,11 @@ def _escribir_hoja_total(
     return col_order
 
 
-def _aplicar_formato_total(ws, col_order: list[str]) -> None:
+def _aplicar_formato_total(
+    ws,
+    col_order: list[str],
+    agregar_alerta_tendencia: bool = False,
+) -> None:
     """Aplica formatos de número y color de fila según calificacion_final. col_order es el orden de columnas en la hoja."""
     from openpyxl.styles import Alignment, PatternFill
     pct_fmt = "0.0%"
@@ -4789,7 +5286,9 @@ def _aplicar_formato_total(ws, col_order: list[str]) -> None:
             calif_f = float(calif) if calif is not None else 0.0
         except (TypeError, ValueError):
             calif_f = 0.0
-        if calif_f >= 4.0:
+        if calif_f == 0.0:
+            fill = PatternFill("solid", fgColor="EEEEEE")  # gris — categoría sin programas
+        elif calif_f >= 4.0:
             fill = PatternFill("solid", fgColor="EBF9EE")  # verde muy suave
         elif calif_f >= 3.0:
             fill = PatternFill("solid", fgColor="FFFDE7")  # amarillo muy suave
@@ -4806,7 +5305,9 @@ def _aplicar_formato_total(ws, col_order: list[str]) -> None:
                     sv = int(float(cell.value)) if cell.value is not None else 0
                 except (TypeError, ValueError):
                     sv = 0
-                if sv in SCORE_FILLS:
+                if sv == 0:
+                    cell.fill = PatternFill("solid", fgColor="EEEEEE")
+                elif sv in SCORE_FILLS:
                     cell.fill = SCORE_FILLS[sv]
                     from openpyxl.styles import Font as _Font
                     if sv == 5:
@@ -4873,6 +5374,63 @@ def _aplicar_formato_total(ws, col_order: list[str]) -> None:
                     size=10,
                 )
                 cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Fix 28: columna visual de alerta cuando calificación alta + señal reciente negativa
+    # (solo hoja `total` de Estudio_Mercado_Colombia — no altera calificacion_final).
+    if (
+        agregar_alerta_tendencia
+        and ws.title == "total"
+        and col_calif is not None
+        and "SEÑAL_TENDENCIA" in col_order
+    ):
+        from openpyxl.styles import Border, Font as _FontAlert, Side
+        from openpyxl.utils import get_column_letter
+
+        col_senal = col_order.index("SEÑAL_TENDENCIA")
+        _max_row_datos = ws.max_row
+        nueva_col_idx = ws.max_column + 1
+        nueva_col_letra = get_column_letter(nueva_col_idx)
+
+        cell_h1 = ws.cell(row=1, column=nueva_col_idx)
+        cell_h1.fill = PatternFill("solid", fgColor="455A64")
+        cell_h1.font = _FontAlert(bold=True, color="FFFFFF", name="Arial", size=9)
+        cell_h1.alignment = Alignment(horizontal="center", vertical="center")
+        cell_h2 = ws.cell(row=2, column=nueva_col_idx, value="⚠ Alerta tendencia")
+        cell_h2.font = _FontAlert(bold=True, name="Arial", size=9)
+        cell_h2.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        _ALERTA_SENALES = {
+            SENAL_LABELS["EN_DECLIVE"],
+            SENAL_LABELS["DESACELERANDO"],
+            SENAL_LABELS["CONTRACCION"],
+        }
+        _borde_alerta = Border(
+            left=Side(style="thick", color="FF7043"),
+            right=Side(style="thick", color="FF7043"),
+            top=Side(style="thick", color="FF7043"),
+            bottom=Side(style="thick", color="FF7043"),
+        )
+        n_alertas = 0
+        for r in range(3, _max_row_datos + 1):
+            calif = ws.cell(row=r, column=col_calif + 1).value
+            try:
+                calif_f = float(calif) if calif is not None else 0.0
+            except (TypeError, ValueError):
+                calif_f = 0.0
+            senal_txt = ws.cell(row=r, column=col_senal + 1).value
+            senal_str = str(senal_txt).strip() if senal_txt is not None else ""
+            if calif_f >= 4.0 and senal_str in _ALERTA_SENALES:
+                cell_alerta = ws.cell(row=r, column=nueva_col_idx, value="⚠")
+                cell_alerta.alignment = Alignment(horizontal="center", vertical="center")
+                ws.cell(row=r, column=col_calif + 1).border = _borde_alerta
+                cell_alerta.border = _borde_alerta
+                n_alertas += 1
+
+        ws.column_dimensions[nueva_col_letra].width = 16
+        log_info(
+            f"[Fix 28] Alerta tendencia: {n_alertas} filas marcadas en hoja total "
+            f"(calif≥4.0 + EN_DECLIVE/DESACELERANDO/CONTRACCION)."
+        )
 
     _ANCHOS_TOTAL = {
         "CAT_ID": 8,
